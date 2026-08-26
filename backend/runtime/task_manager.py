@@ -31,10 +31,11 @@ class TaskManager:
         kind: str,
         sink: EventSink,
         task_id: Optional[str] = None,
+        agent_id: Optional[str] = None,
     ) -> Task:
         """Create, register, and start a new task. Never blocks the caller."""
         task = Task(body=body, session_id=session_id, kind=kind, sink=sink,
-                    task_id=task_id, recorder=self._recorder)
+                    task_id=task_id, recorder=self._recorder, agent_id=agent_id)
         self._tasks[task.id] = task
         # The row is scheduled before start(), so the insert reaches the
         # connection ahead of the first state update. Every write is an

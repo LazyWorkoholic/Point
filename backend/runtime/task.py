@@ -82,10 +82,15 @@ class Task:
         sink: EventSink,
         task_id: Optional[str] = None,
         recorder: Optional[TaskRecorder] = None,
+        agent_id: Optional[str] = None,
     ) -> None:
         self.id: str = task_id or str(uuid.uuid4())
         self.session_id = session_id
         self.kind = kind  # e.g. "chat", "research", "coding" — opaque to Runtime
+        # Which AgentConfig produced this task (B9). None for anything
+        # created before B9's AgentExecutor existed as a call site --
+        # Task itself has no opinion on what a missing agent_id means.
+        self.agent_id = agent_id
         self.state: TaskState = TaskState.PENDING
         self.created_at: float = time.time()
         self.started_at: Optional[float] = None

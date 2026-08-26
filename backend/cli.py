@@ -56,7 +56,7 @@ from logging_setup import configure_logging, get_logger
 from managers import context
 from providers.mock import provider as mock_provider
 from providers.models import ProviderConfig, ProviderHealthStatus
-from runtime.errors import ContextOverflowError
+from runtime.errors import AgentNotFoundError, BuiltinAgentImmutableError, ContextOverflowError
 from runtime.events import ENVELOPE_VERSION
 from runtime.runtime import Runtime
 
@@ -201,15 +201,28 @@ async def cmd_session_new(runtime: Runtime, args: argparse.Namespace) -> int:
     elif not model:
         model = provider
 
+    # --agent is stored in settings, exactly like the v0 stm_window/
+    # system_prompt overrides B8 read from there before B9 existed --
+    # no schema change needed for "which agent does this session use".
+    # AgentRegistry.resolve_for_session() is what reads it back.
+    if args.agent:
+        try:
+            await runtime.agents.get(args.agent)
+        except AgentNotFoundError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return EXIT_FAILED
+
     envelopes = await call(
         runtime, "CreateSession", verbose=args.verbose,
         title=args.title, provider=provider, model=model,
+        settings={"agent_id": args.agent} if args.agent else None,
     )
     _print_errors(envelopes)
     if _failed(envelopes) or not envelopes:
         return EXIT_FAILED
     session = envelopes[-1]["payload"]["session"]
-    print(f"{session['id']}  {session['title']}  [{session['provider']}/{session['model']}]")
+    agent_note = f"  agent={args.agent}" if args.agent else ""
+    print(f"{session['id']}  {session['title']}  [{session['provider']}/{session['model']}]{agent_note}")
     return EXIT_OK
 
 
@@ -338,9 +351,20 @@ async def cmd_context_report(runtime: Runtime, args: argparse.Namespace) -> int:
             print("(no sessions)", file=sys.stderr)
             return EXIT_FAILED
         session_id = session.id
+    else:
+        session = await runtime.memory.session(session_id)
+        if session is None:
+            print(f"error: No session with id {session_id!r}", file=sys.stderr)
+            return EXIT_FAILED
+
+    # B9: the report is shaped by the session's own agent (its
+    # stm_window, system_prompt, default_attach_mode), not a fixed
+    # policy -- resolve_for_session() is the same lookup SendMessage
+    # uses.
+    agent = await runtime.agents.resolve_for_session(session)
 
     try:
-        report = await context.report(session_id, runtime.memory)
+        report = await context.report(session_id, runtime.memory, policy=agent.to_context_policy())
     except ContextOverflowError as exc:
         # Reachable without sending anything: a system prompt or an
         # attachment can exceed the budget on its own.
@@ -373,6 +397,65 @@ async def cmd_tasks_list(runtime: Runtime, args: argparse.Namespace) -> int:
             f"{_ts(row['finished_at'])}"
         )
     print(f"\n{len(rows)} task(s)")
+    return EXIT_OK
+
+
+# ---------------------------------------------------------------------------
+# Agent commands (B9)
+# ---------------------------------------------------------------------------
+
+async def cmd_agents_list(runtime: Runtime, args: argparse.Namespace) -> int:
+    configs = await runtime.agents.list()
+    if not configs:
+        print("(no agents)")
+        return EXIT_OK
+    for c in configs:
+        kind = "builtin" if c.builtin else "user"
+        tools = ",".join(c.tools) or "-"
+        print(
+            f"{c.id:<18}{c.name:<20}{kind:<8}tools={tools:<26}"
+            f"reads(session={int(c.reads_session)},project={int(c.reads_project)},"
+            f"global={int(c.reads_global)})  writes_proposals={c.writes_proposals}"
+        )
+    print(f"\n{len(configs)} agent(s)")
+    return EXIT_OK
+
+
+async def cmd_agents_show(runtime: Runtime, args: argparse.Namespace) -> int:
+    try:
+        c = await runtime.agents.get(args.agent_id)
+    except AgentNotFoundError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return EXIT_FAILED
+    print(f"id                   {c.id}")
+    print(f"name                 {c.name}")
+    print(f"description          {c.description}")
+    print(f"builtin              {c.builtin}")
+    print(f"provider/model       {c.provider or '-'}/{c.model or '-'}  (effort={c.effort or '-'})")
+    print(f"system_prompt        {c.system_prompt}")
+    print(f"tools                {list(c.tools)}")
+    print(f"reads_session        {c.reads_session}")
+    print(f"reads_project        {c.reads_project}")
+    print(f"reads_global         {c.reads_global}")
+    print(f"writes_proposals     {c.writes_proposals}")
+    print(f"stm_window           {c.stm_window}")
+    print(f"max_steps            {c.max_steps}")
+    print(f"max_tool_calls       {c.max_tool_calls}")
+    print(f"timeout_s            {c.timeout_s}")
+    print(f"default_attach_mode  {c.default_attach_mode}")
+    return EXIT_OK
+
+
+async def cmd_agents_set_model(runtime: Runtime, args: argparse.Namespace) -> int:
+    """Every agent in v1 is builtin, so this always refuses -- that
+    refusal, coming from the repository layer rather than a special
+    case here, is B9's Done-when #2."""
+    try:
+        await runtime.agents.set_model(args.agent_id, args.model)
+    except (AgentNotFoundError, BuiltinAgentImmutableError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return EXIT_FAILED
+    print(f"{args.agent_id}: model set to {args.model}")
     return EXIT_OK
 
 
@@ -699,6 +782,7 @@ def build_parser() -> argparse.ArgumentParser:
     new.add_argument("title", nargs="?", default="New Session")
     new.add_argument("--provider", default=None, help="default: ollama if reachable, else echo")
     new.add_argument("--model", default=None)
+    new.add_argument("--agent", default=None, help="agent id (default: general)")
     listing = session.add_parser("list", help="list sessions", parents=[common])
     listing.add_argument("--all", action="store_true", help="include archived")
 
@@ -726,6 +810,18 @@ def build_parser() -> argparse.ArgumentParser:
     )
     tasks_list = tasks.add_parser("list", help="list recorded tasks", parents=[common])
     tasks_list.add_argument("--limit", type=int, default=20)
+
+    agents_sub = sub.add_parser("agents", help="agent operations", parents=[common]).add_subparsers(
+        dest="agents_command", required=True
+    )
+    agents_sub.add_parser("list", help="list built-in and user agents", parents=[common])
+    agents_show = agents_sub.add_parser("show", help="show one agent's full config", parents=[common])
+    agents_show.add_argument("agent_id")
+    agents_set_model = agents_sub.add_parser(
+        "set-model", help="set an agent's model (refused for builtins)", parents=[common]
+    )
+    agents_set_model.add_argument("agent_id")
+    agents_set_model.add_argument("model")
 
     # project: --path resolves fresh on every call (default cwd) -- there
     # is no "current project" remembered between CLI processes.
@@ -788,6 +884,9 @@ def main(argv: Optional[list[str]] = None) -> int:
         ("send", None): cmd_send,
         ("context", "report"): cmd_context_report,
         ("tasks", "list"): cmd_tasks_list,
+        ("agents", "list"): cmd_agents_list,
+        ("agents", "show"): cmd_agents_show,
+        ("agents", "set-model"): cmd_agents_set_model,
         ("project", "init"): cmd_project_init,
         ("project", "resolve"): cmd_project_resolve,
         ("project", "list-files"): cmd_project_list_files,

@@ -18,6 +18,3 @@ wheels/
 backend/runtime.db
 *.db-wal
 *.db-shm
-
-design/
-CLAUDE.md

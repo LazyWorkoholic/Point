@@ -1,0 +1,127 @@
+# F16 — Polish
+
+**Phase:** P2 · **Batchable:** no · **Depends on:** all
+
+## Purpose
+
+The difference between "it works" and "it feels finished". Everything here is
+small; together they are what a viewer actually notices.
+
+## Build
+
+### States audit
+Walk **every** list, pane and popup and confirm three states exist:
+```
+empty     a sentence naming what would fill it, and how
+loading   a dim indicator, never a frozen blank
+error     the reason in words, plus the action that fixes it
+```
+Cheap now, ugly to retrofit. Track it as a literal checklist, one line per
+component, in the completed doc.
+
+### Toasts
+One component: `✓ Research done — F1 to view`. Auto-dismiss ~4s, stack at most 3,
+never steal focus, never cover the input. Sources: task completion while
+elsewhere, memory proposals, save failures, lock take-overs.
+
+### Help and discoverability
+- Help screen generated from the action registry (F7), grouped by category.
+- Leader-pending hint bar showing available keys, on a short delay so fast users
+  never see it.
+- First-launch hint line in an empty chat naming exactly two things:
+  `type a message` and `^P palette`. **Not a tour.**
+
+### Responsive audit
+Test every screen at:
+```
+200×50 · 120×40 · 100×30 · 90×26 · 80×24 · 70×20 · 60×16 · 50×12 · 45×10
+```
+Confirm: no overflow, no truncated borders, overlays refuse below their MinSize
+with real numbers, header degrades to the watermark, the right pane hides and the
+left column reflows with no gap.
+
+**Expect to adjust the breakpoints here.** `LAYOUT.md` marks them provisional —
+separate bordered boxes plus outer margins cost more rows and columns than the
+original numbers assumed. Record the final values.
+
+### Theme QA
+Each of the four palettes, on a **dark** and a **light** Windows Terminal profile,
+in transparent mode: readable text, distinguishable running/queued/done, error and
+warning obviously different from the palette, focused vs idle borders
+distinguishable, code blocks legible. **Gold is the one to scrutinise.**
+
+### Performance pass
+```
+transcript render cache holds during streaming (only the live message re-renders)
+header animation frozen when idle, capped at 10fps
+right-pane subscriptions dropped when hidden
+syntax highlighting limited to the visible window + margin
+Go heap returns near baseline over 20 workspace load/unload cycles
+```
+Measure, then state numbers **only where measured**.
+
+### Tier 2 auto-indent — only if time
+Increase after `:` / `{`, dedent on `}` and dedent keywords, from a small
+per-language table. Parked otherwise.
+
+### Demo recording
+Record the v1 demo script — **the one in `design/WORKFLOW.md` under "What done
+looks like"**, which covers ghost text, autosave + web preview, per-workspace
+idle timers, and crash recovery — as a 60–90s capture for the README. Live demos fail; a
+recording is the highest-return artefact per minute of effort. It also forces you
+to run the script end to end, which reliably finds bugs.
+
+On Windows: Xbox Game Bar (`Win+G`) records a window to MP4, or use
+[asciinema](https://asciinema.org) via WSL if you want a text capture. MP4 is
+fine — the README can embed a GIF converted from it.
+
+### README
+What Point is, the recording, install steps, a screenshot of the context card,
+and an honest **"what it does not do"** section. That last section is a
+credibility signal, not a weakness.
+
+## Do NOT
+
+- Add features.
+- Add telemetry, i18n, or auto-update.
+- Claim performance numbers that were not measured.
+
+## Done when
+
+1. The states checklist is complete, every component ticked.
+2. Every screen renders correctly at all nine sizes.
+3. All four themes pass QA on dark and light terminal profiles.
+4. Idle Point uses ~0% CPU over 60 untouched seconds.
+5. The demo recording exists and runs the full script without a retake needed for
+   a bug.
+6. The README's "does not do" section is written and accurate.
+
+## Manual verification (PowerShell)
+
+```powershell
+cd D:\Projects\Point
+go run .\frontend\cmd\point
+```
+Resize through all nine sizes, in and out.
+**Expect:** no artefacts, no panics, correct degradation.
+
+```powershell
+# 4. idle CPU
+$p = Get-Process point
+$before = $p.CPU ; Start-Sleep -Seconds 60
+(Get-Process point).CPU - $before
+```
+**Expect:** a value very close to 0.
+**Fails if:** it climbs — the animation or a tick is still running while idle.
+
+Switch each of the four themes in Settings, on both a dark and a light Windows
+Terminal profile.
+**Expect:** all readable; error and warning obviously distinct from the palette.
+
+## Handoff
+
+State after this episode: v1 is finished — not feature-complete, **finished**.
+Everything beyond this point is in the parking lots.
+
+Record: the final breakpoint numbers, the measured idle CPU, and the full states
+checklist.

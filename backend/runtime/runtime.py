@@ -7,15 +7,16 @@ import time
 from collections import OrderedDict
 from dataclasses import replace
 from pathlib import Path
-from typing import Any, AsyncIterator, Optional, Union
+from typing import Any, Optional, Union
 
 import aiosqlite
 
+from agents.executor import AgentExecutor
+from agents.registry import AgentRegistry
 from database.connection import open_database
 from database.migrations import SCHEMA_VERSION
 from database.task_repository import TaskRepository
 from logging_setup import get_logger
-from managers import context
 from managers.context import SessionMemoryService
 from managers.project import Project
 from managers.project_manager import ProjectManager
@@ -33,13 +34,11 @@ from runtime.events import (
 from runtime.state import RuntimeState, RuntimeStatus
 from runtime.task import Task
 from runtime.task_manager import TaskManager
-from managers.message import AssistantMessage, UserMessage
+from managers.message import AssistantMessage
 from dataclasses import asdict
 from providers.bootstrap import build_registry_from_env, create_provider
 from providers.errors import ProviderError
 from providers.models import ProviderConfig
-import uuid
-from providers.models import GenerationRequest
 from streaming.adapter import StreamAdapter
 from streaming.events import StreamEventType
 from streaming.manager import StreamManager
@@ -80,6 +79,17 @@ class Runtime:
         self.streams = StreamManager()
         self.stream_adapter = StreamAdapter()
 
+        # B9: the agent registry (built-ins seeded in Runtime.create(),
+        # below -- seeding is async and __init__ cannot be) and the one
+        # execution path every SendMessage goes through. AgentExecutor
+        # gets managers, never a database handle or its own provider
+        # client -- see agents\executor.py's module docstring.
+        self.agents = AgentRegistry(db_conn)
+        self.agent_executor = AgentExecutor(
+            self.sessions, self.memory, self.tasks, self.providers,
+            self.streams, self.stream_adapter, self._resolve_provider_name,
+        )
+
         # request id -> the envelope metadata that came in with it, so
         # connection_id / trace_id / session_id can be echoed on every
         # event that request causes without any handler carrying them.
@@ -91,32 +101,6 @@ class Runtime:
     def _resolve_provider_name(self, name: str) -> str:
         return self._PROVIDER_ALIASES.get(name, name)
 
-    @staticmethod
-    def _context_policy(session: Session) -> "context.ContextPolicy":
-        """v0 policy resolution: the session's own `settings`, then the
-        module defaults.
-
-        B9's AgentConfig is what will really supply these -- it adapts to
-        ContextPolicy rather than replacing it. Until then, `settings` is
-        the only place a user can override anything at all, and honouring
-        it costs nothing. A malformed `stm_window` falls back rather than
-        failing the turn: a bad settings value should not make a session
-        unusable.
-        """
-        settings = session.settings or {}
-        try:
-            stm_window = int(settings.get("stm_window", context.DEFAULT_STM_WINDOW))
-        except (TypeError, ValueError):
-            _log.warning(
-                "Session %s has a non-integer stm_window (%r); using %d",
-                session.id, settings.get("stm_window"), context.DEFAULT_STM_WINDOW,
-            )
-            stm_window = context.DEFAULT_STM_WINDOW
-        return context.ContextPolicy(
-            system_prompt=settings.get("system_prompt") or context.DEFAULT_SYSTEM_PROMPT,
-            stm_window=stm_window,
-        )
-
     @classmethod
     async def create(cls, db_path: Union[str, Path]) -> "Runtime":
         """db_path has no default any more: the default used to be the
@@ -124,7 +108,12 @@ class Runtime:
         happened to be standing. bootstrap.resolve_db_path() is the only
         thing that decides where the database lives."""
         conn = await open_database(db_path)
-        return cls(conn)
+        runtime = cls(conn)
+        # Built-ins are seeded from code on every startup (B9) -- async,
+        # so it cannot happen in __init__. Upserted by id: a stale row
+        # from an older build is overwritten, not accumulated.
+        await runtime.agents.seed_builtins()
+        return runtime
 
     async def close(self) -> None:
         """Cancel what is running, stop the heartbeat, close the
@@ -556,107 +545,32 @@ class Runtime:
         # session twice, and only one of the two copies would be the one
         # actually sent.
         session = await self.sessions.get(session_id)
-        if not session.provider or not session.model:
-            # NULL means "inherit from global config" and B8 owns that
-            # resolution. Until it lands, refusing with a clean Error is
-            # the honest answer -- guessing a vendor here is the exact
-            # habit §14 removed from CreateSession.
-            raise InvalidEventError(
-                f"Session {session_id!r} has no provider/model set. NULL means "
-                "'inherit from global config', which B8 resolves; until then, "
-                "set one explicitly with SetSessionProvider."
-            )
+        agent = await self.agents.resolve_for_session(session)
 
-        # Context is built BEFORE the user message is persisted and before
-        # the task exists (B8). Two reasons, both about failure:
-        #
-        #   - An oversized message must fail as ContextOverflowError ->
-        #     clean Error event, not as an opaque provider 400 the user
-        #     cannot act on. Building first is what makes that possible.
-        #   - Failing before the INSERT means a message that can never be
-        #     sent never enters the history either. Persisting it first
-        #     would leave a row that poisons every subsequent turn's
-        #     build.
-        #
-        # This wiring is a placeholder. B9's AgentExecutor owns "resolve
-        # config -> build context -> create task -> stream" end to end,
-        # and is expected to supersede this exact call site.
-        built = await context.build(
-            context.ContextRequest(
-                session_id=session_id,
-                provider=self._resolve_provider_name(session.provider),
-                model=session.model,
-                user_text=text,
-            ),
-            self._context_policy(session),
-            context.default_budget_tokens(),
-            self.memory,
+        # B9: AgentExecutor owns "resolve config -> build context ->
+        # create task -> stream -> emit -> persist" end to end; this
+        # handler's job is reduced to "who, and with which agent". A
+        # session with NULL provider/model is no longer refused here
+        # unconditionally -- task override > session > agent default >
+        # global config means it may still resolve. The executor raises
+        # InvalidEventError (-> a clean Error event) only when nothing in
+        # that whole chain names a provider/model.
+        run = await self.agent_executor.run(
+            session=session,
+            text=text,
+            agent=agent,
+            make_sink=lambda message_id: self._make_stream_sink(event.request_id, session_id, message_id),
+            inline=True,
         )
-        _log.debug(
-            "Context for %s: %d/%d tokens, %d evicted",
-            session_id, built.log.used_tokens, built.log.budget_tokens, len(built.log.evicted),
-        )
-
-        user_message = UserMessage(session_id, text)
-        await self.sessions.append_message(user_message)
-
-        task_id = str(uuid.uuid4())
-        message_id = str(uuid.uuid4())
-
-        def body_factory() -> AsyncIterator[dict[str, Any]]:
-            if session.provider == "echo":
-                # Dev/test convenience: no provider/network required.
-                # Not a real registered provider on purpose.
-                return self._demo_echo_body(text)
-            return self._stream_chat_body(session, built.messages, task_id, message_id)
-
-        task = self.tasks.create_task(
-            body=body_factory,
-            session_id=session_id,
-            kind="chat",
-            sink=self._make_stream_sink(event.request_id, session_id, message_id),
-            task_id=task_id,
-        )
-        await self.sessions.set_active_task(session_id, task.id)
         self.state.active_task_count = self.tasks.active_count()
 
         await self._emit(OutgoingEvent(
             type=OutgoingEventType.TASK_STARTED,
             request_id=event.request_id,
-            task_id=task.id,
+            task_id=run.task.id,
             session_id=session_id,
-            payload={"session": session_id, "message_id": message_id},
+            payload={"session": session_id, "message_id": run.message_id},
         ))
-
-    async def _demo_echo_body(self, text: str) -> AsyncIterator[dict[str, Any]]:
-        """Placeholder task body -- replaced by ChatAgent.run() in Episode 4."""
-        for word in text.split():
-            await asyncio.sleep(0.05)
-            yield {"text": word + " "}
-
-    async def _stream_chat_body(self, session, messages, task_id: str, message_id: str) -> AsyncIterator[dict[str, Any]]:
-        """Cancellation note: when Task.cancel() fires, CancelledError
-        is raised at whichever await this generator is suspended on --
-        almost always inside provider.stream()'s own `async for`.
-        Every provider wraps its SDK client in `async with`, so that
-        context manager's __aexit__ runs during this generator's
-        teardown and closes the underlying connection -- cancelling a
-        task genuinely stops the network stream, not just the UI.
-        """
-        self.streams.register_stream(task_id=task_id, session_id=session.id, message_id=message_id)
-        provider_name = self._resolve_provider_name(session.provider)
-        provider = self.providers.get(provider_name)  # ProviderNotRegisteredError -> clean Error event
-        request = GenerationRequest(model=session.model, messages=messages)
-
-        async for provider_chunk in provider.stream(request):
-            stream_event = self.stream_adapter.adapt(
-                provider_chunk, task_id=task_id, session_id=session.id,
-                message_id=message_id, sequence=self.streams.next_sequence(task_id),
-            )
-            if stream_event is None:
-                continue
-            self.streams.get_accumulator(task_id).apply(stream_event)
-            yield {"stream_event": stream_event.to_dict()}
 
     async def _handle_cancel_task(self, event: IncomingEvent) -> None:
         """The ack is NOT terminal (B6 §7). It used to be a second
@@ -746,23 +660,25 @@ class Runtime:
                 accumulator = self.streams.get_accumulator(task.id)
                 if kind == "done":
                     msg = accumulator.finalize()
-                    if msg is not None:
-                        await self.sessions.append_message(msg)
                 elif kind == "failed":
-                    partial = accumulator.finalize_interrupted("failed", error=chunk.get("error"))
-                    if partial is not None:
-                        await self.sessions.append_message(partial)
+                    msg = accumulator.finalize_interrupted("failed", error=chunk.get("error"))
                 elif kind == "cancelled":
-                    partial = accumulator.finalize_interrupted("cancelled")
-                    if partial is not None:
-                        await self.sessions.append_message(partial)
+                    msg = accumulator.finalize_interrupted("cancelled")
+                else:
+                    msg = None
+                if msg is not None:
+                    # The guardrails hook (B9, no-op in v1): every
+                    # persisted assistant reply, streamed or echoed,
+                    # passes through here before it reaches the session.
+                    msg = await self.agent_executor.apply_response_middleware(msg)
+                    await self.sessions.append_message(msg)
                 self.streams.close_stream(task.id)
             else:
                 if kind == "done" and echo_collected:
                     full_reply = "".join(echo_collected)
-                    await self.sessions.append_message(
-                        AssistantMessage(session_id, full_reply, task_id=task.id, message_id=message_id)
-                    )
+                    msg = AssistantMessage(session_id, full_reply, task_id=task.id, message_id=message_id)
+                    msg = await self.agent_executor.apply_response_middleware(msg)
+                    await self.sessions.append_message(msg)
                 # The echo path never registers a stream, but it does draw
                 # sequence numbers for its envelopes. Drop the counter or
                 # it outlives the task it belonged to.
@@ -875,9 +791,10 @@ class Runtime:
 
     async def _record_task(self, task: Task) -> None:
         """Every Task state transition lands here, from the one place
-        transitions happen. agent_id / project_id / connection_id /
-        git_checkpoint_sha stay NULL in v1 -- they are the hooks for B9,
-        B7, SSH, and the parked Coding Assistant."""
+        transitions happen. agent_id is set by B9's AgentExecutor at
+        task-creation time and simply carried through; project_id /
+        connection_id / git_checkpoint_sha stay NULL in v1 -- they are
+        the hooks for B7, SSH, and the parked Coding Assistant."""
         await self.task_repo.record(
             task_id=task.id,
             session_id=task.session_id,
@@ -886,4 +803,5 @@ class Runtime:
             created_at=task.created_at,
             started_at=task.started_at,
             finished_at=task.finished_at,
+            agent_id=task.agent_id,
         )

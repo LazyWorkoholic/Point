@@ -1,0 +1,163 @@
+# Backend — Episode Index
+
+Read `../../project_idea.md` first. Load **one** episode file per session.
+
+**Everything runs from inside `backend\`** — imports are `from runtime.runtime
+import ...`, not package-absolute. Do not change that.
+
+```powershell
+cd D:\Projects\Point\backend
+uv run python main.py
+```
+
+## Status
+
+| # | Episode | Phase | Batchable | Depends on | State |
+|---|---|---|---|---|---|
+| B1 | Runtime | — | — | — | ✅ built |
+| B2 | Session System | — | — | B1 | ✅ built |
+| B3 | Message System | — | — | B2 | ✅ built |
+| B4 | Provider System | — | — | B3 | ✅ built |
+| B5 | Streaming Engine | — | — | B4 | ✅ built |
+| B6 | Schema v2 + Envelope v1 + Bootstrap | P1 | no | B5 | not started |
+| B7 | Project System | P1 | no | B6 | not started |
+| B8 | Context Builder v0 | P1 | no | B6 | not started |
+| B9 | Agent Foundation | P1 | no | B8 | not started |
+| B10 | Tool System | P1 | no | B9 | not started |
+| B11 | The Three Agents | P1 | no | B10 | not started |
+| B12 | Routing, Attachments, Caps | P1 | no | B11 | not started |
+| B13 | Memory System | P2 | no | B12 + real usage | not started |
+| B14 | Usage & Limits | P2 | no | B12 | not started |
+| B15 | Lifecycle & Resources | P2 | no | B12 | **demo-critical** |
+| B16 | SSH Serving | P2 | no | B15, F12 | not started |
+| B17 | Hardening | P2 | no | all | not started |
+
+**B1–B5 are frozen.** Additive changes only — new columns, new optional fields.
+Never refactors.
+
+**B6 and B7 are no longer batchable.** B6 grew a new `tasks` table, a `sessions`
+rebuild, envelope v1, and six B1–B5 correctness fixes; one session cannot verify
+both honestly. `F1+F2` is now the only batchable pair in the project.
+
+**B1–B12 is v1.** Checkpoint after B12: ~3 weeks left → build B15 + frontend,
+then B13, and **drop B16**. ~6 weeks → do everything.
+
+## Current backend layout (verified)
+
+```
+backend\
+├── main.py            stdin reader thread + outbox writer, one Runtime
+├── runtime.db         SQLite — B6 relocates this out of the source tree
+├── runtime\           runtime, events, dispatcher, task, task_manager,
+│                      state, errors                                    [B1]
+├── managers\          session, session_manager                         [B2]
+│                      message, message_history, message_translator     [B3]
+│                      agent.py, memory.py, tool.py  ← EMPTY FILES
+├── database\          connection, session_repository                   [B2]
+├── providers\         base, bootstrap, errors, models, registry
+│                      + anthropic\ gemini\ ollama\ openai\ openrouter\  [B4]
+│                      (no providers\__init__.py — namespace package)
+├── streaming\         accumulator, adapter, events, manager            [B5]
+└── tests\             manual_provider_test.py
+```
+
+**`agents\`, `memory\`, and `schemas\` do not exist.** B9 and B10 create what
+they need. The empty `managers\*.py` placeholder files are fair game to fill or
+delete — say which you did in the handoff.
+
+**`managers\provider.py` no longer exists** — it was deleted as superseded by
+`providers\` (B4). Older copies of this tree list it; they are stale.
+
+## Additive changes to frozen episodes
+
+Do these inside the episode that needs them, not as a separate pass.
+
+| Episode | Change | Required by | Do it in |
+|---|---|---|---|
+| B3 | `provider` tag on reasoning/thinking blocks | D59 | B6 |
+| B4 | normalized `effort` field + `supports_effort` capability | D58 | B6 |
+| B4 | `MockProvider`, test-only, `POINT_MOCK=1` | D54 | B6 |
+| B4 | 429 handling: backoff + jitter + `Retry-After` | D56 | B10 |
+| B1/B5 | envelope v1 — `v`, `id`, `corr_id`, `connection_id`, `trace_id`, `seq`, nested `payload`, plus `hello` and `ping` | `project_idea.md` §4, SSH, F2 | B6 |
+| B1 | cancel ack becomes non-terminal `task.cancel.accepted`, so the "exactly one terminal event" rule is true | `project_idea.md` §4 | B6 |
+| B2 | `unarchive` event type + handler — `SessionManager.unarchive()` exists but is unreachable from Go | F3 | B6 |
+| B1/B5 | `_handle_send_message` builds context + checks budget before creating the task; `_stream_chat_body` sends `BuiltContext.messages` instead of `session.messages + [user_message]` | B8's own verification — an oversized message must fail as `context_overflow`, on the `echo` path too | B8 |
+
+**Struck from this table:** `session.archive` and `session.delete`. Both already
+exist end to end — event types, registered handlers, manager methods, and the
+`ON DELETE CASCADE` behind the repository. Verified on disk 2026-08-19.
+
+B6 also folds in four small corrections that are not additive changes so much as
+things B1–B5 left behind: the Gemini stream teardown, the doubled `outbox`
+assignment, three dead `StreamEventType` members, and the `asyncio.gather` that
+never returns on stdin EOF. See `B06-schema-bootstrap.md` §9.
+
+## Windows notes for every episode
+
+- All printed commands must be **PowerShell**. No `rm -rf`, no `~`, no `/tmp`.
+- Temp paths: `$env:TEMP`. App data: `$env:LOCALAPPDATA\Point`.
+- `sqlite3.exe` **is** on PATH, so direct DB inspection is allowed in checks —
+  but prefer a CLI command when one exists, because that tests the app.
+- `make` is installed but shells out to `cmd` on Windows. **Verification steps
+  must not depend on `make`.**
+
+---
+
+## Parking lot
+
+Format: `[ ] item — why parked · hook · anchor · what unparking takes`
+
+- [ ] **Semantic retrieval (embeddings)** — keyword + tags closes most of the gap
+      for zero cost. Hook: nullable `embedding` BLOB (B6), retrieval behind one
+      interface. Anchor: B13. Unpark: embed model, vector search, backfill.
+- [ ] **Automatic per-turn retrieval** — a per-turn token tax with no evidence it
+      earns its cost. Hook: retrieval interface, called manually. Anchor: B13.
+- [ ] **Session summarization** — needs observed long-session failures. Anchor: B13.
+- [ ] **Human-in-the-loop approvals** — the diff card covers the v1 case. Hook:
+      `PAUSED` / `AWAITING_APPROVAL` reserved in the task state enum and
+      `approval.*` reserved in the event namespace (B6). Anchor: B13.
+- [ ] **MCP** — a `ToolProvider` behind the B10 registry. No hook needed.
+      Anchor: B10.
+- [ ] **RAG** — depends on embeddings. Anchor: after B13.
+- [ ] **Prompt caching** — the biggest cost lever, provider-specific. Hook:
+      `supports_caching` capability. Anchor: B14.
+- [ ] **Guardrails / eval** — hook: no-op middleware chain in B9. Anchor: B17.
+- [ ] **Tracing** — hook: `trace_id` in the envelope, propagated. Anchor: B17.
+- [ ] **Coding Assistant capability** — multi-file, creates files, **writes
+      directly**, runs allowlisted commands. Gated on git (D80): clean repo, a
+      checkpoint commit before the run, `git restore` to revert. Three approval
+      modes in config (D82) — `ask` / `accept_edits` (writes free, commands still
+      ask) / `accept_all`. Per-edit diffs stream informationally during the run.
+      **One commit per step**, so the end-of-run review reverts by STEP — always
+      consistent — with per-file revert available but warned (D83, D83b).
+      Hooks, none of which exist yet — **B6 creates all three**: the `tasks`
+      table itself (tasks are in-memory only today) carrying
+      `git_checkpoint_sha`, and the `PAUSED` / `AWAITING_APPROVAL` task states.
+      Then B7's path guard and B10's tool registry. Anchor: post-v1. Unpark: one
+      full episode, written first.
+- [ ] **Data Analysis capability** — only if `--advanced` usage demands a
+      non-transcript surface (D72). Anchor: post-v1.
+- [ ] **Dynamic agents (user-created)** — hook: `agents` table with `builtin`
+      flag (B6), registry reads DB (B9). Anchor: B9 + a frontend episode.
+- [ ] **Dynamic capabilities (declarative TOML layouts, Tier 2)** — hook:
+      data-driven components from F3. Anchor: post-v1.
+- [ ] **Shared-runtime SSH (topology C) and live co-editing** — needs
+      connection-scoped identity on every event, plus CRDTs. Anchor: post-v1.
+- [ ] **ClaudeCodeProvider (Agent SDK via Claude Code CLI)** —
+      **DO NOT IMPLEMENT. Owner-only. Ask Aryan explicitly before touching this
+      entry; do not begin work on it if it comes up.** Bypasses the Context
+      Builder and tool system; ToS forbids exposing it to other users;
+      credit-limited. Anchor: B4.
+- [ ] **Auth beyond SSH keys, billing, telemetry, i18n, auto-update, plugin
+      sandboxing** — rejected for v1 and v2.
+
+## Rejected outright
+
+| Item | Why |
+|---|---|
+| Blog Writer agent | prompt wrapper; no structural difference |
+| Trading workspace | out of domain for a developer tool, permanently |
+| ML/GPU agent | existed to signal, not to solve; split into its own project |
+| Real PTY terminal | `tea.ExecProcess` covers it; VT100 + ConPTY is weeks |
+| Docker / Kubernetes | needs a TTY, filesystem, host Ollama; slower, breaks SSH |
+| ADK / A2A | would absorb the layers built from scratch on purpose |

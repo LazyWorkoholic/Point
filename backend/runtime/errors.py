@@ -51,6 +51,18 @@ class LockNotHeldError(RuntimeException):
     Distinct from "held by someone else", which is a normal LockResult,
     not an error."""
 
+
+class AgentNotFoundError(RuntimeException):
+    """Raised when an agent id/name resolves to no row (B9)."""
+
+
+class BuiltinAgentImmutableError(RuntimeException):
+    """Raised by database.agent_repository when an edit or delete targets
+    a builtin=True agent (B9). Enforced at the repository layer, not
+    just in the UI -- so there is exactly one place this rule can be
+    bypassed, and it is nowhere."""
+
+
 class ContextOverflowError(RuntimeException):
     """Raised by managers.context.build() when a single message or
     attachment does not fit the whole budget on its own (B8).
