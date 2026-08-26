@@ -1,0 +1,28 @@
+{
+  "model": "mock-slow",
+  "_comment": "Six seconds of output, for testing cancellation without a live model.",
+  "chunks": [
+    {"type": "text", "text": "word01 ", "delay": 0.3},
+    {"type": "text", "text": "word02 ", "delay": 0.3},
+    {"type": "text", "text": "word03 ", "delay": 0.3},
+    {"type": "text", "text": "word04 ", "delay": 0.3},
+    {"type": "text", "text": "word05 ", "delay": 0.3},
+    {"type": "text", "text": "word06 ", "delay": 0.3},
+    {"type": "text", "text": "word07 ", "delay": 0.3},
+    {"type": "text", "text": "word08 ", "delay": 0.3},
+    {"type": "text", "text": "word09 ", "delay": 0.3},
+    {"type": "text", "text": "word10 ", "delay": 0.3},
+    {"type": "text", "text": "word11 ", "delay": 0.3},
+    {"type": "text", "text": "word12 ", "delay": 0.3},
+    {"type": "text", "text": "word13 ", "delay": 0.3},
+    {"type": "text", "text": "word14 ", "delay": 0.3},
+    {"type": "text", "text": "word15 ", "delay": 0.3},
+    {"type": "text", "text": "word16 ", "delay": 0.3},
+    {"type": "text", "text": "word17 ", "delay": 0.3},
+    {"type": "text", "text": "word18 ", "delay": 0.3},
+    {"type": "text", "text": "word19 ", "delay": 0.3},
+    {"type": "text", "text": "word20",  "delay": 0.3},
+    {"type": "usage", "input_tokens": 7, "output_tokens": 20},
+    {"type": "done"}
+  ]
+}

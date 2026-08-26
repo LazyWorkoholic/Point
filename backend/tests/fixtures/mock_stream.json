@@ -1,0 +1,12 @@
+{
+  "model": "mock-1",
+  "chunks": [
+    {"type": "text", "text": "one ",   "delay": 0.05},
+    {"type": "text", "text": "two ",   "delay": 0.05},
+    {"type": "text", "text": "three ", "delay": 0.05},
+    {"type": "text", "text": "four ",  "delay": 0.05},
+    {"type": "text", "text": "five",   "delay": 0.05},
+    {"type": "usage", "input_tokens": 11, "output_tokens": 5},
+    {"type": "done"}
+  ]
+}
