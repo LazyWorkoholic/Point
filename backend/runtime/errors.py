@@ -50,3 +50,30 @@ class LockNotHeldError(RuntimeException):
     """Raised by heartbeat when there is no lock at all to heartbeat.
     Distinct from "held by someone else", which is a normal LockResult,
     not an error."""
+
+class ContextOverflowError(RuntimeException):
+    """Raised by managers.context.build() when a single message or
+    attachment does not fit the whole budget on its own (B8).
+
+    Both numbers ride as attributes, not just inside the string: the
+    frontend's status card wants to render "needs 100000, budget 8000",
+    and re-parsing that back out of a sentence is how a UI ends up
+    coupled to an error message's wording.
+
+    The alternative to raising is sending anyway and letting the
+    provider answer with an opaque 400 -- a failure the user cannot act
+    on, arriving after the request was paid for.
+
+    Stopgap, exactly like PathDeniedError above: B17 folds this into
+    PointError(code="context_overflow"). Do not give it a
+    code/retryable/detail shape before then.
+    """
+
+    def __init__(self, needed_tokens: int, budget_tokens: int, subject: str = "") -> None:
+        self.needed_tokens = needed_tokens
+        self.budget_tokens = budget_tokens
+        self.subject = subject
+        super().__init__(
+            f"context_overflow: {subject or 'this item'} needs {needed_tokens} tokens, "
+            f"but the entire context budget is {budget_tokens} tokens"
+        )

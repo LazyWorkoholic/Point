@@ -7,6 +7,7 @@ verified without Go (B6 14).
     uv run python cli.py session list
     uv run python cli.py send "count to five" [--cancel-after 2]
     uv run python cli.py tasks list
+    uv run python cli.py context report [--session ID | --last] [--json]
 
 Run from inside `backend\`, like everything else here.
 
@@ -34,6 +35,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import json
 import sys
 import time
 import uuid
@@ -51,8 +53,10 @@ from bootstrap import (
     shutdown_runtime,
 )
 from logging_setup import configure_logging, get_logger
+from managers import context
 from providers.mock import provider as mock_provider
 from providers.models import ProviderConfig, ProviderHealthStatus
+from runtime.errors import ContextOverflowError
 from runtime.events import ENVELOPE_VERSION
 from runtime.runtime import Runtime
 
@@ -317,6 +321,40 @@ async def _cancel_after(runtime: Runtime, task_id: str, delay: float) -> None:
         "type": "CancelTask",
         "payload": {"task_id": task_id},
     })
+
+
+async def cmd_context_report(runtime: Runtime, args: argparse.Namespace) -> int:
+    """The context breakdown for a session's *next* turn.
+
+    Goes straight to the builder rather than through an event: this is a
+    read-only projection with no task, no stream, and no terminal event
+    to wait for, so wrapping it in the request/response machinery would
+    buy nothing but latency.
+    """
+    session_id = args.session
+    if not session_id:
+        session = await runtime.memory.latest_session()
+        if session is None:
+            print("(no sessions)", file=sys.stderr)
+            return EXIT_FAILED
+        session_id = session.id
+
+    try:
+        report = await context.report(session_id, runtime.memory)
+    except ContextOverflowError as exc:
+        # Reachable without sending anything: a system prompt or an
+        # attachment can exceed the budget on its own.
+        print(str(exc), file=sys.stderr)
+        return EXIT_FAILED
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        return EXIT_FAILED
+
+    if args.json:
+        print(json.dumps(report.to_dict(), indent=2))
+    else:
+        print(report.describe())
+    return EXIT_OK
 
 
 async def cmd_tasks_list(runtime: Runtime, args: argparse.Namespace) -> int:
@@ -670,6 +708,19 @@ def build_parser() -> argparse.ArgumentParser:
     send.add_argument("--cancel-after", type=float, default=None, metavar="SECONDS")
     send.add_argument("--timeout", type=float, default=180.0)
 
+    ctx = sub.add_parser("context", help="context builder", parents=[common]).add_subparsers(
+        dest="context_command", required=True
+    )
+    ctx_report = ctx.add_parser(
+        "report", help="what the next turn's context would contain", parents=[common]
+    )
+    ctx_report.add_argument("--session", default=None, help="session id")
+    ctx_report.add_argument(
+        "--last", action="store_true",
+        help="the most recently updated session (default when --session is omitted)",
+    )
+    ctx_report.add_argument("--json", action="store_true", help="machine-readable output")
+
     tasks = sub.add_parser("tasks", help="task operations", parents=[common]).add_subparsers(
         dest="tasks_command", required=True
     )
@@ -735,6 +786,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         ("session", "new"): cmd_session_new,
         ("session", "list"): cmd_session_list,
         ("send", None): cmd_send,
+        ("context", "report"): cmd_context_report,
         ("tasks", "list"): cmd_tasks_list,
         ("project", "init"): cmd_project_init,
         ("project", "resolve"): cmd_project_resolve,

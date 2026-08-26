@@ -15,6 +15,8 @@ from database.connection import open_database
 from database.migrations import SCHEMA_VERSION
 from database.task_repository import TaskRepository
 from logging_setup import get_logger
+from managers import context
+from managers.context import SessionMemoryService
 from managers.project import Project
 from managers.project_manager import ProjectManager
 from managers.session import Session
@@ -64,6 +66,9 @@ class Runtime:
         self.tasks = TaskManager(recorder=self._record_task)
         self.sessions = SessionManager(db_conn)
         self.projects = ProjectManager(db_conn)
+        # B8: the only way into the context builder's data. The builder
+        # never touches SQLite itself.
+        self.memory = SessionMemoryService(db_conn)
         self.dispatcher = Dispatcher()
         self.outbox: asyncio.Queue[OutgoingEvent] = asyncio.Queue(maxsize=1000)
 
@@ -85,6 +90,32 @@ class Runtime:
 
     def _resolve_provider_name(self, name: str) -> str:
         return self._PROVIDER_ALIASES.get(name, name)
+
+    @staticmethod
+    def _context_policy(session: Session) -> "context.ContextPolicy":
+        """v0 policy resolution: the session's own `settings`, then the
+        module defaults.
+
+        B9's AgentConfig is what will really supply these -- it adapts to
+        ContextPolicy rather than replacing it. Until then, `settings` is
+        the only place a user can override anything at all, and honouring
+        it costs nothing. A malformed `stm_window` falls back rather than
+        failing the turn: a bad settings value should not make a session
+        unusable.
+        """
+        settings = session.settings or {}
+        try:
+            stm_window = int(settings.get("stm_window", context.DEFAULT_STM_WINDOW))
+        except (TypeError, ValueError):
+            _log.warning(
+                "Session %s has a non-integer stm_window (%r); using %d",
+                session.id, settings.get("stm_window"), context.DEFAULT_STM_WINDOW,
+            )
+            stm_window = context.DEFAULT_STM_WINDOW
+        return context.ContextPolicy(
+            system_prompt=settings.get("system_prompt") or context.DEFAULT_SYSTEM_PROMPT,
+            stm_window=stm_window,
+        )
 
     @classmethod
     async def create(cls, db_path: Union[str, Path]) -> "Runtime":
@@ -519,7 +550,12 @@ class Runtime:
         if not session_id:
             raise InvalidEventError("SendMessage requires 'session'")
 
-        session = await self.sessions.get(session_id, load_messages=True)
+        # No load_messages: the context builder reads history itself,
+        # through the memory service and its own stm_window. Loading the
+        # full history here as well would fetch every message in the
+        # session twice, and only one of the two copies would be the one
+        # actually sent.
+        session = await self.sessions.get(session_id)
         if not session.provider or not session.model:
             # NULL means "inherit from global config" and B8 owns that
             # resolution. Until it lands, refusing with a clean Error is
@@ -531,19 +567,48 @@ class Runtime:
                 "set one explicitly with SetSessionProvider."
             )
 
+        # Context is built BEFORE the user message is persisted and before
+        # the task exists (B8). Two reasons, both about failure:
+        #
+        #   - An oversized message must fail as ContextOverflowError ->
+        #     clean Error event, not as an opaque provider 400 the user
+        #     cannot act on. Building first is what makes that possible.
+        #   - Failing before the INSERT means a message that can never be
+        #     sent never enters the history either. Persisting it first
+        #     would leave a row that poisons every subsequent turn's
+        #     build.
+        #
+        # This wiring is a placeholder. B9's AgentExecutor owns "resolve
+        # config -> build context -> create task -> stream" end to end,
+        # and is expected to supersede this exact call site.
+        built = await context.build(
+            context.ContextRequest(
+                session_id=session_id,
+                provider=self._resolve_provider_name(session.provider),
+                model=session.model,
+                user_text=text,
+            ),
+            self._context_policy(session),
+            context.default_budget_tokens(),
+            self.memory,
+        )
+        _log.debug(
+            "Context for %s: %d/%d tokens, %d evicted",
+            session_id, built.log.used_tokens, built.log.budget_tokens, len(built.log.evicted),
+        )
+
         user_message = UserMessage(session_id, text)
         await self.sessions.append_message(user_message)
 
         task_id = str(uuid.uuid4())
         message_id = str(uuid.uuid4())
-        all_messages = session.messages + [user_message]
 
         def body_factory() -> AsyncIterator[dict[str, Any]]:
             if session.provider == "echo":
                 # Dev/test convenience: no provider/network required.
                 # Not a real registered provider on purpose.
                 return self._demo_echo_body(text)
-            return self._stream_chat_body(session, all_messages, task_id, message_id)
+            return self._stream_chat_body(session, built.messages, task_id, message_id)
 
         task = self.tasks.create_task(
             body=body_factory,
