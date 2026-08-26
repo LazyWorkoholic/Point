@@ -1,0 +1,23 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+.env
+
+# Secrets and machine-written state live outside the repo (B6 §12):
+#   %APPDATA%\Point\credentials.toml   %LOCALAPPDATA%\Point\state.json
+# Nothing to ignore here — if either ever appears at the repo root,
+# something wrote it to the wrong place. Fix that, do not ignore it.
+
+backend/runtime.db
+*.db-wal
+*.db-shm
+
+design/
+CLAUDE.md
