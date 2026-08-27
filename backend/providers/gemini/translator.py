@@ -18,3 +18,20 @@ class GeminiMessageTranslator(MessageTranslator):
     def from_provider_format(self, raw: dict[str, Any], session_id: str) -> Message:
         text = "".join(raw.get("parts", []))
         return AssistantMessage(session_id, text)
+
+    def tools_to_provider_format(self, tools: list[dict[str, Any]]) -> Any:
+        """Gemini groups every tool into a single `function_declarations`
+        list inside one tool object -- a list of tools, not a tool per
+        entry (B10)."""
+        return [
+            {
+                "function_declarations": [
+                    {
+                        "name": t["name"],
+                        "description": t["description"],
+                        "parameters": t["parameters"],
+                    }
+                    for t in tools
+                ]
+            }
+        ]

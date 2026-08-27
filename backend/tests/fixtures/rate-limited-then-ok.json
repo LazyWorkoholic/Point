@@ -1,0 +1,11 @@
+{
+  "model": "mock-1",
+  "turns": [
+    [
+      {"type": "rate_limit", "retry_after": 2, "error": "429 too many requests"},
+      {"type": "text", "text": "Answered on the retry, after the backoff.", "delay": 0.01},
+      {"type": "usage", "input_tokens": 30, "output_tokens": 9},
+      {"type": "done"}
+    ]
+  ]
+}

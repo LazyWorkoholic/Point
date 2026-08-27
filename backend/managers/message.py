@@ -53,6 +53,8 @@ invocation  -> InvocationMetadata. Kept as its own typed field rather
 
 from __future__ import annotations
 
+import json
+
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -339,13 +341,25 @@ def ToolMessage(
     task_id: Optional[str] = None,
     metadata: Optional[dict[str, Any]] = None,
     invocation: Optional[InvocationMetadata] = None,
+    text: Optional[str] = None,
 ) -> Message:
     """Structured tool-result representation, not plain text -- so a
     later reader (agent, memory, frontend) can pull `tool_name` /
     `result` back out programmatically instead of re-parsing a string.
+
+    B10 added `text`, and it is not a duplicate of `result`: `data` is
+    what a *reader* pulls apart, `text` is what goes back to the *model*
+    on the next turn. Every MessageTranslator renders a message through
+    `Message.text`, which reads `content.text` -- so a tool result with
+    only `data` reaches the provider as an empty string, and the model is
+    handed a turn where it asked for a file and received nothing. When
+    `text` is omitted the structured result is dumped as JSON, which is
+    at least truthful; callers that know how to phrase their result for a
+    model should pass it.
     """
     content = MessageContent(
         type=ContentType.TOOL_RESULT,
+        text=text if text is not None else json.dumps(result, default=str),
         data={"tool_name": tool_name, "tool_call_id": tool_call_id, "result": result},
     )
     return Message.new(

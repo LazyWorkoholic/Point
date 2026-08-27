@@ -29,7 +29,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional, Union
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 # Applied to every connection, here and in database/connection.py.
 #   WAL          -- 12 makes shared-WAL the basis of SSH topology B, and
@@ -265,6 +265,45 @@ CREATE TABLE IF NOT EXISTS presence (
 """
 
 
+# ---------------------------------------------------------------------------
+# v3 -- B10's tool-call ledger.
+#
+# The `tasks` row says a task ran and how it ended. It cannot say *what
+# the answer was built from*, and "which document contaminated this
+# answer" is a question that only gets asked after the task object has
+# been swept out of memory. One row per executed call, written whether
+# the call succeeded or failed, is the whole feature.
+#
+# `args_json` stores the arguments as they were validated, after the
+# schema's defaults were applied -- the call as it actually ran, not as
+# the model phrased it. Recording the phrasing instead would make a
+# reader guess at the defaults in force that day.
+#
+# No FK to `tasks`: a tool call is evidence, and evidence should survive
+# its subject. `tasks` rows are already swept, and ON DELETE CASCADE here
+# would quietly take the ledger with them.
+# ---------------------------------------------------------------------------
+
+_V3 = """
+CREATE TABLE IF NOT EXISTS tool_calls (
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    task_id          TEXT NOT NULL,
+    session_id       TEXT NOT NULL,
+    tool             TEXT NOT NULL,
+    args_json        TEXT,
+    ok               INTEGER NOT NULL,
+    error            TEXT,
+    duration_ms      INTEGER NOT NULL DEFAULT 0,
+    tokens_estimate  INTEGER NOT NULL DEFAULT 0,
+    created_at       REAL NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_tool_calls_task    ON tool_calls(task_id);
+CREATE INDEX IF NOT EXISTS idx_tool_calls_session ON tool_calls(session_id);
+CREATE INDEX IF NOT EXISTS idx_tool_calls_tool    ON tool_calls(tool);
+"""
+
+
 @dataclass(frozen=True)
 class Migration:
     version: int
@@ -275,6 +314,7 @@ class Migration:
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(1, "baseline sessions + messages", _V1),
     Migration(2, "tasks, projects, agents, memory, nullable session provider/model", _V2),
+    Migration(3, "tool_calls ledger", _V3),
 )
 
 

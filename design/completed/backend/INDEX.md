@@ -21,12 +21,13 @@ it passed.
 | B7 | Project System | ✅ built + manually verified | `B07-project-system.md` |
 | B8 | Context Builder v0 | ✅ built + manually verified | `B08-context-builder.md` |
 | B9 | Agent Foundation | ✅ built + manually verified | `B09-agent-foundation.md` |
-| B10–B17 | — | not started | — |
+| B10 | Tool System | ✅ built + manually verified | `B10-tool-system.md` |
+| B11–B17 | — | not started | — |
 
-## Verified file structure — end of Episode 9
+## Verified file structure — end of Episode 10
 
-Confirmed against disk on 2026-08-26, after B9's verification gate passed. This
-supersedes the end-of-Episode-8 snapshot.
+Confirmed against disk on 2026-08-27, after B10's verification gate passed. This
+supersedes the end-of-Episode-9 snapshot.
 
 ```
 backend\
@@ -40,6 +41,10 @@ backend\
 │                             + context report [--session|--last|--json] [B8]
 │                             + agents list|show|set-model;
 │                               session new --agent <id>                 [B9]
+│                             + send --script <name> (mock fixtures) and
+│                               --max-steps/--max-tool-calls/--max-seconds
+│                               (the BoundsOverride wire form);
+│                               session new --project <id>              [B10]
 ├── appconfig.py              paths, config.toml, key resolution, masking;
 │                             + BOM-tolerant, non-silent TOML parsing    [B7]
 ├── logging_setup.py          rotating file + stderr, key redaction      [B6]
@@ -59,6 +64,36 @@ backend\
 │   └── executor.py            AgentExecutor, AgentContext, ProviderOverride,
 │                              resolve_provider_model_effort(), the
 │                              request/response middleware chain
+│                              + BoundsOverride/Bounds/resolve_bounds(),
+│                                ToolServices, and _loop_body — the bounded
+│                                tool loop that REPLACED _stream_body.
+│                                Still exactly one task body: no tools +
+│                                max_steps=1 is the old shape, by config  [B10]
+│                              builtins.py: research's grants renamed
+│                                web/fs -> read_file/list_files/web_search
+│                                (no migration — built-ins re-upsert)     [B10]
+│                              registry.py: + validate_all(), and grants
+│                                validated BEFORE the first upsert        [B10]
+│
+├── tools\                     NEW package                              [B10]
+│   ├── __init__.py
+│   ├── models.py              Tool, ToolResult, ToolCallRecord — data only
+│   ├── schema.py              hand-written JSON Schema subset; no new dep
+│   ├── registry.py            ToolRegistry — register, get, list_for,
+│   │                          resolve_for (refuses ungranted by name),
+│   │                          validate_grants (LOAD time, not call time)
+│   ├── executor.py            ToolExecutor — validate, run, time out,
+│   │                          emit the started/completed pair, record the
+│   │                          row, THEN raise if the tool was broken
+│   ├── faults.py              POINT_MOCK-only __mock_fault raise/hang.
+│   │                          Injection, not a mock tool — a mock tool
+│   │                          would have to be granted, and that would
+│   │                          make the grant list lie
+│   └── builtins\              filesystem.py (read_file, list_files),
+│                              web.py (web_search — DuckDuckGo keyless
+│                              HTML endpoint, stdlib parser, no new dep),
+│                              task_results.py (load_task_result, scoped
+│                              to the current session on purpose)
 │
 ├── runtime\                  ALL FILLED                    [B1 ✅ B7 ✅]
 │   ├── __init__.py  dispatcher.py  state.py
@@ -69,8 +104,21 @@ backend\
 │   │                           carries both numbers as attributes       [B8]
 │   │                         + AgentNotFoundError,
 │   │                           BuiltinAgentImmutableError                [B9]
+│   │                         + ToolError family, the THIRD B17 stopgap:
+│   │                           BoundsExceededError(bounds_exceeded),
+│   │                           ToolExecutionError(tool_error),
+│   │                           ToolTimeoutError(tool_timeout),
+│   │                           ToolNotGrantedError(tool_not_granted),
+│   │                           ToolNotFoundError(tool_not_found),
+│   │                           ToolsUnsupportedError(tools_unsupported).
+│   │                           Unlike the other two stopgaps these ALREADY
+│   │                           carry their codes — B17 folds them in, it
+│   │                           does not invent codes for them           [B10]
 │   ├── events.py             envelope v1 — the Go↔Python contract;
 │   │                           + 9 project-system event types      [B6][B7]
+│   │                         + ToolStarted / ToolCompleted. `task.progress`
+│   │                           is the EXISTING ProgressUpdated — no third
+│   │                           progress vocabulary was invented        [B10]
 │   ├── runtime.py            + envelope echo, hello, ping, cancel ack,
 │   │                           unarchive, task recorder;
 │   │                           + 6 project-system handlers         [B6][B7]
@@ -82,9 +130,22 @@ backend\
 │   │                           _stream_chat_body deleted; sink now runs
 │   │                           response middleware before persisting;
 │   │                           _record_task passes agent_id              [B9]
+│   │                         + tool registry built BEFORE the agent
+│   │                           registry (seeding validates grants);
+│   │                           SendMessage accepts an optional `bounds`;
+│   │                           TaskFailed carries `code`; _record_task
+│   │                           writes tasks.error_code for LIVE failures,
+│   │                           not just backend_died.
+│   │                           TaskStarted MOVED into the sink's
+│   │                           "started" branch — emitting it from the
+│   │                           handler raced the task body and dropped
+│   │                           every event before it (see B10 bug #1)  [B10]
 │   ├── task.py               + recorder, started_at/finished_at,
 │   │                           PAUSED/AWAITING_APPROVAL (reserved)     [B6]
 │   │                         + agent_id                                  [B9]
+│   │                         + TaskResult.code, copied off the exception
+│   │                           with getattr(exc, "code", None). Task still
+│   │                           knows nothing about tools               [B10]
 │   └── task_manager.py       + recorder passthrough, sweep now wired   [B6]
 │                             + agent_id parameter on create_task()       [B9]
 │
@@ -112,14 +173,28 @@ backend\
 │   ├── agent.py              FILLED — AgentConfig (frozen dataclass,
 │   │                           mirrors the `agents` table row for row)
 │   │                           + to_context_policy()                     [B9]
+│   ├── message.py            + ToolMessage(text=...) — every translator
+│   │                           renders through Message.text, so a
+│   │                           TOOL_RESULT with only `data` reached the
+│   │                           provider as an empty string             [B10]
+│   ├── message_translator.py + tools_to_provider_format() — NON-abstract;
+│   │                           None means "takes no tools"             [B10]
+│   ├── context.py            + SessionMemoryService.task_messages(),
+│   │                           backing load_task_result                [B10]
 │   ├── memory.py             EMPTY  → B13 fills it
-│   └── tool.py               EMPTY  → B10 fills it
+│   └── tool.py               DELETED — B10 did NOT fill it. A registry,
+│                             an executor, a schema checker and four tools
+│                             are not one manager; see tools\ above.
+│                             Do not recreate it, same as provider.py  [B10]
 │       provider.py stays DELETED — do not recreate it
 │
 ├── database\                                       [B2 ✅ B6 ✅ B7 ✅]
 │   ├── __init__.py
 │   ├── connection.py         pragmas; schema delegated to migrations   [B6]
 │   ├── migrations.py         NEW — forward-only runner, v1 + v2        [B6]
+│   │                         + v3: the tool_calls ledger. SCHEMA_VERSION
+│   │                           is now 3. No FK to tasks — evidence should
+│   │                           survive its subject                     [B10]
 │   ├── session_repository.py + the three new session columns           [B6]
 │   ├── task_repository.py    NEW — durable task mirror + recovery      [B6]
 │   │                         agent_id now actually supplied by the
@@ -127,8 +202,13 @@ backend\
 │   ├── project_repository.py NEW — raw SQL for projects + file_locks   [B7]
 │   ├── attachment_repository.py  NEW — read + update-recorded-pair
 │   │                          ONLY; no insert/delete/set_mode (B12)     [B8]
-│   └── agent_repository.py   NEW — raw SQL; update_fields()/delete()
-│                              reject builtin=True before any write       [B9]
+│   ├── agent_repository.py   NEW — raw SQL; update_fields()/delete()
+│   │                          reject builtin=True before any write       [B9]
+│   ├── session_repository.py + fetch_messages_for_task(), the first
+│   │                          reader idx_messages_task ever had        [B10]
+│   └── tool_call_repository.py  NEW — insert-only ledger; record,
+│                              fetch_for_task, list_recent. No update and
+│                              no delete path, deliberately             [B10]
 │
 ├── providers\                                            [B4 ✅ B6 ✅]
 │   ├── __init__.py           NEW — was missing; namespace cleanup      [B6]
@@ -139,25 +219,50 @@ backend\
 │   │                         Effort now actually reaches
 │   │                           GenerationRequest.effort (via B9's
 │   │                           resolve_provider_model_effort())          [B9]
+│   ├── retry.py              NEW — 429 backoff: 5 attempts, 1.0s base,
+│   │                         x2.0, +/-25% jitter, 60s cap, Retry-After
+│   │                         honoured AND capped. Only a stream that has
+│   │                         produced nothing may be retried            [B10]
 │   ├── anthropic\  gemini\  ollama\  openai\  openrouter\
 │   │                         gemini gained real stream teardown        [B6]
+│   │                         all five now translate the common tool
+│   │                         schema and normalize tool calls back;
+│   │                         BaseProvider.supports_tools (per PROVIDER,
+│   │                         distinct from ModelCapabilities') is checked
+│   │                         at INVOCATION, before a token streams     [B10]
 │   └── mock\                 NEW — POINT_MOCK=1 only, never selectable [B6]
+│                             + `turns` fixtures and tool_call/rate_limit/
+│                               hang chunks, so a bounded tool loop is
+│                               testable without a live model           [B10]
 │
 ├── streaming\                ALL FILLED                             [B5 ✅]
-│   ├── __init__.py  accumulator.py  adapter.py  manager.py
+│   ├── __init__.py  manager.py
+│   ├── accumulator.py        usage is now SUMMED, not replaced — a tool
+│   │                         loop streams several turns into ONE
+│   │                         accumulator                              [B10]
+│   ├── adapter.py            ProviderChunkType.TOOL_CALL maps to NOTHING
+│   │                         (returns None, like DONE). A model asking
+│   │                         for a tool is not a tool starting        [B10]
 │   └── events.py             three dead terminal members removed       [B6]
+│                             TOOL_STARTED/TOOL_COMPLETED, reserved since
+│                             B5, finally have producers               [B10]
 │
 └── tests\
     ├── manual_provider_test.py
     ├── manual_context_test.py  NEW — stm_window + reasoning filter, the
     │                          two checks the CLI cannot reach           [B8]
     └── fixtures\             NEW — mock_stream.json, mock_slow.json    [B6]
+                              + seven tool-loop scripts, replayed by
+                                `send --script <name>`: two-tool-calls,
+                                three-tool-calls, tool-raises, tool-hangs,
+                                rate-limited-then-ok, read-outside-project,
+                                ungranted-tool                          [B10]
 ```
 
 **`memory\` and `schemas\` do not exist.** The original log listed them as
-planned directories alongside `agents\`; `agents\` was created in B9 (above).
-`memory\` and `schemas\` are still not created — B13 and (per the original
-plan) a later episode create what they need.
+planned directories alongside `agents\`; `agents\` was created in B9 and
+`tools\` in B10 (both above). `memory\` and `schemas\` are still not created
+— B13 and (per the original plan) a later episode create what they need.
 
 ## ⚠ One inaccuracy inherited from the original log
 

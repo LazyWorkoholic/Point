@@ -161,6 +161,12 @@ class OutgoingEventType(str, Enum):
     STATUS_CHANGED = "StatusChanged"
     PROGRESS_UPDATED = "ProgressUpdated"
     USAGE_UPDATED = "UsageUpdated"
+    # Tool system (B10). `task.progress` in the episode's prose is this
+    # enum's existing PROGRESS_UPDATED -- the step counter and the
+    # rate-limit notice both ride it, rather than a third progress
+    # vocabulary being invented next to the two that already exist.
+    TOOL_STARTED = "ToolStarted"
+    TOOL_COMPLETED = "ToolCompleted"
     # Project system (B7).
     PROJECT = "Project"
     PROJECT_FILE_LIST = "ProjectFileList"

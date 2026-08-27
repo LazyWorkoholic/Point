@@ -89,3 +89,79 @@ class ContextOverflowError(RuntimeException):
             f"context_overflow: {subject or 'this item'} needs {needed_tokens} tokens, "
             f"but the entire context budget is {budget_tokens} tokens"
         )
+
+
+# ---------------------------------------------------------------------------
+# Tool system (B10)
+# ---------------------------------------------------------------------------
+
+class ToolError(RuntimeException):
+    """Base class for everything the tool system raises, and the one B17
+    folds into `PointError(code=...)` alongside `PathDeniedError` (B7)
+    and `ContextOverflowError` (B8).
+
+    Unlike those two, this family carries its `code` from the start --
+    B10's Done-when #4 requires `bounds_exceeded` to be distinguishable
+    on the wire and in the `tasks` row, so the code could not wait for
+    B17 to invent one. B17's job here is therefore narrower: fold these
+    into the shared envelope, do not invent codes for them.
+
+    Only *broken* things raise. An expected refusal -- bad arguments, a
+    denied path, a dead network -- is a `ToolResult(ok=False)` handed
+    back to the model, never one of these.
+    """
+
+    code = "tool_error"
+
+
+class ToolNotFoundError(ToolError):
+    """No tool is registered under that name. Raised at LOAD time by
+    `ToolRegistry.validate_grants()` when an AgentConfig names a tool
+    that does not exist -- a typo in a grant list is a startup error, not
+    a mid-conversation refusal."""
+
+    code = "tool_not_found"
+
+
+class ToolNotGrantedError(ToolError):
+    """The tool exists, but this agent's config does not grant it. Tools
+    are granted, never invented; there is no path from a model naming a
+    tool to that tool running."""
+
+    code = "tool_not_granted"
+
+
+class ToolExecutionError(ToolError):
+    """A tool body raised. The runtime survives -- this ends one task
+    with a code, and the next request works immediately."""
+
+    code = "tool_error"
+
+
+class ToolTimeoutError(ToolError):
+    """A tool ran past its per-tool timeout and was stopped."""
+
+    code = "tool_timeout"
+
+
+class ToolsUnsupportedError(ToolError):
+    """An agent requiring tools was pointed at a provider that cannot
+    take them. Raised at INVOCATION, before a token is streamed, so the
+    user gets a clear message instead of a model that silently ignores
+    every tool it was never sent."""
+
+    code = "tools_unsupported"
+
+
+class BoundsExceededError(ToolError):
+    """A bounded agent loop hit `max_steps`, `max_tool_calls`, or
+    `timeout_s` (B10). **Not a failure of the work** -- whatever partial
+    output exists is kept and persisted; this only says the loop stopped
+    at its boundary rather than at an answer."""
+
+    code = "bounds_exceeded"
+
+    def __init__(self, message: str, *, bound: str = "", limit: int = 0) -> None:
+        self.bound = bound
+        self.limit = limit
+        super().__init__(message)

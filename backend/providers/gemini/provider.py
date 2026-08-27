@@ -8,6 +8,7 @@ Google-SDK consumer with a different key ever runs in the same process.
 
 from __future__ import annotations
 
+import uuid
 from typing import AsyncIterator
 
 import google.generativeai as genai
@@ -33,6 +34,7 @@ from providers.models import (
     ProviderHealth,
     ProviderHealthStatus,
     ProviderStreamChunk,
+    ToolCall,
 )
 
 
@@ -53,8 +55,42 @@ async def _close_stream(response) -> None:
         pass
 
 
+def _retry_after(exc) -> float | None:
+    """google-api-core surfaces a retry delay on the RPC's error details
+    rather than an HTTP header; when it is absent providers.retry falls
+    back to the computed backoff."""
+    delay = getattr(getattr(exc, "retry", None), "_deadline", None)
+    try:
+        return float(delay) if delay is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _tool_calls(chunk) -> list[ToolCall]:
+    """Gemini puts a call in a `function_call` part on the candidate's
+    content, with args as a proto Map rather than a dict, and issues no
+    call id -- so one is synthesized (B10). Wrapped in getattr chains
+    because a chunk carrying only text has none of these attributes."""
+    calls = []
+    for candidate in getattr(chunk, "candidates", None) or []:
+        content = getattr(candidate, "content", None)
+        for part in getattr(content, "parts", None) or []:
+            function_call = getattr(part, "function_call", None)
+            if not function_call or not getattr(function_call, "name", None):
+                continue
+            calls.append(
+                ToolCall(
+                    id=f"call-{uuid.uuid4().hex[:12]}",
+                    name=function_call.name,
+                    arguments=dict(getattr(function_call, "args", None) or {}),
+                )
+            )
+    return calls
+
+
 class GeminiProvider(BaseProvider):
     name = "gemini"
+    supports_tools = True
 
     def __init__(self, config) -> None:
         super().__init__(config)
@@ -64,16 +100,23 @@ class GeminiProvider(BaseProvider):
     def _to_contents(self, request: GenerationRequest) -> list[dict]:
         return [self._translator.to_provider_format(m) for m in request.messages]
 
+    def _tool_kwargs(self, request: GenerationRequest) -> dict:
+        if not request.tools:
+            return {}
+        return {"tools": self._translator.tools_to_provider_format(request.tools)}
+
     async def generate(self, request: GenerationRequest) -> GenerationResponse:
         model = genai.GenerativeModel(request.model)
         try:
-            response = await model.generate_content_async(self._to_contents(request))
+            response = await model.generate_content_async(
+                self._to_contents(request), **self._tool_kwargs(request)
+            )
         except google_exceptions.Unauthenticated as exc:
             raise AuthenticationError(str(exc)) from exc
         except google_exceptions.PermissionDenied as exc:
             raise AuthenticationError(str(exc)) from exc
         except google_exceptions.ResourceExhausted as exc:
-            raise RateLimitError(str(exc)) from exc
+            raise RateLimitError(str(exc), retry_after=_retry_after(exc)) from exc
         except google_exceptions.NotFound as exc:
             raise ModelNotFoundError(str(exc)) from exc
         except google_exceptions.DeadlineExceeded as exc:
@@ -110,9 +153,20 @@ class GeminiProvider(BaseProvider):
         model = genai.GenerativeModel(request.model)
         response = None
         try:
-            response = await model.generate_content_async(self._to_contents(request), stream=True)
+            response = await model.generate_content_async(
+                self._to_contents(request), stream=True, **self._tool_kwargs(request)
+            )
             async for chunk in response:
-                if chunk.text:
+                calls = _tool_calls(chunk)
+                # `chunk.text` raises rather than returning "" when the
+                # candidate holds a function_call and no text part, so the
+                # tool-call check has to come first and short-circuit it.
+                if calls:
+                    for call in calls:
+                        yield ProviderStreamChunk(
+                            type=ProviderChunkType.TOOL_CALL, tool_call=call
+                        )
+                elif chunk.text:
                     yield ProviderStreamChunk(type=ProviderChunkType.TEXT, text=chunk.text)
             final_usage = getattr(response, "usage_metadata", None)
             if final_usage:
@@ -127,7 +181,7 @@ class GeminiProvider(BaseProvider):
         except google_exceptions.Unauthenticated as exc:
             raise AuthenticationError(str(exc)) from exc
         except google_exceptions.ResourceExhausted as exc:
-            raise RateLimitError(str(exc)) from exc
+            raise RateLimitError(str(exc), retry_after=_retry_after(exc)) from exc
         except google_exceptions.ServiceUnavailable as exc:
             raise ProviderConnectionError(str(exc)) from exc
         finally:

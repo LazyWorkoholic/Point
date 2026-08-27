@@ -24,7 +24,16 @@ class AuthenticationError(ProviderError):
 
 
 class RateLimitError(ProviderError):
-    pass
+    """B10 gave this one an attribute the others do not need:
+    `retry_after`, in seconds, when the vendor sent a Retry-After header.
+    It rides as an attribute rather than inside the message because
+    `providers.retry` has to do arithmetic with it, and re-parsing a
+    number back out of a sentence is how a backoff ends up coupled to an
+    error string's wording."""
+
+    def __init__(self, *args, retry_after: float | None = None) -> None:
+        super().__init__(*args)
+        self.retry_after = retry_after
 
 
 class ModelNotFoundError(ProviderError):

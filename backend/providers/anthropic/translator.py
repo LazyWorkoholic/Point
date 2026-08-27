@@ -24,3 +24,15 @@ class AnthropicMessageTranslator(MessageTranslator):
 
     def from_provider_format(self, raw: dict[str, Any], session_id: str) -> Message:
         return AssistantMessage(session_id, raw.get("content", ""))
+
+    def tools_to_provider_format(self, tools: list[dict[str, Any]]) -> Any:
+        """Anthropic takes tools flat, and calls the JSON Schema
+        `input_schema` rather than `parameters` (B10)."""
+        return [
+            {
+                "name": t["name"],
+                "description": t["description"],
+                "input_schema": t["parameters"],
+            }
+            for t in tools
+        ]

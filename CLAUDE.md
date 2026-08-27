@@ -158,16 +158,33 @@ D:\Projects\Point\
 │   ├── managers\               session, session_manager             [B2 ✅]
 │   │                           message, message_history,
 │   │                           message_translator                   [B3 ✅]
-│   │                           agent.py, memory.py, tool.py         ← EMPTY
+│   │                           project, pathguard, gitignore,
+│   │                           project_manager                      [B7 ✅]
+│   │                           context, attachment                  [B8 ✅]
+│   │                           agent.py (AgentConfig only)          [B9 ✅]
+│   │                           memory.py                            ← EMPTY
+│   │                           tool.py is DELETED, not filled — see below
+│   ├── agents\                 builtins, registry, executor         [B9 ✅]
+│   ├── tools\                  models, schema, registry, executor,
+│   │                           faults, builtins\ (read_file,
+│   │                           list_files, web_search,
+│   │                           load_task_result)                    [B10 ✅]
 │   ├── database\               connection, session_repository       [B2 ✅]
 │   │                           migrations.py, task_repository.py    [B6 ✅]
+│   │                           project_repository                   [B7 ✅]
+│   │                           attachment_repository                [B8 ✅]
+│   │                           agent_repository                     [B9 ✅]
+│   │                           tool_call_repository                 [B10 ✅]
 │   ├── providers\              base, bootstrap, errors, models, registry,
 │   │                           __init__.py                          [B6 ✅]
 │   │                           + anthropic\ gemini\ ollama\ openai\ openrouter\  [B4 ✅]
 │   │                           + mock\ (POINT_MOCK=1 only, never in the UI) [B6 ✅]
 │   ├── streaming\              accumulator, adapter, events, manager [B5 ✅]
-│   └── tests\                  manual_provider_test.py
+│   └── tests\                  manual_provider_test.py,
+│                               manual_context_test.py               [B8 ✅]
 │                               fixtures\ (mock_stream.json, mock_slow.json) [B6 ✅]
+│                               + the seven B10 tool-loop scripts,
+│                                 replayed by `send --script <name>`  [B10 ✅]
 │
 ├── frontend\                   Go
 │   ├── cmd\point\              entry point                          [F1 creates]
@@ -177,11 +194,19 @@ D:\Projects\Point\
 └── design\                     these docs
 ```
 
-`agents\`, `memory\`, and `schemas\` **do not exist**. B9 and B10 create them.
+`memory\` and `schemas\` **do not exist**. B13 and a later episode create what
+they need. `agents\` was created by B9 and `tools\` by B10 — both are real.
 
 `managers\provider.py` **is deleted** — superseded by `providers\` (B4). Keeping
 a second provider abstraction alive was the whole reason to remove it; do not
 recreate it.
+
+`managers\tool.py` **is deleted too** — B10 did not fill it. Same call B9 made
+for `managers\agent.py`'s business rules: a registry, an executor, a schema
+checker, and four tools are not one manager, and `agents\` had already
+established the split. `managers\agent.py` kept only the `AgentConfig` data
+model; there is no `managers\tool.py` counterpart because `Tool` and
+`ToolResult` are data the tool package itself owns. Do not recreate it.
 
 `providers\__init__.py` was missing while every other package had one; **B6
 added it.** The tree worked as a namespace package regardless, so this was

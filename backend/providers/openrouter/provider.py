@@ -33,14 +33,18 @@ from providers.models import (
     ProviderHealthStatus,
     ProviderStreamChunk,
 )
-from providers.openai.provider import reasoning_effort_kwargs
-from providers.openai.translator import OpenAIMessageTranslator
+from providers.openai.provider import _retry_after, reasoning_effort_kwargs, tool_kwargs
+from providers.openai.translator import (
+    OpenAIMessageTranslator,
+    OpenAIToolCallAccumulator,
+)
 
 _OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 
 
 class OpenRouterProvider(BaseProvider):
     name = "openrouter"
+    supports_tools = True
 
     def __init__(self, config) -> None:
         super().__init__(config)
@@ -63,7 +67,7 @@ class OpenRouterProvider(BaseProvider):
         except openai.AuthenticationError as exc:
             raise AuthenticationError(str(exc)) from exc
         except openai.RateLimitError as exc:
-            raise RateLimitError(str(exc)) from exc
+            raise RateLimitError(str(exc), retry_after=_retry_after(exc)) from exc
         except openai.NotFoundError as exc:
             raise ModelNotFoundError(str(exc)) from exc
         except openai.APIConnectionError as exc:
@@ -90,16 +94,23 @@ class OpenRouterProvider(BaseProvider):
                 max_tokens=request.max_tokens,
                 stream=True,
                 **reasoning_effort_kwargs(request),
+                **tool_kwargs(request, self._translator),
             )
+            tool_calls = OpenAIToolCallAccumulator()
             async with stream:
                 async for chunk in stream:
-                    if chunk.choices and chunk.choices[0].delta and chunk.choices[0].delta.content:
-                        yield ProviderStreamChunk(type=ProviderChunkType.TEXT, text=chunk.choices[0].delta.content)
+                    delta = chunk.choices[0].delta if chunk.choices else None
+                    if delta is not None:
+                        if delta.content:
+                            yield ProviderStreamChunk(type=ProviderChunkType.TEXT, text=delta.content)
+                        tool_calls.feed(delta)
+            for call in tool_calls.drain():
+                yield ProviderStreamChunk(type=ProviderChunkType.TOOL_CALL, tool_call=call)
             yield ProviderStreamChunk(type=ProviderChunkType.DONE)
         except openai.AuthenticationError as exc:
             raise AuthenticationError(str(exc)) from exc
         except openai.RateLimitError as exc:
-            raise RateLimitError(str(exc)) from exc
+            raise RateLimitError(str(exc), retry_after=_retry_after(exc)) from exc
         except openai.APIConnectionError as exc:
             raise ProviderConnectionError(str(exc)) from exc
 

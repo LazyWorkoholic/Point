@@ -25,7 +25,15 @@ class StreamAccumulator:
         if event.type == StreamEventType.TEXT_DELTA:
             self._text_parts.append(event.data.get("text", ""))
         elif event.type == StreamEventType.USAGE_UPDATED:
-            self._usage = TokenUsage.from_dict(event.data.get("usage"))
+            usage = TokenUsage.from_dict(event.data.get("usage"))
+            # Summed, not replaced (B10). A tool loop streams several
+            # provider turns into ONE accumulator, and each turn reports
+            # its own usage; keeping only the last one would bill a
+            # six-step research run as if it were a single question.
+            self._usage = TokenUsage(
+                input_tokens=self._usage.input_tokens + usage.input_tokens,
+                output_tokens=self._usage.output_tokens + usage.output_tokens,
+            )
 
     @property
     def text(self) -> str:

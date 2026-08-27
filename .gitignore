@@ -18,3 +18,4 @@ wheels/
 backend/runtime.db
 *.db-wal
 *.db-shm
+.point/

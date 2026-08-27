@@ -1,0 +1,28 @@
+{
+  "model": "mock-1",
+  "turns": [
+    [
+      {
+        "type": "text",
+        "text": "Asking for a tool no agent is granted. ",
+        "delay": 0.01
+      },
+      {
+        "type": "tool_call",
+        "id": "call-1",
+        "name": "terminal",
+        "arguments": {
+          "command": "dir"
+        }
+      },
+      {
+        "type": "usage",
+        "input_tokens": 40,
+        "output_tokens": 6
+      },
+      {
+        "type": "done"
+      }
+    ]
+  ]
+}

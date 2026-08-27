@@ -1,0 +1,16 @@
+{
+  "model": "mock-1",
+  "turns": [
+    [
+      {"type": "text", "text": "Searching. ", "delay": 0.01},
+      {"type": "tool_call", "id": "call-1", "name": "web_search",
+       "arguments": {"query": "point local first workspace", "__mock_fault": "raise"}},
+      {"type": "usage", "input_tokens": 40, "output_tokens": 5},
+      {"type": "done"}
+    ],
+    [
+      {"type": "text", "text": "unreachable -- the raise above ends the task", "delay": 0.01},
+      {"type": "done"}
+    ]
+  ]
+}

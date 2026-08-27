@@ -36,9 +36,11 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import os
 import sys
 import time
 import uuid
+from pathlib import Path
 from typing import Any, Callable, Optional
 
 import appconfig
@@ -194,6 +196,28 @@ async def default_provider(runtime: Runtime) -> tuple[str, str]:
 # Commands
 # ---------------------------------------------------------------------------
 
+
+# B10's `--script <name>`: a name -> fixture mapping over the env var
+# MockProvider already reads (`POINT_MOCK_FIXTURE`). Deliberately not a
+# new provider switch -- the mock is selected by POINT_MOCK=1 exactly as
+# it was in B6, and this only chooses which script it replays.
+#
+# Named rather than free-path so the verification steps in the episode
+# read as what they test, and so a fixture rename is one edit here rather
+# than five in a document.
+SCRIPT_DIR = Path(__file__).resolve().parent / "tests" / "fixtures"
+
+
+def script_fixture(name: str) -> Path:
+    return SCRIPT_DIR / f"{name}.json"
+
+
+def available_scripts() -> list[str]:
+    if not SCRIPT_DIR.is_dir():
+        return []
+    return sorted(p.stem for p in SCRIPT_DIR.glob("*.json"))
+
+
 async def cmd_session_new(runtime: Runtime, args: argparse.Namespace) -> int:
     provider, model = args.provider, args.model
     if not provider:
@@ -212,9 +236,13 @@ async def cmd_session_new(runtime: Runtime, args: argparse.Namespace) -> int:
             print(f"error: {exc}", file=sys.stderr)
             return EXIT_FAILED
 
+    # B10: a session's project is what gives read_file/list_files a root
+    # to be guarded against. CreateSession has carried `project_id` since
+    # B7; nothing on the CLI could set it until a tool needed one.
     envelopes = await call(
         runtime, "CreateSession", verbose=args.verbose,
         title=args.title, provider=provider, model=model,
+        project_id=args.project_id,
         settings={"agent_id": args.agent} if args.agent else None,
     )
     _print_errors(envelopes)
@@ -222,7 +250,11 @@ async def cmd_session_new(runtime: Runtime, args: argparse.Namespace) -> int:
         return EXIT_FAILED
     session = envelopes[-1]["payload"]["session"]
     agent_note = f"  agent={args.agent}" if args.agent else ""
-    print(f"{session['id']}  {session['title']}  [{session['provider']}/{session['model']}]{agent_note}")
+    project_note = f"  project={args.project_id}" if args.project_id else ""
+    print(
+        f"{session['id']}  {session['title']}  "
+        f"[{session['provider']}/{session['model']}]{agent_note}{project_note}"
+    )
     return EXIT_OK
 
 
@@ -281,8 +313,20 @@ async def cmd_send(runtime: Runtime, args: argparse.Namespace) -> int:
         elif kind == "TaskToken":
             sys.stdout.write(payload.get("text", ""))
             sys.stdout.flush()
+        elif kind == "ProgressUpdated":
+            print(f"\n[progress: {payload.get('data', {}).get('message', '')}]")
+        elif kind == "ToolStarted":
+            data = payload.get("data", {})
+            print(f"\n[tool.started {data.get('tool')} {data.get('arguments', {})}]")
+        elif kind == "ToolCompleted":
+            data = payload.get("data", {})
+            outcome = "ok" if data.get("ok") else f"failed: {data.get('error')}"
+            print(f"[tool.completed {data.get('tool')} {data.get('duration_ms')}ms {outcome}]")
         elif kind == "task.cancel.accepted":
             print(f"\n[cancel accepted: {payload.get('accepted')}]")
+        elif kind == "TaskFailed":
+            code = payload.get("code") or "-"
+            print(f"\n[TaskFailed code={code}] {payload.get('error', '')}")
         elif kind in _TASK_TERMINAL:
             print(f"\n[{kind}]")
 
@@ -299,10 +343,23 @@ async def cmd_send(runtime: Runtime, args: argparse.Namespace) -> int:
     def until(envelope: dict[str, Any]) -> bool:
         return envelope["type"] in _TASK_TERMINAL or envelope["type"] == "Error"
 
+    # BoundsOverride's wire form. Omitted entirely when no flag was
+    # given, so a normal send carries no bounds key at all and the
+    # agent's own config is the only thing that decides.
+    bounds = {
+        key: value
+        for key, value in (
+            ("max_steps", args.max_steps),
+            ("max_tool_calls", args.max_tool_calls),
+            ("timeout_s", args.max_seconds),
+        )
+        if value is not None
+    }
+
     envelopes = await call(
         runtime, "SendMessage", timeout=args.timeout, verbose=args.verbose,
         until=until, match=_first_ack_then(match), on_event=on_event,
-        session=session_id, text=args.text,
+        session=session_id, text=args.text, **({"bounds": bounds} if bounds else {}),
     )
     _print_errors(envelopes)
     return EXIT_FAILED if _failed(envelopes) else EXIT_OK
@@ -783,6 +840,10 @@ def build_parser() -> argparse.ArgumentParser:
     new.add_argument("--provider", default=None, help="default: ollama if reachable, else echo")
     new.add_argument("--model", default=None)
     new.add_argument("--agent", default=None, help="agent id (default: general)")
+    new.add_argument(
+        "--project", dest="project_id", default=None,
+        help="project id (from `project init`) -- the root file tools are guarded against",
+    )
     listing = session.add_parser("list", help="list sessions", parents=[common])
     listing.add_argument("--all", action="store_true", help="include archived")
 
@@ -791,6 +852,19 @@ def build_parser() -> argparse.ArgumentParser:
     send.add_argument("--session", default=None, help="existing session id")
     send.add_argument("--cancel-after", type=float, default=None, metavar="SECONDS")
     send.add_argument("--timeout", type=float, default=180.0)
+    send.add_argument(
+        "--script", default=None, metavar="NAME",
+        help="replay a mock fixture by name (requires POINT_MOCK=1); "
+             "see tests\\fixtures\\",
+    )
+    # The BoundsOverride flags (B10). One send only -- they never touch
+    # the agent's stored config, which is frozen and builtin-read-only.
+    send.add_argument("--max-steps", type=int, default=None)
+    send.add_argument("--max-tool-calls", type=int, default=None)
+    send.add_argument(
+        "--max-seconds", type=int, default=None, dest="max_seconds",
+        help="override the agent's timeout_s for this send",
+    )
 
     ctx = sub.add_parser("context", help="context builder", parents=[common]).add_subparsers(
         dest="context_command", required=True
@@ -872,6 +946,23 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: Optional[list[str]] = None) -> int:
     args = build_parser().parse_args(argv)
     configure_logging(verbose=args.verbose)
+
+    # Set before anything constructs a Runtime: MockProvider reads
+    # POINT_MOCK_FIXTURE at construction, and the provider registry is
+    # built inside Runtime.__init__.
+    if getattr(args, "script", None):
+        fixture = script_fixture(args.script)
+        if not fixture.is_file():
+            print(
+                f"no such script: {args.script} "
+                f"(available: {', '.join(available_scripts()) or 'none'})",
+                file=sys.stderr,
+            )
+            return EXIT_FAILED
+        if os.environ.get("POINT_MOCK") != "1":
+            print("--script requires POINT_MOCK=1", file=sys.stderr)
+            return EXIT_FAILED
+        os.environ["POINT_MOCK_FIXTURE"] = str(fixture)
 
     if args.command == "doctor":
         return cmd_doctor(args)

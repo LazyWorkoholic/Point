@@ -8,27 +8,52 @@ from __future__ import annotations
 
 import aiosqlite
 
+from typing import Optional
+
 from agents.builtins import BUILTIN_AGENTS, GENERAL_AGENT_ID
 from database.agent_repository import AgentRepository
 from logging_setup import get_logger
 from managers.agent import AgentConfig
 from managers.session import Session
 from runtime.errors import AgentNotFoundError
+from tools.registry import ToolRegistry
 
 _log = get_logger("agents.registry")
 
 
 class AgentRegistry:
-    def __init__(self, conn: aiosqlite.Connection) -> None:
+    def __init__(
+        self, conn: aiosqlite.Connection, tools: Optional[ToolRegistry] = None
+    ) -> None:
         self._repo = AgentRepository(conn)
+        self._tools = tools
 
     async def seed_builtins(self) -> None:
         """Upserted by id, every startup. Code is the source of truth for
         a built-in's fields -- a stale row from an older build is
-        overwritten, not accumulated alongside it."""
+        overwritten, not accumulated alongside it.
+
+        B10: grants are validated **before** the first upsert, not after
+        the last. A built-in naming a tool that does not exist must not
+        reach the table at all -- half-seeded is worse than not seeded,
+        because the next startup would find a row and believe it."""
+        self._validate_grants(BUILTIN_AGENTS)
         for config in BUILTIN_AGENTS:
             await self._repo.upsert(config)
         _log.info("Seeded %d built-in agent(s)", len(BUILTIN_AGENTS))
+
+    async def validate_all(self) -> None:
+        """Every agent in the table, built-in or not. Called once at
+        startup, after seeding -- so a user agent (the parked dynamic
+        -agents feature) naming a tool that no longer exists is a startup
+        error naming the tool, not a refusal in the middle of someone's
+        conversation."""
+        self._validate_grants(await self.list())
+
+    def _validate_grants(self, configs) -> None:
+        if self._tools is None:
+            return
+        self._tools.validate_grants(configs)
 
     async def get(self, agent_id: str) -> AgentConfig:
         config = await self._repo.fetch_by_id(agent_id)

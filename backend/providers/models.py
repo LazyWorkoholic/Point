@@ -121,7 +121,26 @@ class ProviderChunkType(str, Enum):
     TEXT = "text"
     THINKING = "thinking"
     USAGE = "usage"
+    TOOL_CALL = "tool_call"
     DONE = "done"
+
+
+@dataclass(frozen=True)
+class ToolCall:
+    """One tool invocation a model asked for, normalized (B10).
+
+    `id` is the provider's own correlation handle for the call --
+    OpenAI's `tool_call.id`, Anthropic's `tool_use` block id. Gemini and
+    Ollama do not issue one, so the adapter synthesizes it; the loop only
+    needs it to pair a result back to a request, and it never leaves the
+    process. `arguments` is already-parsed JSON, never the raw string:
+    every adapter parses in its own layer so nothing downstream has to
+    know which vendors stream arguments as fragments.
+    """
+
+    id: str
+    name: str
+    arguments: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -138,3 +157,8 @@ class ProviderStreamChunk:
     type: ProviderChunkType
     text: Optional[str] = None
     usage: Optional[TokenUsage] = None
+    # Set only on TOOL_CALL chunks (B10). A provider emits one of these
+    # once it has the *whole* call -- fragmented argument deltas are
+    # reassembled inside the adapter, because a half-parsed argument dict
+    # is not something the tool loop can validate against a schema.
+    tool_call: Optional[ToolCall] = None

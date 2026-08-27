@@ -30,6 +30,16 @@ class BaseProvider(ABC):
     # interface, and it must never be selectable from the UI.
     selectable: bool = True
 
+    # Provider-level tool advertisement (B10). Distinct from
+    # `ModelCapabilities.supports_tools`, which is per *model*: this one
+    # answers "can this adapter translate a tool schema and normalize a
+    # tool call back at all?", and it is what an agent requiring tools is
+    # checked against at INVOCATION, before a single token is streamed.
+    # Defaulting to False means a new adapter is tool-less until someone
+    # writes the translation, rather than silently dropping the tools
+    # mid-stream.
+    supports_tools: bool = False
+
     def __init__(self, config: ProviderConfig) -> None:
         self.config = config
 

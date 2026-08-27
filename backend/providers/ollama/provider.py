@@ -7,6 +7,7 @@ key, no billing -- making it the fastest thing to actually test.
 from __future__ import annotations
 
 import json
+import uuid
 from typing import AsyncIterator
 
 import httpx
@@ -27,12 +28,40 @@ from providers.models import (
     ProviderHealth,
     ProviderHealthStatus,
     ProviderStreamChunk,
+    ToolCall,
 )
 from providers.ollama.translator import OllamaMessageTranslator
 
 
+def _tool_calls(message: dict) -> list[ToolCall]:
+    """Ollama returns whole tool calls on one message, already parsed --
+    no fragment reassembly, and no id of its own, so one is synthesized
+    (B10). `arguments` is occasionally a JSON string rather than an
+    object depending on the model; both shapes are accepted."""
+    calls = []
+    for raw in message.get("tool_calls") or []:
+        function = raw.get("function", {})
+        arguments = function.get("arguments", {})
+        if isinstance(arguments, str):
+            try:
+                arguments = json.loads(arguments)
+            except json.JSONDecodeError:
+                arguments = {}
+        if not isinstance(arguments, dict):
+            arguments = {}
+        calls.append(
+            ToolCall(
+                id=raw.get("id") or f"call-{uuid.uuid4().hex[:12]}",
+                name=function.get("name", ""),
+                arguments=arguments,
+            )
+        )
+    return [c for c in calls if c.name]
+
+
 class OllamaProvider(BaseProvider):
     name = "ollama"
+    supports_tools = True
 
     def __init__(self, config) -> None:
         super().__init__(config)
@@ -45,6 +74,8 @@ class OllamaProvider(BaseProvider):
             "messages": [self._translator.to_provider_format(m) for m in request.messages],
             "stream": False,
         }
+        if request.tools:
+            payload["tools"] = self._translator.tools_to_provider_format(request.tools)
         try:
             async with httpx.AsyncClient(timeout=self.config.timeout) as client:
                 resp = await client.post(f"{self._base_url}/api/chat", json=payload)
@@ -74,6 +105,8 @@ class OllamaProvider(BaseProvider):
             "messages": [self._translator.to_provider_format(m) for m in request.messages],
             "stream": True,
         }
+        if request.tools:
+            payload["tools"] = self._translator.tools_to_provider_format(request.tools)
         try:
             async with httpx.AsyncClient(timeout=self.config.timeout) as client:
                 async with client.stream("POST", f"{self._base_url}/api/chat", json=payload) as resp:
@@ -82,9 +115,14 @@ class OllamaProvider(BaseProvider):
                         if not line:
                             continue
                         chunk = json.loads(line)
-                        content = chunk.get("message", {}).get("content", "")
+                        message = chunk.get("message", {})
+                        content = message.get("content", "")
                         if content:
                             yield ProviderStreamChunk(type=ProviderChunkType.TEXT, text=content)
+                        for call in _tool_calls(message):
+                            yield ProviderStreamChunk(
+                                type=ProviderChunkType.TOOL_CALL, tool_call=call
+                            )
                         if chunk.get("done"):
                             usage = TokenUsage(
                                 input_tokens=chunk.get("prompt_eval_count", 0),
@@ -107,7 +145,7 @@ class OllamaProvider(BaseProvider):
             Model(
                 id=m["name"], provider=self.name, display_name=m["name"],
                 context_window=0,  # not exposed via /api/tags
-                capabilities=ModelCapabilities(supports_streaming=True),
+                capabilities=ModelCapabilities(supports_streaming=True, supports_tools=True),
             )
             for m in data.get("models", [])
         ]

@@ -36,11 +36,20 @@ class TaskState(str, Enum):
 
 @dataclass
 class TaskResult:
-    """Final outcome of a task, regardless of what kind of work it did."""
+    """Final outcome of a task, regardless of what kind of work it did.
+
+    B10 added `code`: a machine-readable slug beside the human `error`
+    string, in the same spirit as `tasks.error_code` (which B6 created
+    and only ever wrote `backend_died` into). Go has to be able to tell
+    `bounds_exceeded` -- a loop that stopped at its boundary and kept its
+    partial answer -- from `tool_error`, a genuine failure, and branching
+    on the wording of an error message is how a UI ends up coupled to a
+    sentence."""
 
     state: TaskState
     output: Any = None
     error: Optional[str] = None
+    code: Optional[str] = None
     finished_at: float = field(default_factory=time.time)
 
 
@@ -129,11 +138,16 @@ class Task:
             await self._sink(self, {"type": "cancelled"})
             raise
         except Exception as exc:  # noqa: BLE001 - we deliberately convert to a result
+            # `code` is read off the exception when it carries one --
+            # every runtime.errors.ToolError subclass does (B10). Task
+            # still knows nothing about tools: it copies an attribute if
+            # it is there and leaves it None if it is not.
+            code = getattr(exc, "code", None)
             self.state = TaskState.FAILED
-            self.result = TaskResult(state=TaskState.FAILED, error=str(exc))
+            self.result = TaskResult(state=TaskState.FAILED, error=str(exc), code=code)
             self.finished_at = self.result.finished_at
             await self._record()
-            await self._sink(self, {"type": "failed", "error": str(exc)})
+            await self._sink(self, {"type": "failed", "error": str(exc), "code": code})
 
     async def _record(self) -> None:
         """Mirror the current state to durable storage, if anyone asked

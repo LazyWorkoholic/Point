@@ -22,3 +22,20 @@ class OllamaMessageTranslator(MessageTranslator):
 
     def from_provider_format(self, raw: dict[str, Any], session_id: str) -> Message:
         return AssistantMessage(session_id, raw.get("content", ""))
+
+    def tools_to_provider_format(self, tools: list[dict[str, Any]]) -> Any:
+        """/api/chat took OpenAI's tool shape wholesale, so this is the
+        same translation OpenAIMessageTranslator does -- duplicated
+        rather than imported, because the day Ollama diverges is the day
+        a shared helper becomes a bug in two providers instead of one."""
+        return [
+            {
+                "type": "function",
+                "function": {
+                    "name": t["name"],
+                    "description": t["description"],
+                    "parameters": t["parameters"],
+                },
+            }
+            for t in tools
+        ]

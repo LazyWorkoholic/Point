@@ -402,6 +402,17 @@ class MemoryService(Protocol):
 
     async def project(self, session_id: str) -> Optional[Project]: ...
 
+    async def task_messages(self, session_id: str, task_id: str) -> list[Message]:
+        """Backs B10's `load_task_result`. Not part of the Protocol.
+
+        Scoped to `session_id` on purpose: a task id is not a capability.
+        Letting any agent load any task's output by id would let an agent
+        holding only `reads_session` read across every session in the
+        workspace, which is exactly the ceiling the scope flags exist to
+        enforce."""
+        messages = await self._sessions.fetch_messages_for_task(task_id)
+        return [m for m in messages if m.session_id == session_id]
+
     async def record_attachment_sent(self, attachment_id: str, mtime: int, size: int) -> None: ...
 
     async def search(self, query: str, scopes: list[str], limit: int) -> list[Any]: ...
@@ -459,6 +470,17 @@ class SessionMemoryService:
         if session is None or not session.project_id:
             return None
         return await self._projects.fetch_by_id(session.project_id)
+
+    async def task_messages(self, session_id: str, task_id: str) -> list[Message]:
+        """Backs B10's `load_task_result`. Not part of the Protocol.
+
+        Scoped to `session_id` on purpose: a task id is not a capability.
+        Letting any agent load any task's output by id would let an agent
+        holding only `reads_session` read across every session in the
+        workspace, which is exactly the ceiling the scope flags exist to
+        enforce."""
+        messages = await self._sessions.fetch_messages_for_task(task_id)
+        return [m for m in messages if m.session_id == session_id]
 
     async def record_attachment_sent(self, attachment_id: str, mtime: int, size: int) -> None:
         await self._attachments.update_recorded_stat(attachment_id, mtime, size)

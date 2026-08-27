@@ -22,11 +22,60 @@ class PointError(Exception):
 Codes, stable — the UI switches on `code`, never on message text:
 ```
 provider_auth · provider_rate_limit · provider_unavailable · provider_bad_request
-context_overflow · bounds_exceeded · tool_failed · tool_timeout
+context_overflow · bounds_exceeded · tool_error · tool_timeout
+tool_not_granted · tool_not_found · tools_unsupported
 path_denied · file_too_large · file_binary · file_changed · lock_held
 cap_exceeded · queue_full · not_found · schema_mismatch · backend_died
 ```
 Every raise site maps to one. No message may contain a credential.
+
+**`tool_failed` was renamed to `tool_error`, and three tool codes were
+added.** This list originally said `tool_failed`; B10 shipped the code as
+`tool_error` and it is already on the wire and in `tasks.error_code`. The
+code that exists wins over the code that was planned — corrected here rather
+than left for B17 to discover a mismatch it would have to migrate. The three
+additions (`tool_not_granted`, `tool_not_found`, `tools_unsupported`) had no
+entry at all because the tool system did not exist when this list was
+written.
+
+### The three stopgap classes to fold in — named, not described
+
+Three earlier episodes deliberately raised a narrow exception rather than
+inventing a piece of `PointError` early, each with a docstring saying so.
+**These are the exact classes, and this is the complete list** — do not go
+looking for others, and do not build `PointError` piecemeal before this
+episode:
+
+| Class | Module | Episode | Code it becomes |
+|---|---|---|---|
+| `PathDeniedError` | `runtime\errors.py` | B7 | `path_denied` |
+| `ContextOverflowError` | `runtime\errors.py` | B8 | `context_overflow` |
+| `ToolError` + 5 subclasses | `runtime\errors.py` | B10 | see below |
+
+`ToolError` is different from the other two in one way that matters here:
+**it already carries its codes.** B10's Done-when #4 required
+`bounds_exceeded` to be distinguishable on the wire and in the `tasks` row,
+so the code could not wait for this episode to invent one. Every subclass
+sets a `code` class attribute, `Task._run()` copies it onto
+`TaskResult.code` via `getattr(exc, "code", None)`, and it reaches Go in the
+`TaskFailed` payload and `tasks.error_code`:
+
+```
+BoundsExceededError    -> bounds_exceeded    (also carries .bound and .limit)
+ToolExecutionError     -> tool_error
+ToolTimeoutError       -> tool_timeout
+ToolNotGrantedError    -> tool_not_granted
+ToolNotFoundError      -> tool_not_found
+ToolsUnsupportedError  -> tools_unsupported
+```
+
+**B17's job for the tool family is therefore narrower than for the other
+two: fold them into the shared envelope, do not invent codes for them.**
+Changing any of these strings breaks a frontend branch that already exists.
+`ContextOverflowError` is the parallel warning in the other direction — it
+carries `needed_tokens`/`budget_tokens` as attributes precisely so the UI
+never re-parses them out of a sentence; `PointError.detail` is where those
+belong.
 
 ### Test suite
 

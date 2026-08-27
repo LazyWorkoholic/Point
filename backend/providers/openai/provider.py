@@ -29,7 +29,21 @@ from providers.models import (
     ProviderHealthStatus,
     ProviderStreamChunk,
 )
-from providers.openai.translator import OpenAIMessageTranslator
+from providers.openai.translator import (
+    OpenAIMessageTranslator,
+    OpenAIToolCallAccumulator,
+)
+
+
+def _retry_after(exc) -> float | None:
+    """Retry-After off an openai SDK error, for providers.retry's
+    backoff. Shared with OpenRouter, which raises the same SDK's
+    exceptions."""
+    try:
+        raw = exc.response.headers.get("retry-after")
+        return float(raw) if raw is not None else None
+    except (AttributeError, TypeError, ValueError):
+        return None
 
 
 def reasoning_effort_kwargs(request: GenerationRequest) -> dict:
@@ -47,8 +61,18 @@ def reasoning_effort_kwargs(request: GenerationRequest) -> dict:
     return {"reasoning_effort": request.effort.value}
 
 
+def tool_kwargs(request: GenerationRequest, translator) -> dict:
+    """Shared with OpenRouter. Omitted entirely when the request carries
+    no tools -- sending `tools: []` is a 400 on some deployments and a
+    silent behaviour change on others."""
+    if not request.tools:
+        return {}
+    return {"tools": translator.tools_to_provider_format(request.tools)}
+
+
 class OpenAIProvider(BaseProvider):
     name = "openai"
+    supports_tools = True
 
     def __init__(self, config) -> None:
         super().__init__(config)
@@ -65,11 +89,12 @@ class OpenAIProvider(BaseProvider):
                 temperature=request.temperature,
                 max_tokens=request.max_tokens,
                 **reasoning_effort_kwargs(request),
+                **tool_kwargs(request, self._translator),
             )
         except openai.AuthenticationError as exc:
             raise AuthenticationError(str(exc)) from exc
         except openai.RateLimitError as exc:
-            raise RateLimitError(str(exc)) from exc
+            raise RateLimitError(str(exc), retry_after=_retry_after(exc)) from exc
         except openai.NotFoundError as exc:
             raise ModelNotFoundError(str(exc)) from exc
         except openai.APIConnectionError as exc:
@@ -97,11 +122,16 @@ class OpenAIProvider(BaseProvider):
                 stream=True,
                 stream_options={"include_usage": True},
                 **reasoning_effort_kwargs(request),
+                **tool_kwargs(request, self._translator),
             )
+            tool_calls = OpenAIToolCallAccumulator()
             async with stream:
                 async for chunk in stream:
-                    if chunk.choices and chunk.choices[0].delta and chunk.choices[0].delta.content:
-                        yield ProviderStreamChunk(type=ProviderChunkType.TEXT, text=chunk.choices[0].delta.content)
+                    delta = chunk.choices[0].delta if chunk.choices else None
+                    if delta is not None:
+                        if delta.content:
+                            yield ProviderStreamChunk(type=ProviderChunkType.TEXT, text=delta.content)
+                        tool_calls.feed(delta)
                     if chunk.usage:
                         yield ProviderStreamChunk(
                             type=ProviderChunkType.USAGE,
@@ -110,11 +140,17 @@ class OpenAIProvider(BaseProvider):
                                 output_tokens=chunk.usage.completion_tokens,
                             ),
                         )
+            # Drained after the stream closes, not on finish_reason:
+            # usage arrives in a chunk *after* the one carrying
+            # finish_reason, and emitting early would cut the usage
+            # chunk off from the turn it belongs to.
+            for call in tool_calls.drain():
+                yield ProviderStreamChunk(type=ProviderChunkType.TOOL_CALL, tool_call=call)
             yield ProviderStreamChunk(type=ProviderChunkType.DONE)
         except openai.AuthenticationError as exc:
             raise AuthenticationError(str(exc)) from exc
         except openai.RateLimitError as exc:
-            raise RateLimitError(str(exc)) from exc
+            raise RateLimitError(str(exc), retry_after=_retry_after(exc)) from exc
         except openai.APIConnectionError as exc:
             raise ProviderConnectionError(str(exc)) from exc
 

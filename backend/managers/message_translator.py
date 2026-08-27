@@ -31,3 +31,21 @@ class MessageTranslator(ABC):
     def from_provider_format(self, raw: dict[str, Any], session_id: str) -> Message:
         """This provider's wire format -> internal Message."""
         raise NotImplementedError
+
+    # -- tools (B10) ------------------------------------------------------
+    #
+    # Deliberately NOT abstract. A translator that has not been taught a
+    # vendor's tool shape returns None, which reads downstream as "this
+    # provider takes no tools" -- the same answer as BaseProvider's
+    # supports_tools = False, arrived at from the other side. Making it
+    # abstract would force every existing translator to grow a stub that
+    # lies.
+
+    def tools_to_provider_format(self, tools: list[dict[str, Any]]) -> Any:
+        """Common tool schema -> this provider's own tool format.
+
+        The common schema is exactly what `tools.models.Tool.to_schema()`
+        produces: {"name", "description", "parameters"} with `parameters`
+        a JSON Schema object. Returns None when this provider takes no
+        tools."""
+        return None

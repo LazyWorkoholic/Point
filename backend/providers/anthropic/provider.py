@@ -30,11 +30,27 @@ from providers.models import (
     ProviderHealth,
     ProviderHealthStatus,
     ProviderStreamChunk,
+    ToolCall,
 )
+
+
+def _retry_after(exc) -> float | None:
+    try:
+        raw = exc.response.headers.get("retry-after")
+        return float(raw) if raw is not None else None
+    except (AttributeError, TypeError, ValueError):
+        return None
+
+
+def _tool_kwargs(request: GenerationRequest, translator) -> dict:
+    if not request.tools:
+        return {}
+    return {"tools": translator.tools_to_provider_format(request.tools)}
 
 
 class AnthropicProvider(BaseProvider):
     name = "anthropic"
+    supports_tools = True
 
     def __init__(self, config) -> None:
         super().__init__(config)
@@ -47,11 +63,12 @@ class AnthropicProvider(BaseProvider):
                 model=request.model,
                 max_tokens=request.max_tokens or 4096,
                 messages=[self._translator.to_provider_format(m) for m in request.messages],
+                **_tool_kwargs(request, self._translator),
             )
         except anthropic.AuthenticationError as exc:
             raise AuthenticationError(str(exc)) from exc
         except anthropic.RateLimitError as exc:
-            raise RateLimitError(str(exc)) from exc
+            raise RateLimitError(str(exc), retry_after=_retry_after(exc)) from exc
         except anthropic.NotFoundError as exc:
             raise ModelNotFoundError(str(exc)) from exc
         except anthropic.APIConnectionError as exc:
@@ -79,6 +96,7 @@ class AnthropicProvider(BaseProvider):
                 model=request.model,
                 max_tokens=request.max_tokens or 4096,
                 messages=[self._translator.to_provider_format(m) for m in request.messages],
+                **_tool_kwargs(request, self._translator),
             ) as stream:
                 async for event in stream:
                     if event.type == "content_block_delta" and event.delta.type == "text_delta":
@@ -90,11 +108,26 @@ class AnthropicProvider(BaseProvider):
                             output_tokens=final.usage.output_tokens,
                         )
                         yield ProviderStreamChunk(type=ProviderChunkType.USAGE, usage=usage)
+                        # Read off the final message rather than
+                        # reassembled from input_json_delta fragments:
+                        # the SDK has already done that accumulation, and
+                        # doing it twice is two chances to get it wrong.
+                        for block in final.content:
+                            if getattr(block, "type", None) != "tool_use":
+                                continue
+                            yield ProviderStreamChunk(
+                                type=ProviderChunkType.TOOL_CALL,
+                                tool_call=ToolCall(
+                                    id=block.id,
+                                    name=block.name,
+                                    arguments=dict(block.input or {}),
+                                ),
+                            )
                         yield ProviderStreamChunk(type=ProviderChunkType.DONE)
         except anthropic.AuthenticationError as exc:
             raise AuthenticationError(str(exc)) from exc
         except anthropic.RateLimitError as exc:
-            raise RateLimitError(str(exc)) from exc
+            raise RateLimitError(str(exc), retry_after=_retry_after(exc)) from exc
         except anthropic.APIConnectionError as exc:
             raise ProviderConnectionError(str(exc)) from exc
 

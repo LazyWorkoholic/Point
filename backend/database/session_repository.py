@@ -94,6 +94,18 @@ class SessionRepository:
         )
         await self._conn.commit()
 
+    async def fetch_messages_for_task(self, task_id: str) -> list[Message]:
+        """Every message one task produced, oldest first. Uses B6's
+        existing idx_messages_task -- B10's load_task_result is the first
+        thing that ever needed the index that has been there since the
+        table was created."""
+        cursor = await self._conn.execute(
+            "SELECT * FROM messages WHERE task_id = ? ORDER BY created_at ASC, rowid ASC",
+            (task_id,),
+        )
+        rows = await cursor.fetchall()
+        return [self._row_to_message(r) for r in rows]
+
     async def fetch_messages(self, session_id: str) -> list[Message]:
         cursor = await self._conn.execute(
             "SELECT * FROM messages WHERE session_id = ? ORDER BY created_at ASC, rowid ASC",

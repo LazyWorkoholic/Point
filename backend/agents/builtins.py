@@ -5,7 +5,9 @@ source of truth `AgentRegistry.seed_builtins()` upserts into the
 They differ **structurally**, not by prompt:
 
                 General      Filler-Explainer     Research
-    tools       --           --                   web, fs, load_task_result
+    tools       --           --                   read_file, list_files,
+                                                  web_search,
+                                                  load_task_result
     reads proj  no           yes (explainer mode)  yes
     writes mem  no           no                    proposals only
     multi-step  no           no                    yes, bounded
@@ -14,6 +16,16 @@ They differ **structurally**, not by prompt:
 Behaviour (what the Filler-Explainer mode split actually does, what the
 Research loop actually does) is B11. This file only owns the config
 that makes those differences visible before any of it is built.
+
+**Research's tool grants were renamed in B10.** They read
+`("web", "fs", "load_task_result")` when this file shipped in B9 --
+placeholder category names written before any tool existed. B10
+registered the real four (`read_file`, `list_files`, `web_search`,
+`load_task_result`) and made an unregistered grant a *load-time* failure,
+which those three placeholder names would have tripped on every startup.
+Built-ins are re-upserted from code on every startup, so the rename
+needed no migration: the stale row is overwritten, not accumulated
+beside the new one.
 """
 
 from __future__ import annotations
@@ -114,7 +126,7 @@ _RESEARCH = AgentConfig(
         "worth keeping are proposals, not writes -- you never save memory "
         "directly."
     ),
-    tools=("web", "fs", "load_task_result"),
+    tools=("read_file", "list_files", "web_search", "load_task_result"),
     reads_session=True,
     reads_project=True,
     reads_global=False,

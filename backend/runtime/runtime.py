@@ -11,11 +11,12 @@ from typing import Any, Optional, Union
 
 import aiosqlite
 
-from agents.executor import AgentExecutor
+from agents.executor import AgentExecutor, BoundsOverride
 from agents.registry import AgentRegistry
 from database.connection import open_database
 from database.migrations import SCHEMA_VERSION
 from database.task_repository import TaskRepository
+from database.tool_call_repository import ToolCallRepository
 from logging_setup import get_logger
 from managers.context import SessionMemoryService
 from managers.project import Project
@@ -42,6 +43,7 @@ from providers.models import ProviderConfig
 from streaming.adapter import StreamAdapter
 from streaming.events import StreamEventType
 from streaming.manager import StreamManager
+from tools.registry import build_default_registry
 
 
 _log = get_logger("runtime")
@@ -84,10 +86,19 @@ class Runtime:
         # execution path every SendMessage goes through. AgentExecutor
         # gets managers, never a database handle or its own provider
         # client -- see agents\executor.py's module docstring.
-        self.agents = AgentRegistry(db_conn)
+        # B10: the tool registry is built before the agent registry,
+        # because seeding an agent now validates its grants against it --
+        # an agent naming a tool that does not exist must fail at startup,
+        # not at the call that would have used it.
+        self.tools = build_default_registry()
+        self.tool_calls = ToolCallRepository(db_conn)
+        self.agents = AgentRegistry(db_conn, tools=self.tools)
         self.agent_executor = AgentExecutor(
             self.sessions, self.memory, self.tasks, self.providers,
             self.streams, self.stream_adapter, self._resolve_provider_name,
+            projects=self.projects,
+            tools=self.tools,
+            tool_recorder=self.tool_calls.record,
         )
 
         # request id -> the envelope metadata that came in with it, so
@@ -113,6 +124,7 @@ class Runtime:
         # so it cannot happen in __init__. Upserted by id: a stale row
         # from an older build is overwritten, not accumulated.
         await runtime.agents.seed_builtins()
+        await runtime.agents.validate_all()
         return runtime
 
     async def close(self) -> None:
@@ -561,16 +573,18 @@ class Runtime:
             agent=agent,
             make_sink=lambda message_id: self._make_stream_sink(event.request_id, session_id, message_id),
             inline=True,
+            bounds=_bounds_override(event.payload.get("bounds")),
         )
+        # TaskStarted is emitted by the sink, from Task._run()'s own
+        # "started" chunk -- NOT here (B10 fix). Emitting it here raced
+        # the task body: create_task() schedules the body immediately,
+        # and the first `await` inside run() hands the loop to it, so any
+        # event the body produced before this line reached the client
+        # ahead of the TaskStarted that announces the task. B9's single
+        # round-trip hid it (the first provider chunk always arrived
+        # later than this emit); B10's loop emits `step 1/N` with no
+        # delay at all and lost it every time.
         self.state.active_task_count = self.tasks.active_count()
-
-        await self._emit(OutgoingEvent(
-            type=OutgoingEventType.TASK_STARTED,
-            request_id=event.request_id,
-            task_id=run.task.id,
-            session_id=session_id,
-            payload={"session": session_id, "message_id": run.message_id},
-        ))
 
     async def _handle_cancel_task(self, event: IncomingEvent) -> None:
         """The ack is NOT terminal (B6 §7). It used to be a second
@@ -624,6 +638,10 @@ class Runtime:
             StreamEventType.STATUS_CHANGED: OutgoingEventType.STATUS_CHANGED,
             StreamEventType.PROGRESS_UPDATED: OutgoingEventType.PROGRESS_UPDATED,
             StreamEventType.USAGE_UPDATED: OutgoingEventType.USAGE_UPDATED,
+            # B10. The step counter and the rate-limit notice both ride
+            # PROGRESS_UPDATED above; these two are the tool pair.
+            StreamEventType.TOOL_STARTED: OutgoingEventType.TOOL_STARTED,
+            StreamEventType.TOOL_COMPLETED: OutgoingEventType.TOOL_COMPLETED,
         }
         echo_collected: list[str] = []  # only used for session.provider == "echo"
 
@@ -631,7 +649,18 @@ class Runtime:
             kind = chunk.get("type")
 
             if kind == "started":
-                return  # Runtime already emitted TaskStarted before the body ran
+                # The one ordering guarantee that matters: Task._run()
+                # emits this before it pulls the first chunk out of the
+                # body, so TaskStarted always precedes everything the
+                # task causes.
+                await self._emit(OutgoingEvent(
+                    type=OutgoingEventType.TASK_STARTED,
+                    request_id=request_id,
+                    task_id=task.id,
+                    session_id=session_id,
+                    payload={"session": session_id, "message_id": message_id},
+                ))
+                return
 
             if kind == "chunk":
                 if "stream_event" in chunk:
@@ -692,7 +721,14 @@ class Runtime:
                 "failed": OutgoingEventType.TASK_FAILED,
                 "cancelled": OutgoingEventType.TASK_CANCELLED,
             }[kind]
-            payload = {"error": chunk.get("error", "unknown error")} if kind == "failed" else {}
+            # B10: `code` rides beside `error` so Go can tell
+            # `bounds_exceeded` -- a loop that stopped at its boundary and
+            # kept its partial answer -- from a genuine failure, without
+            # parsing the message.
+            payload = (
+                {"error": chunk.get("error", "unknown error"), "code": chunk.get("code")}
+                if kind == "failed" else {}
+            )
             await self._emit(OutgoingEvent(
                 type=out_type, request_id=request_id, task_id=task.id,
                 session_id=session_id, payload=payload,
@@ -794,7 +830,13 @@ class Runtime:
         transitions happen. agent_id is set by B9's AgentExecutor at
         task-creation time and simply carried through; project_id /
         connection_id / git_checkpoint_sha stay NULL in v1 -- they are
-        the hooks for B7, SSH, and the parked Coding Assistant."""
+        the hooks for B7, SSH, and the parked Coding Assistant.
+
+        B10: `error_code` is now written for live failures too. Until
+        this episode the column only ever held `backend_died`, written by
+        the startup sweeper -- a task that failed while the process was
+        alive left the column NULL, so "why did this task fail" was
+        answerable for crashes and nothing else."""
         await self.task_repo.record(
             task_id=task.id,
             session_id=task.session_id,
@@ -803,5 +845,22 @@ class Runtime:
             created_at=task.created_at,
             started_at=task.started_at,
             finished_at=task.finished_at,
+            error_code=task.result.code if task.result else None,
             agent_id=task.agent_id,
         )
+
+def _bounds_override(payload: Optional[dict[str, Any]]) -> Optional[BoundsOverride]:
+    """SendMessage's optional `bounds` object -> a BoundsOverride (B10).
+
+    Returns None when the key is absent, which is the normal case: no
+    bounds on the wire means the agent's own config is the only thing
+    that decides. An empty object is treated the same way -- an override
+    that overrides nothing is not an override.
+    """
+    if not payload:
+        return None
+    return BoundsOverride(
+        max_steps=payload.get("max_steps"),
+        max_tool_calls=payload.get("max_tool_calls"),
+        timeout_s=payload.get("timeout_s"),
+    )
