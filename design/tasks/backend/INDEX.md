@@ -135,10 +135,24 @@ Format: `[ ] item — why parked · hook · anchor · what unparking takes`
       `git_checkpoint_sha`, and the `PAUSED` / `AWAITING_APPROVAL` task states.
       Then B7's path guard and B10's tool registry. Anchor: post-v1. Unpark: one
       full episode, written first.
+      **⚠ Also read the "Dynamic agents" entry above before unparking this**:
+      the Coding Assistant is a new built-in agent, and the same
+      `max_steps > 1` inline/background heuristic (B11) applies to it.
 - [ ] **Data Analysis capability** — only if `--advanced` usage demands a
       non-transcript surface (D72). Anchor: post-v1.
 - [ ] **Dynamic agents (user-created)** — hook: `agents` table with `builtin`
       flag (B6), registry reads DB (B9). Anchor: B9 + a frontend episode.
+      **⚠ Read before unparking (B11):** `AgentConfig` has no `background: bool`
+      field. `runtime.py`'s `_handle_send_message` decides inline-vs-background
+      (and whether to build Research's memory-first reference index) from the
+      heuristic `agent.max_steps > 1`, because that was cheaper than a migration
+      when only one agent (`research`) needed it. **A new agent that wants
+      `max_steps > 1` while running inline, or background execution with
+      `max_steps == 1`, is silently misclassified by this heuristic — no error,
+      just the wrong `inline`/reference-index behavior.** Give `AgentConfig` a
+      real `background: bool` column (a migration) before or alongside adding
+      such an agent, and update `_handle_send_message` to read it instead of
+      inferring. See `B11-three-agents.md`'s Handoff for the full account.
 - [ ] **Dynamic capabilities (declarative TOML layouts, Tier 2)** — hook:
       data-driven components from F3. Anchor: post-v1.
 - [ ] **Shared-runtime SSH (topology C) and live co-editing** — needs
@@ -150,6 +164,26 @@ Format: `[ ] item — why parked · hook · anchor · what unparking takes`
       credit-limited. Anchor: B4.
 - [ ] **Auth beyond SSH keys, billing, telemetry, i18n, auto-update, plugin
       sandboxing** — rejected for v1 and v2.
+- [ ] **Local-model capability tiers and their effect on multi-step agent
+      reliability** — B11 tried, four separate times, to get a definitive
+      answer on whether Research's memory-first reference index actually
+      changes model behaviour (not just whether it's wired in — that part is
+      proven). Every attempt against `qwen2.5:1.5b` was confounded by the
+      same underlying trait: unreliable multi-step tool orchestration,
+      manifesting a different way each time (the Filler's two-file refusal,
+      a Bloom-filter recall test the model didn't need any memory to answer,
+      an essay that spiralled into an unrelated ramble, a malformed-path/
+      hallucinated-tool-error cascade). Not chased further in B11 on purpose
+      — a bigger local model (`qwen2.5:3b`, `qwen2.5-coder:3b`, both already
+      pulled) might behave differently, but that is a model-capability
+      question, not a B11 architecture question, and answering it needs new
+      CLI surface (`send --provider/--model`) this episode didn't otherwise
+      need. Anchor: whichever episode first needs to reason about "is this
+      agent's behaviour good enough" as a product question, not an
+      architecture one — plausibly B14 (Usage & Limits, where model choice
+      already has to be surfaced) or a frontend settings episode. See
+      `completed/backend/B11-three-agents.md`'s "Documented, not resolved"
+      section for the full account of what was tried.
 
 ## Rejected outright
 

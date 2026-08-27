@@ -6,8 +6,11 @@ verified without Go (B6 14).
     uv run python cli.py session new [title]
     uv run python cli.py session list
     uv run python cli.py send "count to five" [--cancel-after 2]
+    uv run python cli.py send "@filler-explainer explain" --file <path> --select 12
+    uv run python cli.py send "@research <question>" --wait
     uv run python cli.py tasks list
     uv run python cli.py context report [--session ID | --last] [--json]
+    uv run python cli.py memory list --status pending
 
 Run from inside `backend\`, like everything else here.
 
@@ -56,6 +59,7 @@ from bootstrap import (
 )
 from logging_setup import configure_logging, get_logger
 from managers import context
+from managers.editor_context import EditorContext, MODE_EXPLAIN, MODE_FILL
 from providers.mock import provider as mock_provider
 from providers.models import ProviderConfig, ProviderHealthStatus
 from runtime.errors import AgentNotFoundError, BuiltinAgentImmutableError, ContextOverflowError
@@ -218,6 +222,102 @@ def available_scripts() -> list[str]:
     return sorted(p.stem for p in SCRIPT_DIR.glob("*.json"))
 
 
+# ---------------------------------------------------------------------------
+# EditorContext + @agent (B11) -- what stands in for a real editor/picker
+# until F11/F8 exist. `send` and `context report` both accept the same
+# --file/--select/--cursor/--mode flags for exactly that reason: an
+# EditorContext is per-turn, not session state, so projecting "what
+# would the next turn cost" needs it supplied again, not remembered.
+# ---------------------------------------------------------------------------
+
+async def _strip_agent_prefix(runtime: Runtime, text: str) -> tuple[str, Optional[str]]:
+    """`@agent-id rest of the message` -> (rest, agent_id) when the first
+    token exactly names a registered agent; otherwise the text is
+    returned untouched and no override is set. This is the CLI playing
+    the part of F8's `@` picker for exactly the one case that already
+    resolves without a picker -- an exact id/name match (F8's own
+    ambiguity rule: an exact agent name wins). `@path\\to\\file` and
+    `@C:\\...` stay B12's; a token that is not a known agent is left as
+    plain text rather than guessed at.
+    """
+    if not text.startswith("@"):
+        return text, None
+    token, _, rest = text.partition(" ")
+    candidate = token[1:]
+    if not candidate:
+        return text, None
+    try:
+        agent = await runtime.agents.resolve(candidate)
+    except AgentNotFoundError:
+        return text, None
+    return rest, agent.id
+
+
+def _resolve_mode(args: argparse.Namespace) -> str:
+    """explain if --select alone; fill if --cursor alone; --mode always
+    wins. Both --select and --cursor with no --mode is refused rather
+    than guessed -- see this episode's Handoff (B11-three-agents.md) for
+    the exact rule, which F15 must read from there rather than
+    reinventing its own when the real editor lands.
+    """
+    if args.mode:
+        return args.mode
+    if args.select is not None and args.cursor is not None:
+        raise ValueError(
+            "--select and --cursor were both given -- pass --mode explain|fill "
+            "to say which one this is"
+        )
+    if args.select is not None:
+        return MODE_EXPLAIN
+    if args.cursor is not None:
+        return MODE_FILL
+    raise ValueError("--file needs --select, --cursor, or --mode to pick explain vs fill")
+
+
+def _parse_line_range(value: str) -> tuple[int, int]:
+    if "-" in value:
+        start_s, end_s = value.split("-", 1)
+        return int(start_s), int(end_s)
+    line = int(value)
+    return line, line
+
+
+def _add_editor_flags(parser: argparse.ArgumentParser) -> None:
+    """Shared by `send` and `context report` -- see the module note
+    above on why both need the same flags rather than one remembering
+    what the other sent."""
+    parser.add_argument(
+        "--file", default=None,
+        help="EditorContext (B11): the file being explained/filled",
+    )
+    parser.add_argument(
+        "--select", default=None, metavar="LINE|START-END",
+        help="EditorContext: selected line(s), 1-based",
+    )
+    parser.add_argument(
+        "--cursor", default=None, metavar="LINE",
+        help="EditorContext: cursor line, 1-based",
+    )
+    parser.add_argument(
+        "--mode", default=None, choices=[MODE_EXPLAIN, MODE_FILL],
+        help="override the explain/fill inference from --select vs --cursor",
+    )
+
+
+def _build_editor_context(args: argparse.Namespace) -> Optional[EditorContext]:
+    """None when --file was not given -- everything else here is only
+    reachable through --file, so "no editor context" is the common case
+    for `general`/`research` sends. Raises ValueError on an
+    unresolvable mode; callers turn that into `error: ...` and exit 1,
+    the same as every other CLI-side validation failure."""
+    if not args.file:
+        return None
+    mode = _resolve_mode(args)
+    selection = _parse_line_range(args.select) if args.select is not None else None
+    cursor = int(args.cursor) if args.cursor is not None else None
+    return EditorContext(file=args.file, mode=mode, cursor=cursor, selection=selection)
+
+
 async def cmd_session_new(runtime: Runtime, args: argparse.Namespace) -> int:
     provider, model = args.provider, args.model
     if not provider:
@@ -282,12 +382,19 @@ async def cmd_session_list(runtime: Runtime, args: argparse.Namespace) -> int:
 
 
 async def cmd_send(runtime: Runtime, args: argparse.Namespace) -> int:
+    text, agent_override = await _strip_agent_prefix(runtime, args.text)
+    try:
+        editor_context = _build_editor_context(args)
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return EXIT_FAILED
+
     session_id = args.session
     if not session_id:
         provider, model = await default_provider(runtime)
         created = await call(
             runtime, "CreateSession", verbose=args.verbose,
-            title=args.text[:40] or "cli", provider=provider, model=model,
+            title=text[:40] or "cli", provider=provider, model=model,
         )
         _print_errors(created)
         if _failed(created) or not created:
@@ -302,6 +409,12 @@ async def cmd_send(runtime: Runtime, args: argparse.Namespace) -> int:
         payload = envelope["payload"]
         if kind == "TaskStarted":
             state["task_id"] = envelope["task_id"]
+            state["background"] = bool(payload.get("background"))
+            if state["background"] and not args.wait:
+                print(
+                    f"[task {envelope['task_id']} started -- background; "
+                    "'tasks list' to check progress, or re-run with --wait to block]"
+                )
             if args.cancel_after and not state["cancel_scheduled"]:
                 state["cancel_scheduled"] = True
                 asyncio.get_running_loop().create_task(
@@ -341,6 +454,18 @@ async def cmd_send(runtime: Runtime, args: argparse.Namespace) -> int:
         ) or envelope["type"] == "Error"
 
     def until(envelope: dict[str, Any]) -> bool:
+        # B11: a background task's own TaskStarted carries
+        # `background: true`. Without --wait, that alone is enough to
+        # stop draining -- the send is fire-and-forget, and the caller
+        # checks `tasks list` for progress. Absent/false (every inline
+        # agent, unchanged) always falls through to the terminal check
+        # below, exactly as before this episode.
+        if (
+            envelope["type"] == "TaskStarted"
+            and not args.wait
+            and bool(envelope["payload"].get("background"))
+        ):
+            return True
         return envelope["type"] in _TASK_TERMINAL or envelope["type"] == "Error"
 
     # BoundsOverride's wire form. Omitted entirely when no flag was
@@ -356,10 +481,18 @@ async def cmd_send(runtime: Runtime, args: argparse.Namespace) -> int:
         if value is not None
     }
 
+    extra: dict[str, Any] = {}
+    if bounds:
+        extra["bounds"] = bounds
+    if agent_override:
+        extra["agent"] = agent_override
+    if editor_context is not None:
+        extra["editor_context"] = editor_context.to_dict()
+
     envelopes = await call(
         runtime, "SendMessage", timeout=args.timeout, verbose=args.verbose,
         until=until, match=_first_ack_then(match), on_event=on_event,
-        session=session_id, text=args.text, **({"bounds": bounds} if bounds else {}),
+        session=session_id, text=text, **extra,
     )
     _print_errors(envelopes)
     return EXIT_FAILED if _failed(envelopes) else EXIT_OK
@@ -401,6 +534,12 @@ async def cmd_context_report(runtime: Runtime, args: argparse.Namespace) -> int:
     to wait for, so wrapping it in the request/response machinery would
     buy nothing but latency.
     """
+    try:
+        editor_context = _build_editor_context(args)
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return EXIT_FAILED
+
     session_id = args.session
     if not session_id:
         session = await runtime.memory.latest_session()
@@ -421,7 +560,10 @@ async def cmd_context_report(runtime: Runtime, args: argparse.Namespace) -> int:
     agent = await runtime.agents.resolve_for_session(session)
 
     try:
-        report = await context.report(session_id, runtime.memory, policy=agent.to_context_policy())
+        report = await context.report(
+            session_id, runtime.memory, policy=agent.to_context_policy(),
+            editor_context=editor_context,
+        )
     except ContextOverflowError as exc:
         # Reachable without sending anything: a system prompt or an
         # attachment can exceed the budget on its own.
@@ -454,6 +596,28 @@ async def cmd_tasks_list(runtime: Runtime, args: argparse.Namespace) -> int:
             f"{_ts(row['finished_at'])}"
         )
     print(f"\n{len(rows)} task(s)")
+    return EXIT_OK
+
+
+# ---------------------------------------------------------------------------
+# Proposals (B11) -- NOT B13's full `memory` surface
+# ---------------------------------------------------------------------------
+
+async def cmd_memory_list(runtime: Runtime, args: argparse.Namespace) -> int:
+    """Lists `agent_proposals` (B11's stopgap). There is no
+    accept/reject/edit/bind/forget/search here -- those are B13's,
+    against `memory_records`, once real usage justifies building them."""
+    status = args.status or None
+    proposals = await runtime.proposals.list_by_status(status=status, limit=args.limit)
+    if not proposals:
+        print("(no proposals)")
+        return EXIT_OK
+    for p in proposals:
+        print(
+            f"{p.id}  {_ts(p.created_at)}  session={p.session_id[:8]}  "
+            f"agent={p.agent_id or '-':<18}{p.status:<9}{p.content}"
+        )
+    print(f"\n{len(proposals)} proposal(s)")
     return EXIT_OK
 
 
@@ -865,6 +1029,14 @@ def build_parser() -> argparse.ArgumentParser:
         "--max-seconds", type=int, default=None, dest="max_seconds",
         help="override the agent's timeout_s for this send",
     )
+    # B11: a background task (max_steps > 1 -- see agent config) returns
+    # right after TaskStarted by default; --wait blocks to the terminal
+    # event like every inline send always has.
+    send.add_argument(
+        "--wait", action="store_true",
+        help="block until the task finishes, even if it runs in the background",
+    )
+    _add_editor_flags(send)
 
     ctx = sub.add_parser("context", help="context builder", parents=[common]).add_subparsers(
         dest="context_command", required=True
@@ -878,12 +1050,24 @@ def build_parser() -> argparse.ArgumentParser:
         help="the most recently updated session (default when --session is omitted)",
     )
     ctx_report.add_argument("--json", action="store_true", help="machine-readable output")
+    _add_editor_flags(ctx_report)
 
     tasks = sub.add_parser("tasks", help="task operations", parents=[common]).add_subparsers(
         dest="tasks_command", required=True
     )
     tasks_list = tasks.add_parser("list", help="list recorded tasks", parents=[common])
     tasks_list.add_argument("--limit", type=int, default=20)
+
+    # B11's agent_proposals stopgap -- not B13's eventual full `memory`
+    # surface (accept/reject/edit/bind/unbind/forget/search).
+    memory_sub = sub.add_parser(
+        "memory", help="agent proposals (B11 stopgap)", parents=[common]
+    ).add_subparsers(dest="memory_command", required=True)
+    memory_list = memory_sub.add_parser("list", help="list agent proposals", parents=[common])
+    memory_list.add_argument(
+        "--status", default="pending", help="filter by status; pass '' for all (default: pending)",
+    )
+    memory_list.add_argument("--limit", type=int, default=50)
 
     agents_sub = sub.add_parser("agents", help="agent operations", parents=[common]).add_subparsers(
         dest="agents_command", required=True
@@ -975,6 +1159,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         ("send", None): cmd_send,
         ("context", "report"): cmd_context_report,
         ("tasks", "list"): cmd_tasks_list,
+        ("memory", "list"): cmd_memory_list,
         ("agents", "list"): cmd_agents_list,
         ("agents", "show"): cmd_agents_show,
         ("agents", "set-model"): cmd_agents_set_model,

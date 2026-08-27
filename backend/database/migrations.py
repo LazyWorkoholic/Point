@@ -29,7 +29,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional, Union
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 # Applied to every connection, here and in database/connection.py.
 #   WAL          -- 12 makes shared-WAL the basis of SSH topology B, and
@@ -304,6 +304,36 @@ CREATE INDEX IF NOT EXISTS idx_tool_calls_tool    ON tool_calls(tool);
 """
 
 
+# ---------------------------------------------------------------------------
+# v4 -- B11's narrow proposal stopgap.
+#
+# NOT `memory_records`/`memory_scopes` -- those tables already exist
+# (v2) and are B13's to activate, with review, search, tags, and scope
+# bindings. `agent_proposals` is deliberately smaller and differently
+# named so the two never collide: one row per candidate fact, one
+# status (`pending` -- v1 has no accept/reject path, that is B13's),
+# and a per-session count is the whole enforcement mechanism the ≤3 cap
+# needs. When B13 lands, it reads B11's completed doc and decides how
+# (or whether) to migrate these rows into `memory_records`; this table
+# is not renamed or repurposed to become that one.
+# ---------------------------------------------------------------------------
+
+_V4 = """
+CREATE TABLE IF NOT EXISTS agent_proposals (
+    id            TEXT PRIMARY KEY,
+    session_id    TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+    task_id       TEXT,
+    agent_id      TEXT,
+    content       TEXT NOT NULL,
+    status        TEXT NOT NULL DEFAULT 'pending',
+    created_at    REAL NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_agent_proposals_session ON agent_proposals(session_id);
+CREATE INDEX IF NOT EXISTS idx_agent_proposals_status  ON agent_proposals(status);
+"""
+
+
 @dataclass(frozen=True)
 class Migration:
     version: int
@@ -315,6 +345,7 @@ MIGRATIONS: tuple[Migration, ...] = (
     Migration(1, "baseline sessions + messages", _V1),
     Migration(2, "tasks, projects, agents, memory, nullable session provider/model", _V2),
     Migration(3, "tool_calls ledger", _V3),
+    Migration(4, "agent_proposals (B11 stopgap, not memory_records)", _V4),
 )
 
 

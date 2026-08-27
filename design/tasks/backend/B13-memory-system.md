@@ -2,6 +2,33 @@
 
 **Phase:** P2 · **Batchable:** no · **Depends on:** B12 **and real usage**
 
+## ⚠ Read before starting — B11 already occupies part of this space
+
+B11 built a narrow, deliberately-not-this-system stopgap so Research could emit
+proposals before B13 could exist (B13's own precondition below rules out
+building this early): a new `agent_proposals` table (migration v4 — NOT
+`memory_records`/`memory_scopes`, which stayed untouched), a `Proposal`
+dataclass filling `managers\memory.py` (see below — it is no longer the empty
+file it once was), `database\proposal_repository.py`, and
+`cli.py memory list --status pending`. `SessionMemoryService.propose()` was
+deliberately left raising `NotImplementedError` throughout — B11's proposal
+writes go through `AgentExecutor._maybe_propose()` and the repository directly,
+never through that method, so this Protocol contract is exactly as B8/B9 left
+it, unpolluted by a stopgap implementation.
+
+**Read `B11-three-agents.md`'s Handoff (and `completed/backend/B11-three-agents.md`
+once it exists) before writing a single line here.** This episode does not get
+to define a fresh `memory_records`-based proposal path as if nothing existed —
+it must decide how the real system relates to what `agent_proposals` already
+holds: migrate those rows into `memory_records` and drop the table, dual-write
+during a transition, or leave `agent_proposals` as a separate ledger. Whichever
+is chosen, `managers\memory.py` already has one dataclass in it (`Proposal`) —
+extend the file, do not overwrite it wholesale without checking what B11's
+`agents\executor.py`/`database\proposal_repository.py` still import from it.
+This is decisions.md D97's pattern (B9's `ContextPolicy`, B10's
+`BoundsOverride`, B11's `agent_proposals` are all the same move) — read that
+entry too.
+
 ## ⚠ Precondition — do not start without this
 
 Before writing any code, **three concrete failures** observed while actually
@@ -26,7 +53,8 @@ Memory built against failures that actually happened.
 
 Scope each piece to the listed failures. **Do not build all of it by default.**
 
-Location: `backend\managers\memory.py` (exists, empty) plus
+Location: `backend\managers\memory.py` (exists — B11 already put a `Proposal`
+dataclass in it, see the note above; extend, do not blank-slate) plus
 `backend\database\memory_repository.py` (new), mirroring the existing
 `session_repository.py` pattern — pure SQL, zero business rules.
 

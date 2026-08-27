@@ -41,17 +41,23 @@ What this file must never do, same as B8's context builder:
 from __future__ import annotations
 
 import asyncio
+import json
+import re
 import time
 import uuid
 from collections import deque
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, AsyncIterator, Awaitable, Callable, Optional
 
 import appconfig
+from database.proposal_repository import ProposalRepository
 from logging_setup import get_logger
 from managers import context
 from managers.agent import AgentConfig
 from managers.context import SessionMemoryService
+from managers.editor_context import MODE_FILL, EditorContext
+from managers.memory import Proposal
 from managers.message import Message, ToolMessage, UserMessage
 from managers.project import Project
 from managers.project_manager import ProjectManager
@@ -71,6 +77,36 @@ from tools.models import Tool
 from tools.registry import ToolRegistry
 
 _log = get_logger("agents.executor")
+
+# "at most 2-3 per session, enforced by a counter, never by prompt
+# instruction" (B11). A number here, checked against a real COUNT(*),
+# not a line in a system prompt asking the model to behave.
+PROPOSAL_CAP_PER_SESSION = 3
+
+# The Filler's one-file rule (project_idea.md §7's "Diffs, always" --
+# "never touches more than one file"), enforced structurally, not only
+# by the system prompt. Self-testing against a small local model
+# (qwen2.5:1.5b) showed the prompt alone is not enough: asked to
+# "refactor this across main.py and utils.py", it happily produced a
+# JSON region that silently moved the function into utils.py instead of
+# refusing -- see B11's completed doc. A dotted token at least two
+# characters long, to keep "e.g." from matching.
+_FILE_TOKEN_RE = re.compile(r"\b\w{2,}[\w.\\/-]*\.[A-Za-z0-9]{1,6}\b")
+
+
+def _mentions_other_file(text: str, current_file: str) -> Optional[str]:
+    """The first filename-looking token in `text` that is not
+    `current_file`'s own basename, or None. A false positive (an
+    unrelated dotted token) costs one unnecessary refusal; a false
+    negative is the exact boundary this check exists to hold, so this
+    errs toward refusing."""
+    current_name = Path(current_file).name.lower()
+    for match in _FILE_TOKEN_RE.finditer(text):
+        token = match.group(0)
+        name = Path(token.replace("\\", "/")).name.lower()
+        if name and name != current_name:
+            return token
+    return None
 
 # The no-op guardrails hook (B9's "Middleware chain" build item). Typed
 # against the plain dicts/Messages already flowing through this file
@@ -243,6 +279,7 @@ class AgentExecutor:
         projects: ProjectManager,
         tools: ToolRegistry,
         tool_recorder: Optional[Callable[[Any], Awaitable[None]]] = None,
+        proposal_repo: Optional[ProposalRepository] = None,
     ) -> None:
         self._sessions = sessions
         self._memory = memory
@@ -254,6 +291,23 @@ class AgentExecutor:
         self._projects = projects
         self._tools = tools
         self._tool_recorder = tool_recorder
+        # B11's proposal stopgap (managers\memory.py's Proposal, NOT
+        # B13's memory_records). None-tolerant: an executor built without
+        # one (e.g. an older test) just never writes proposals, the same
+        # way a Task with no recorder behaves identically minus the row.
+        self._proposal_repo = proposal_repo
+
+        # Fire-and-forget work this file starts that is NOT a TaskManager
+        # Task (session title generation, today) -- tracked so
+        # Runtime.close() can wait for it instead of `asyncio.run()`
+        # cancelling it out from under a short-lived CLI process. Found
+        # during B11 self-testing: a background (max_steps > 1) agent's
+        # FIRST send in cli.py without --wait let the whole process exit
+        # ~1-2s later, killing the title call before its network request
+        # returned -- and because the flag guarding "only try once" is
+        # set BEFORE the call (so two fast sends cannot both fire it),
+        # the session was left permanently untitled instead of retried.
+        self._background_tasks: set[asyncio.Task] = set()
 
         # The guardrails hook. Empty lists -- nothing appends to these in
         # v1. Verified by hand during B9: append a logging middleware,
@@ -271,6 +325,8 @@ class AgentExecutor:
         inline: bool,
         override: Optional[ProviderOverride] = None,
         bounds: Optional[BoundsOverride] = None,
+        editor_context: Optional[EditorContext] = None,
+        research_reference_index: Optional[str] = None,
     ) -> AgentRun:
         provider_name, model, effort = resolve_provider_model_effort(
             override=override, session=session, agent=agent,
@@ -279,11 +335,45 @@ class AgentExecutor:
         limits = resolve_bounds(bounds, agent)
         granted = self._tools.list_for(agent)
 
+        # Session title generation (B11): one cheap, best-effort call on
+        # the FIRST exchange only. Fired here, not from the sink, because
+        # it needs nothing from the reply -- only the user's own text,
+        # already in hand. Fire-and-forget on purpose: "a killed title
+        # call leaves the session usable" means this must never be
+        # awaited on the reply path, and a failure inside it must never
+        # reach the caller.
+        if provider_name != "echo" and not (session.settings or {}).get("title_generated"):
+            existing = await self._sessions.get_messages(session.id)
+            if not existing:
+                title_task = asyncio.ensure_future(
+                    self._generate_title(session, text, resolved_provider, model)
+                )
+                self._background_tasks.add(title_task)
+                title_task.add_done_callback(self._background_tasks.discard)
+
+        # The Filler's one-file rule, enforced structurally (B11) -- see
+        # `_mentions_other_file`'s docstring for why prompting alone was
+        # not enough. `refusal_text` is not None only in fill mode with
+        # a second filename mentioned; `body_factory` below reuses
+        # `_echo_body` to deliver it as a NORMAL reply (TaskDone, no
+        # `code`, nothing that renders as an error), never a model call.
+        refusal_text: Optional[str] = None
+        if editor_context is not None and editor_context.mode == MODE_FILL:
+            other = _mentions_other_file(text, editor_context.file)
+            if other is not None:
+                current_name = Path(editor_context.file).name
+                refusal_text = (
+                    f"I can only write one region in one file at a time. This "
+                    f"request also names {other!r}, but I'm scoped to "
+                    f"{current_name!r} here -- ask about one file, or handle "
+                    f"{other!r} as a separate request."
+                )
+
         # Refused at INVOCATION, before a task exists and before a token
         # is streamed (B10). A model that silently ignores tools it was
         # never sent produces a confidently wrong answer, which is worse
         # than an error.
-        if granted and provider_name != "echo":
+        if refusal_text is None and granted and provider_name != "echo":
             provider = self._providers.get(resolved_provider)
             if not provider.supports_tools:
                 raise ToolsUnsupportedError(
@@ -304,6 +394,8 @@ class AgentExecutor:
                 provider=resolved_provider,
                 model=model,
                 user_text=text,
+                editor_context=editor_context,
+                research_reference_index=research_reference_index,
             ),
             agent.to_context_policy(),
             context.default_budget_tokens(),
@@ -343,6 +435,12 @@ class AgentExecutor:
         )
 
         def body_factory() -> AsyncIterator[dict[str, Any]]:
+            if refusal_text is not None:
+                # Same shape as the echo dev-path (word-chunked, no
+                # `stream_event`), which the sink already treats as a
+                # normal completed reply -- no model call, no `code`,
+                # nothing that reaches the client as an error.
+                return self._echo_body(refusal_text)
             if provider_name == "echo":
                 # Dev/test convenience: no provider/network required.
                 # Not a real registered provider on purpose.
@@ -363,6 +461,67 @@ class AgentExecutor:
         )
         await self._sessions.set_active_task(session.id, task.id)
         return AgentRun(task=task, message_id=message_id)
+
+    async def drain_background(self, timeout: float = 5.0) -> None:
+        """Wait (bounded) for fire-and-forget work started by `run()` --
+        session title generation today -- to finish. `Runtime.close()`
+        calls this before it closes the database, for the same reason it
+        now waits on cancelled Tasks rather than a bare `sleep(0)`: a
+        short-lived CLI process's `asyncio.run()` cancels whatever is
+        still pending the moment its own coroutine returns, and this is
+        the difference between a title call finishing and one silently
+        losing its one attempt."""
+        pending = list(self._background_tasks)
+        if not pending:
+            return
+        try:
+            await asyncio.wait_for(
+                asyncio.gather(*pending, return_exceptions=True), timeout=timeout,
+            )
+        except asyncio.TimeoutError:
+            _log.warning("Timed out waiting for %d background task(s) to finish", len(pending))
+
+    # -- session title generation (B11) ------------------------------------
+
+    async def _generate_title(
+        self, session: Session, text: str, provider_name: str, model: str,
+    ) -> None:
+        """One cheap, non-streaming call producing a short title.
+
+        The flag is set BEFORE the call, not after: two sends arriving
+        close together can both observe "no messages yet" (the user
+        message for the first one is not persisted until later in
+        `run()`), and claiming the "first exchange" slot immediately is
+        what stops both from firing. Any failure below is logged and
+        swallowed -- "a killed title call leaves the session usable"
+        means an untitled session is a fine outcome, never a retried one.
+
+        No "small model" tier exists anywhere in this codebase yet
+        (`providers\\models.py` has no such flag), so this reuses the
+        session's own resolved provider/model rather than inventing a
+        selection mechanism nothing else needs. `echo` never reaches
+        here (see the `provider_name != "echo"` guard in `run()`) --
+        it is not a registered provider and has no `.generate()`.
+        """
+        try:
+            await self._sessions.update_settings(session.id, {"title_generated": True})
+            provider = self._providers.get(provider_name)
+            request = GenerationRequest(
+                model=model,
+                messages=[UserMessage(
+                    session.id,
+                    "Reply with only a short 3-6 word title (no quotes, no "
+                    "trailing punctuation) for a chat session that starts "
+                    "with this message:\n\n" + text[:500],
+                )],
+            )
+            response = await asyncio.wait_for(provider.generate(request), timeout=30.0)
+            title = response.text.strip().strip('"').strip("'")
+            title = title.splitlines()[0][:60] if title else ""
+            if title:
+                await self._sessions.rename(session.id, title)
+        except Exception:  # noqa: BLE001 - best-effort, never fatal
+            _log.debug("Session title generation failed for %s", session.id, exc_info=True)
 
     # -- middleware -------------------------------------------------------
 
@@ -506,6 +665,20 @@ class AgentExecutor:
                 lambda: provider.stream(request), on_retry=notice,
             )
             async for provider_chunk in stream:
+                # B11: `timeout_s` used to be checked only between steps
+                # (the top of this `for`), never while one was actively
+                # streaming -- so a single generation that degenerates
+                # into a very long or repetitive response (a real local-
+                # model failure mode, not hypothetical: self-tested
+                # against qwen2.5:1.5b, which spiralled into an
+                # unrelated multi-hundred-line ramble after a confused
+                # tool attempt) ran with no cap at all until the
+                # provider's own stream happened to end. `timeout_s` is
+                # the agent's configured wall-clock budget for the
+                # WHOLE task; checking it here, once per chunk, is what
+                # makes that true instead of true-only-between-steps.
+                # Cheap: one monotonic-clock comparison per chunk.
+                _check_deadline(deadline, limits)
                 for event in drain_notices():
                     yield event
 
@@ -530,6 +703,11 @@ class AgentExecutor:
                 yield event
 
             if not requested:
+                # Config-driven, not an `if agent.id == ...`: any agent
+                # whose config grants `writes_proposals` gets this, and
+                # today that is only `research` (B11's builtins.py).
+                if agent_context.config.writes_proposals:
+                    await self._maybe_propose(agent_context, provider, model, task_id, session_id)
                 return  # the model answered instead of asking for a tool
 
             for call in requested:
@@ -585,11 +763,101 @@ class AgentExecutor:
             bound="max_steps", limit=limits.max_steps,
         )
 
+    # -- proposals (B11) ----------------------------------------------------
+
+    async def _maybe_propose(
+        self,
+        agent_context: AgentContext,
+        provider: Any,
+        model: str,
+        task_id: str,
+        session_id: str,
+    ) -> None:
+        """Extraction plus the ≤3-per-session cap. Writes through the
+        narrow `agent_proposals` table (`managers\\memory.py`'s
+        `Proposal`, `database\\proposal_repository.py`) -- NOT
+        `SessionMemoryService.propose()`, which stays `NotImplementedError`
+        for B13's real `memory_records`.
+
+        Best-effort and never fatal: a completed Research task that
+        recorded no proposals is a normal outcome, not a reason to fail
+        a turn that already succeeded. Only reached on a clean finish
+        (the caller does not call this on `bounds_exceeded` or an
+        exception) -- a run that stopped short of an answer is not
+        "complete work" to extract durable facts from.
+        """
+        if self._proposal_repo is None:
+            return
+        answer = self._streams.get_accumulator(task_id).text
+        if not answer.strip():
+            return
+        try:
+            remaining = PROPOSAL_CAP_PER_SESSION - await self._proposal_repo.count_for_session(session_id)
+            if remaining <= 0:
+                return
+            request = GenerationRequest(
+                model=model,
+                messages=[UserMessage(
+                    session_id,
+                    f"From the answer below, list at most {remaining} short, "
+                    "standalone fact(s) worth remembering for future "
+                    "sessions -- durable facts only, not the specifics of "
+                    "this one conversation. Reply with a JSON array of "
+                    "strings, or [] if nothing is worth keeping. No other "
+                    "text.\n\n" + answer[:4000],
+                )],
+            )
+            # Bounded like every other network call this file makes --
+            # this runs before the task's own "done" is emitted, so a
+            # hang here must not become a hang in the reply the user is
+            # already waiting on.
+            response = await asyncio.wait_for(provider.generate(request), timeout=30.0)
+            facts = _parse_fact_list(response.text)[:remaining]
+            for fact in facts:
+                await self._proposal_repo.insert(Proposal.new(
+                    session_id=session_id, content=fact, task_id=task_id,
+                    agent_id=agent_context.config.id,
+                ))
+            if facts:
+                _log.info(
+                    "Recorded %d proposal(s) for session %s (agent %s)",
+                    len(facts), session_id, agent_context.config.id,
+                )
+        except Exception:  # noqa: BLE001 - proposals are best-effort, never fatal
+            _log.debug("Proposal extraction failed for task %s", task_id, exc_info=True)
+
 
 _TOOL_EVENT_TYPES = {
     EVENT_STARTED: StreamEventType.TOOL_STARTED,
     EVENT_COMPLETED: StreamEventType.TOOL_COMPLETED,
 }
+
+
+def _parse_fact_list(text: str) -> list[str]:
+    """Parse the extraction call's reply as a JSON array of strings.
+    One salvage attempt for a model that wraps the array in prose or a
+    code fence despite being told not to; anything else is treated as
+    "nothing worth keeping" rather than raised -- this is the model's
+    output, not user input, and failing to parse it must never fail the
+    task that already completed."""
+    text = text.strip()
+    if not text:
+        return []
+    data = _try_json(text)
+    if data is None:
+        start, end = text.find("["), text.rfind("]")
+        if start != -1 and end != -1 and end > start:
+            data = _try_json(text[start:end + 1])
+    if not isinstance(data, list):
+        return []
+    return [item.strip() for item in data if isinstance(item, str) and item.strip()]
+
+
+def _try_json(text: str) -> Any:
+    try:
+        return json.loads(text)
+    except (ValueError, TypeError):
+        return None
 
 
 def _check_deadline(deadline: float, limits: Bounds) -> None:

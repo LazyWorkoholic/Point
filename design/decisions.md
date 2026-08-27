@@ -753,3 +753,28 @@ file copy can miss everything still in the `-wal` file, which is the difference
 between a backup and a file that looks like one.
 The rebuild in v2 runs with `foreign_keys=OFF` and `legacy_alter_table=ON`: with
 foreign keys on, `DROP TABLE sessions` would have cascade-deleted every message.
+
+### D97 — A stopgap type gets its own name, never the future episode's real one
+**Alternatives:** build the later episode's real thing early, scoped down; wait
+and block the current episode on the later one; reuse the later episode's name
+for a narrower shape now and rename in place later.
+**Why:** confirmed as a repeated pattern, not improvised once: B9 needed the
+Context Builder's knobs before the agent system existed and defined
+`ContextPolicy` rather than widening B8's `build()` to take the future
+`AgentConfig`; B10 needed a per-send bounds override and defined `BoundsOverride`
+rather than making `AgentConfig` mutable; B11 needed Research to emit durable,
+listable proposals before B13 (memory system) exists — B13 has its own
+precondition (three observed failures from real usage) and cannot simply be
+pulled forward — so B11 defined a new `agent_proposals` table and a `Proposal`
+dataclass rather than writing into the `memory_records`/`memory_scopes` tables
+B13 already has reserved in the schema (since v2) but does not yet own the
+business rules for. Each time, the later episode reads the earlier one's
+completed doc and decides how its real type adapts to what already shipped —
+dual-write, migrate-and-drop, or leave both standing — rather than discovering a
+half-built, wrongly-named version of its own feature already occupying the name
+it needed.
+**Cost:** two names for what will eventually be one concept, for a while, and a
+later episode has to actively reconcile them instead of finding nothing there.
+Judged worth it every time so far: the alternative is building the real thing
+against imagined requirements, which is exactly what B13's own precondition
+exists to prevent.

@@ -192,3 +192,19 @@ class Task:
 
     def is_active(self) -> bool:
         return self.state in (TaskState.PENDING, TaskState.RUNNING)
+
+    async def wait(self) -> None:
+        """Wait for `_run()` to actually finish -- not just for
+        `cancel()` to have been called (B11). Swallows the
+        CancelledError `_asyncio_task` raises back at its own awaiter:
+        a caller using this to wait out a cancellation it just
+        requested already knows that; it only wants the guarantee that
+        `_run()`'s cleanup (the sink call, the recorder write) has
+        actually completed before it does something that assumes this
+        task is done, like closing the database out from under it."""
+        if self._asyncio_task is None:
+            return
+        try:
+            await self._asyncio_task
+        except asyncio.CancelledError:
+            pass

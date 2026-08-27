@@ -53,6 +53,7 @@ from managers.attachment import (
     SOURCE_TYPE_FILE,
     Attachment,
 )
+from managers.editor_context import MODE_FILL, EditorContext, resolve_scope
 from managers.message import ContentType, Message, MessageRole, SystemMessage, UserMessage
 from managers.message_history import MessageHistory
 from managers.pathguard import resolve_path
@@ -188,6 +189,13 @@ class ContextRequest:
     model: str
     user_text: Optional[str] = None
     task_id: Optional[str] = None
+    # B11. At most one of these is normally set -- they both render into
+    # the same task_state slot this file has reserved since B8, never
+    # both at once in practice (Research has no editor, Filler-Explainer
+    # builds no reference index). editor_context wins if somehow both
+    # arrive on one request.
+    editor_context: Optional[EditorContext] = None
+    research_reference_index: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -596,6 +604,91 @@ def _render_attachment(
     )
 
 
+def _render_task_state(
+    request: ContextRequest,
+    project: Optional[Project],
+) -> tuple[str, str]:
+    """Returns (text_to_include, detail_for_the_log). Empty text is the
+    v0 placeholder or a read failure -- both are 0-token, included, and
+    never raise: a bad editor path is a fact about this turn worth
+    logging, same policy `_render_attachment` follows."""
+    if request.editor_context is not None:
+        return _render_editor_context(request.editor_context, project)
+    if request.research_reference_index:
+        return request.research_reference_index, "research: memory-first reference index"
+    return "", (
+        "v0: no working state until B10/B11"
+        + ("" if request.task_id else " (no task running)")
+    )
+
+
+def _render_editor_context(
+    editor_context: EditorContext, project: Optional[Project],
+) -> tuple[str, str]:
+    """Resolve the editor's file and render its scope -- selection,
+    enclosing function/block, or the +/-20 line fallback -- into the
+    task_state section (B11).
+
+    Always resolved with `allow_outside_project=True`, unlike an
+    attachment or a tool read: the editor already has this exact file
+    open in a real buffer, set by the invocation site (F11/F15), never
+    typed by the model. It is not an arbitrary `@file` a model or a
+    stranger's link pointed at, so it does not sit behind the same gate.
+    """
+    try:
+        path = resolve_path(editor_context.file, project, allow_outside_project=True)
+    except PathDeniedError as exc:
+        return "", f"editor context refused by path guard: {exc}"
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError as exc:
+        return "", f"editor context unreadable: {exc.strerror or exc}"
+    # A BOM survives utf-8 decoding as a literal U+FEFF -- Python's codec
+    # does not strip it (same fact appconfig._strip_bom exists for).
+    # Left in place it sits inside line 0's leading whitespace and
+    # silently defeats _DEF_RE/_opens_scope: "^\s*" does not consume
+    # U+FEFF, so a file's very first def/class is never recognized as a
+    # header. Windows PowerShell 5.1's `Set-Content -Encoding utf8` (and
+    # Notepad) both emit one by default -- a real, hit-in-testing failure
+    # case of the enclosing-scope heuristic, not a hypothetical.
+    text = text[1:] if text.startswith("﻿") else text
+
+    lines = text.splitlines()
+    start, end = resolve_scope(
+        lines,
+        selection=editor_context.selection,
+        cursor=editor_context.cursor,
+        enclosing=editor_context.enclosing,
+    )
+    snippet = "\n".join(lines[start - 1:end])
+    name = path.name
+
+    if editor_context.mode == MODE_FILL:
+        header = (
+            f"[editor context — {name}, mode=fill, cursor at line "
+            f"{editor_context.cursor or start}, shown lines {start}-{end}]"
+        )
+        instructions = (
+            "\n\nRespond with exactly one JSON object and nothing else, matching:\n"
+            '{"file": "<path>", "start_line": <int>, "end_line": <int>, '
+            '"replacement": "<the rewritten region>", "note": "<short note>"}\n'
+            "start_line/end_line must fall within the shown region, one file only. "
+            "If the request needs a second file, a new file, or a command, refuse "
+            "in plain text instead of guessing at scope."
+        )
+    else:
+        header = f"[editor context — {name}, mode=explain, lines {start}-{end}]"
+        instructions = (
+            "\n\nExplain the selection using its enclosing scope shown above. "
+            "Project-wide context only on explicit request, and then as a file "
+            "list, never file contents."
+        )
+
+    rendered = f"{header}\n{snippet}{instructions}"
+    detail = f"editor context: {name} mode={editor_context.mode} lines {start}-{end}"
+    return rendered, detail
+
+
 def _reference_body(path: Path, name: str, size: int, attachment_id: str) -> str:
     """Mechanical only. Nothing here is generated: it is the basename,
     the byte size, the line count, and the literal first few hundred
@@ -853,21 +946,42 @@ async def build(
         )
 
     # -- 6. task working state --------------------------------------------
-    # Nothing to include in v0, and inventing a marker line would be
-    # fabricating content. Real working state -- tool calls, scratchpad,
-    # step results -- arrives with B10/B11, at which point this section
-    # already has its place in the order and its line in every report.
-    log.included.append(
-        IncludedItem(
-            SECTION_TASK_STATE,
-            request.task_id and _short(request.task_id) or "-",
-            "task_state", 0,
-            "v0: no working state until B10/B11"
-            + ("" if request.task_id else " (no task running)"),
+    # B11 fills this in for real: an EditorContext (Filler-Explainer) or
+    # a memory-first reference index of past same-agent results
+    # (Research's bounded-loop agents). Neither is fabricated -- both are
+    # supplied by the caller (agents\executor.py / runtime.py), this
+    # function only resolves and renders what it is given. Nothing given
+    # -> the same v0 placeholder as before, still a real 0-token line.
+    task_state_ref = request.task_id and _short(request.task_id) or "-"
+    task_state_text, task_state_detail = _render_task_state(request, project)
+    task_state_messages: list[Message] = []
+    if not task_state_text:
+        log.included.append(
+            IncludedItem(SECTION_TASK_STATE, task_state_ref, "task_state", 0, task_state_detail)
         )
-    )
+    else:
+        tokens = estimate_tokens(task_state_text, request.model)
+        if tokens > budget_tokens:
+            raise ContextOverflowError(tokens, budget_tokens, subject="task working state")
+        if tokens > remaining:
+            log.evicted.append(
+                EvictedItem(
+                    SECTION_TASK_STATE, task_state_ref, "task_state", tokens,
+                    f"does not fit: {tokens} tokens, {remaining} free",
+                )
+            )
+        else:
+            remaining -= tokens
+            task_state_messages.append(SystemMessage(request.session_id, task_state_text))
+            log.included.append(
+                IncludedItem(SECTION_TASK_STATE, task_state_ref, "task_state", tokens, task_state_detail)
+            )
 
-    messages = [system_message] + attachment_messages + kept
+    # task_state renders right before the user's own message -- it is
+    # the immediate framing for the question being asked (the function
+    # under the cursor, the reference index to check before searching),
+    # not a general-purpose system note that belongs up front.
+    messages = [system_message] + attachment_messages + kept + task_state_messages
     if pending_message is not None:
         messages.append(pending_message)
 
@@ -887,6 +1001,7 @@ async def report(
     memory: SessionMemoryService,
     policy: ContextPolicy = DEFAULT_POLICY,
     budget_tokens: Optional[int] = None,
+    editor_context: Optional[EditorContext] = None,
 ) -> ContextReport:
     """The breakdown the status card (F6) renders.
 
@@ -901,6 +1016,12 @@ async def report(
     been typed yet. A long message will therefore push more history out
     than this report shows.
 
+    `editor_context` (B11) is per-turn, like a task override -- it is
+    never read off the session, so a bare `context report --last` with
+    no `--file` shows no editor context even right after a `send --file`
+    that used one. Pass the same `--file`/`--select`/`--cursor` again to
+    project what a follow-up turn at that same spot would cost.
+
     Read-only, via `record=False`. Without it, asking what the next turn
     would cost would mark every changed attachment as already sent, and
     the next real turn would then skip the file it was about to re-read
@@ -914,6 +1035,7 @@ async def report(
         session_id=session_id,
         provider=session.provider or "-",
         model=session.model or "-",
+        editor_context=editor_context,
     )
     built = await build(
         request, policy, budget_tokens or default_budget_tokens(), memory, record=False

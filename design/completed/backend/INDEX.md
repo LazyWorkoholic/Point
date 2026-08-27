@@ -22,12 +22,13 @@ it passed.
 | B8 | Context Builder v0 | ✅ built + manually verified | `B08-context-builder.md` |
 | B9 | Agent Foundation | ✅ built + manually verified | `B09-agent-foundation.md` |
 | B10 | Tool System | ✅ built + manually verified | `B10-tool-system.md` |
-| B11–B17 | — | not started | — |
+| B11 | The Three Agents | ✅ built + manually verified | `B11-three-agents.md` |
+| B12–B17 | — | not started | — |
 
-## Verified file structure — end of Episode 10
+## Verified file structure — end of Episode 11
 
-Confirmed against disk on 2026-08-27, after B10's verification gate passed. This
-supersedes the end-of-Episode-9 snapshot.
+Confirmed against disk on 2026-08-27, after B11's verification gate passed. This
+supersedes the end-of-Episode-10 snapshot.
 
 ```
 backend\
@@ -45,6 +46,13 @@ backend\
 │                               --max-steps/--max-tool-calls/--max-seconds
 │                               (the BoundsOverride wire form);
 │                               session new --project <id>              [B10]
+│                             + send/context report --file/--select/
+│                               --cursor/--mode (EditorContext, per-turn on
+│                               BOTH commands -- never remembered on the
+│                               session); send --wait (background early-
+│                               return is the default for max_steps>1
+│                               agents); @agent-id prefix stripping;
+│                               memory list [--status] [--limit]         [B11]
 ├── appconfig.py              paths, config.toml, key resolution, masking;
 │                             + BOM-tolerant, non-silent TOML parsing    [B7]
 ├── logging_setup.py          rotating file + stderr, key redaction      [B6]
@@ -74,6 +82,23 @@ backend\
 │                                (no migration — built-ins re-upsert)     [B10]
 │                              registry.py: + validate_all(), and grants
 │                                validated BEFORE the first upsert        [B10]
+│                              executor.py: + editor_context/
+│                                research_reference_index params on run();
+│                                _generate_title (fire-and-forget, tracked
+│                                in _background_tasks + drain_background());
+│                                _mentions_other_file() (the Filler's
+│                                structural one-file guard — prompting
+│                                alone did not hold against a real model);
+│                                _maybe_propose()/_parse_fact_list()
+│                                (proposal extraction, gated on
+│                                agent.writes_proposals); _check_deadline()
+│                                now called once per chunk INSIDE the
+│                                streaming loop, not only between steps —
+│                                timeout_s was not previously a real
+│                                wall-clock cap on a single generation     [B11]
+│                              builtins.py: UNCHANGED — every B11 behaviour
+│                                difference is config- or request-driven,
+│                                never a new field or an `if agent.id`     [B11]
 │
 ├── tools\                     NEW package                              [B10]
 │   ├── __init__.py
@@ -140,12 +165,34 @@ backend\
 │   │                           "started" branch — emitting it from the
 │   │                           handler raced the task body and dropped
 │   │                           every event before it (see B10 bug #1)  [B10]
+│   │                         + `agent`/`editor_context` on SendMessage;
+│   │                           _resolve_agent_for_send() (per-message
+│   │                           agent override, never written to
+│   │                           session.settings); _build_reference_index()
+│   │                           (session-scoped, same reasoning as
+│   │                           load_task_result); `agent.max_steps > 1`
+│   │                           drives BOTH inline-vs-background and
+│   │                           whether a reference index is built — no
+│   │                           `background: bool` field exists on
+│   │                           AgentConfig, this is a heuristic that
+│   │                           breaks for a future agent needing
+│   │                           max_steps>1 inline (see INDEX.md parking
+│   │                           lot); `background` now rides TaskStarted's
+│   │                           payload; close() awaits agent_executor.
+│   │                           drain_background() and every cancelled
+│   │                           Task's wait() (bounded 5s) instead of a
+│   │                           bare sleep(0) — the sleep(0) was not
+│   │                           enough for a task cancelled mid-network-
+│   │                           I/O to finish unwinding cleanly           [B11]
 │   ├── task.py               + recorder, started_at/finished_at,
 │   │                           PAUSED/AWAITING_APPROVAL (reserved)     [B6]
 │   │                         + agent_id                                  [B9]
 │   │                         + TaskResult.code, copied off the exception
 │   │                           with getattr(exc, "code", None). Task still
 │   │                           knows nothing about tools               [B10]
+│   │                         + wait() — awaits the real asyncio.Task,
+│   │                           swallows the CancelledError back at its
+│   │                           own caller. Backs runtime.py's close() fix [B11]
 │   └── task_manager.py       + recorder passthrough, sweep now wired   [B6]
 │                             + agent_id parameter on create_task()       [B9]
 │
@@ -181,7 +228,30 @@ backend\
 │   │                           None means "takes no tools"             [B10]
 │   ├── context.py            + SessionMemoryService.task_messages(),
 │   │                           backing load_task_result                [B10]
-│   ├── memory.py             EMPTY  → B13 fills it
+│   ├── editor_context.py     NEW — EditorContext, MODE_EXPLAIN/MODE_FILL,
+│   │                           resolve_scope() (the no-parser enclosing-
+│   │                           scope heuristic — indentation or brace
+│   │                           matching, ~2k token cap, then +/-20 lines).
+│   │                           Known failure cases: a UTF-8 BOM defeats it
+│   │                           outright (found + fixed, see context.py
+│   │                           below); no real nesting understanding
+│   │                           (a decorator above a def is not pulled in);
+│   │                           brace matching is naive character counting,
+│   │                           not lexing                                [B11]
+│   ├── context.py            + editor_context/research_reference_index on
+│   │                           ContextRequest and report(); task_state
+│   │                           now actually renders (both compete for
+│   │                           budget like attachments, evicted with a
+│   │                           reason if they don't fit); a BOM is
+│   │                           stripped before splitlines() in
+│   │                           _render_editor_context()                  [B11]
+│   ├── memory.py             FILLED — Proposal (B11's own narrow stopgap,
+│   │                           NOT B13's real memory_records/
+│   │                           memory_scopes, which stay untouched since
+│   │                           v2), PROPOSAL_STATUS_PENDING. B13 must read
+│   │                           this before writing its own type — see
+│   │                           decisions.md D97 and B13-memory-system.md's
+│   │                           new "Read before starting" section         [B11]
 │   └── tool.py               DELETED — B10 did NOT fill it. A registry,
 │                             an executor, a schema checker and four tools
 │                             are not one manager; see tools\ above.
@@ -195,6 +265,15 @@ backend\
 │   │                         + v3: the tool_calls ledger. SCHEMA_VERSION
 │   │                           is now 3. No FK to tasks — evidence should
 │   │                           survive its subject                     [B10]
+│   │                         + v4: agent_proposals. SCHEMA_VERSION is now
+│   │                           4. Deliberately NOT memory_records/
+│   │                           memory_scopes (unchanged, still B13's)    [B11]
+│   ├── proposal_repository.py  NEW — insert / count_for_session (the
+│   │                           WHOLE enforcement for "at most 3 per
+│   │                           session") / list_by_status /
+│   │                           fetch_for_session. No update, no delete,
+│   │                           no review path — that is B13's, against
+│   │                           memory_records, not this table            [B11]
 │   ├── session_repository.py + the three new session columns           [B6]
 │   ├── task_repository.py    NEW — durable task mirror + recovery      [B6]
 │   │                         agent_id now actually supplied by the
@@ -251,12 +330,31 @@ backend\
     ├── manual_provider_test.py
     ├── manual_context_test.py  NEW — stm_window + reasoning filter, the
     │                          two checks the CLI cannot reach           [B8]
-    └── fixtures\             NEW — mock_stream.json, mock_slow.json    [B6]
-                              + seven tool-loop scripts, replayed by
-                                `send --script <name>`: two-tool-calls,
-                                three-tool-calls, tool-raises, tool-hangs,
-                                rate-limited-then-ok, read-outside-project,
-                                ungranted-tool                          [B10]
+    ├── fixtures\             NEW — mock_stream.json, mock_slow.json    [B6]
+    │                         + seven tool-loop scripts, replayed by
+    │                           `send --script <name>`: two-tool-calls,
+    │                           three-tool-calls, tool-raises, tool-hangs,
+    │                           rate-limited-then-ok, read-outside-project,
+    │                           ungranted-tool                          [B10]
+    ├── manual_b11_verify.ps1  NEW — the full episode gate: explainer scope
+    │                          ladder, filler writes-nothing + two-file
+    │                          refusal, research (background early-return,
+    │                          --wait, proposals, the memory-first repeat),
+    │                          session titles. Redirects APPDATA/
+    │                          LOCALAPPDATA in one script; real Ollama       [B11]
+    ├── manual_b11_deadline_check.ps1  NEW — the controlled before/after
+    │                          reproduction of the mid-stream timeout_s
+    │                          bug: an engineered long answer at
+    │                          --max-seconds 8, unbounded before the fix,
+    │                          cut off at exactly 8s after it                [B11]
+    └── manual_b11_memory_recall.ps1  NEW — the decisive (not just
+                               "offered") memory-first test: seeds 12
+                               filler exchanges directly (no LLM calls) so
+                               the first research answer falls out of
+                               stm_window, then asks a reworded question
+                               the model can only answer via a real lookup.
+                               Result recorded as "documented, not
+                               resolved" — see B11-three-agents.md          [B11]
 ```
 
 **`memory\` and `schemas\` do not exist.** The original log listed them as

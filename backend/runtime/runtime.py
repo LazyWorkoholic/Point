@@ -11,14 +11,19 @@ from typing import Any, Optional, Union
 
 import aiosqlite
 
+import appconfig
 from agents.executor import AgentExecutor, BoundsOverride
 from agents.registry import AgentRegistry
 from database.connection import open_database
 from database.migrations import SCHEMA_VERSION
+from database.proposal_repository import ProposalRepository
 from database.task_repository import TaskRepository
 from database.tool_call_repository import ToolCallRepository
 from logging_setup import get_logger
+from managers.agent import AgentConfig
 from managers.context import SessionMemoryService
+from managers.editor_context import EditorContext
+from managers.message import MessageRole
 from managers.project import Project
 from managers.project_manager import ProjectManager
 from managers.session import Session
@@ -93,12 +98,17 @@ class Runtime:
         self.tools = build_default_registry()
         self.tool_calls = ToolCallRepository(db_conn)
         self.agents = AgentRegistry(db_conn, tools=self.tools)
+        # B11's narrow proposal stopgap (managers\memory.py's Proposal,
+        # migration v4's agent_proposals table) -- NOT B13's
+        # memory_records/memory_scopes. See decisions.md D97.
+        self.proposals = ProposalRepository(db_conn)
         self.agent_executor = AgentExecutor(
             self.sessions, self.memory, self.tasks, self.providers,
             self.streams, self.stream_adapter, self._resolve_provider_name,
             projects=self.projects,
             tools=self.tools,
             tool_recorder=self.tool_calls.record,
+            proposal_repo=self.proposals,
         )
 
         # request id -> the envelope metadata that came in with it, so
@@ -139,12 +149,44 @@ class Runtime:
                 pass
             self._heartbeat = None
 
-        for task in self.tasks.list_active():
+        # B11: fire-and-forget work that is not a TaskManager Task at
+        # all (session title generation) gets the same courtesy, before
+        # the cancel-and-wait below -- it is not something we asked to
+        # stop, only something a short CLI process would otherwise cut
+        # off mid-flight. See AgentExecutor.drain_background()'s
+        # docstring for the failure this closes.
+        await self.agent_executor.drain_background()
+
+        active = self.tasks.list_active()
+        for task in active:
             task.cancel()
-        # One loop turn, so each cancelled task reaches its except branch
-        # and writes its terminal row instead of being buried by the next
-        # startup's crash recovery.
-        await asyncio.sleep(0)
+        # B11 exposed the bug a bare `asyncio.sleep(0)` here was hiding:
+        # a task cancelled mid network I/O does not finish unwinding in
+        # one loop turn. CancelledError has to propagate up through
+        # however many awaited layers it was suspended in (httpx ->
+        # httpcore -> anyio for every real provider), each needing its
+        # own turn -- and the sink's own cancelled-branch handling
+        # (persisting the partial message, `set_active_task`) is more
+        # awaits on top of that. One turn was enough for nothing to have
+        # run yet before this method reached `self.db.close()` two lines
+        # down, which raised `ValueError: no active connection` from
+        # inside the task's own cleanup instead of letting it finish
+        # cleanly. `Task.wait()` awaits the real asyncio.Task and
+        # swallows the CancelledError it raises back at its own
+        # awaiter -- close() already knows it cancelled these; it only
+        # needs the guarantee that cleanup actually completed. Bounded,
+        # so a task whose cleanup is genuinely stuck cannot hang
+        # shutdown forever.
+        if active:
+            try:
+                await asyncio.wait_for(
+                    asyncio.gather(*(task.wait() for task in active)), timeout=5.0,
+                )
+            except asyncio.TimeoutError:
+                _log.warning(
+                    "Timed out waiting for %d cancelled task(s) to finish during shutdown",
+                    len(active),
+                )
 
         try:
             await self.db.close()
@@ -557,7 +599,33 @@ class Runtime:
         # session twice, and only one of the two copies would be the one
         # actually sent.
         session = await self.sessions.get(session_id)
-        agent = await self.agents.resolve_for_session(session)
+        agent = await self._resolve_agent_for_send(session, event.payload)
+        editor_context = _editor_context_from_payload(event.payload.get("editor_context"))
+
+        # B11: no `background` field exists on AgentConfig (B9's field
+        # list is frozen without one, and adding a real column is a
+        # migration). `max_steps > 1` is the config already on hand that
+        # answers the same question -- an agent with a real bounded loop
+        # is the one that both (a) belongs in the background and (b) can
+        # meaningfully ask "have I already done this work in this
+        # session before". One computed flag drives both, here, not
+        # inside agents\executor.py, which must stay free of
+        # `if agent.id == ...`. See this episode's Handoff for where this
+        # heuristic breaks and what replaces it.
+        is_bounded_loop = agent.max_steps > 1
+        reference_index = (
+            await self._build_reference_index(session, agent) if is_bounded_loop else None
+        )
+        if reference_index:
+            # The visible half of Done-when #6 ("the log shows it
+            # consulted memory/past results before searching") -- a
+            # real model may or may not act on the index, but that it
+            # was BUILT and OFFERED is deterministic and belongs in the
+            # log regardless of what the model does with it.
+            _log.info(
+                "Session %s: agent %s offered %d past result(s) before this turn",
+                session.id, agent.id, reference_index.count("\n- task "),
+            )
 
         # B9: AgentExecutor owns "resolve config -> build context ->
         # create task -> stream -> emit -> persist" end to end; this
@@ -571,9 +639,13 @@ class Runtime:
             session=session,
             text=text,
             agent=agent,
-            make_sink=lambda message_id: self._make_stream_sink(event.request_id, session_id, message_id),
-            inline=True,
+            make_sink=lambda message_id: self._make_stream_sink(
+                event.request_id, session_id, message_id, background=is_bounded_loop,
+            ),
+            inline=not is_bounded_loop,
             bounds=_bounds_override(event.payload.get("bounds")),
+            editor_context=editor_context,
+            research_reference_index=reference_index,
         )
         # TaskStarted is emitted by the sink, from Task._run()'s own
         # "started" chunk -- NOT here (B10 fix). Emitting it here raced
@@ -585,6 +657,52 @@ class Runtime:
         # later than this emit); B10's loop emits `step 1/N` with no
         # delay at all and lost it every time.
         self.state.active_task_count = self.tasks.active_count()
+
+    async def _resolve_agent_for_send(self, session: Session, payload: dict[str, Any]) -> AgentConfig:
+        """`payload["agent"]` is a per-message override (B11) -- the
+        `@agent-id` prefix `cli.py send` strips, and the mechanism a
+        future `@` picker (F8) reaches the same way. Never written back
+        to `session.settings`: an override is for this one send, exactly
+        like BoundsOverride (B10) never mutates the stored AgentConfig.
+        Falls through to the session's own binding when absent."""
+        override_id = payload.get("agent")
+        if override_id:
+            return await self.agents.resolve(override_id)  # AgentNotFoundError -> a clean Error event
+        return await self.agents.resolve_for_session(session)
+
+    async def _build_reference_index(self, session: Session, agent: AgentConfig) -> Optional[str]:
+        """Research's memory-first behaviour (B11), the half that needs
+        no B13 schema: a reference index of this same agent's own past
+        completed tasks *in this session*, each with its age -- scoped
+        the same way B10's load_task_result already is, for the same
+        reason (a task id is not a capability). The "accepted memory
+        records" half of memory-first stays genuinely empty in v1;
+        context.build() already logs that as unimplemented, and this
+        function does not touch it.
+        """
+        rows = await self.task_repo.list_recent(limit=50, session_id=session.id)
+        matches = [r for r in rows if r["agent_id"] == agent.id and r["status"] == "completed"]
+        if not matches:
+            return None
+
+        stale_after_days = appconfig.config_value("research.stale_after_days", 7)
+        now = time.time()
+        lines = [f"Past {agent.name} results in this session (most recent first):"]
+        for row in matches[:5]:
+            finished = row["finished_at"] or row["created_at"]
+            age_days = (now - finished) / 86400.0
+            messages = await self.memory.task_messages(session.id, row["id"])
+            preview = " ".join(
+                m.text for m in messages if m.role == MessageRole.ASSISTANT and m.text
+            )[:200]
+            stale = f" [older than {stale_after_days}d -- consider re-researching]" if age_days > stale_after_days else ""
+            lines.append(f"- task {row['id'][:8]} ({age_days:.1f}d ago{stale}): {preview or '(no stored text)'}")
+        lines.append(
+            "Before searching, check whether one of these already answers the "
+            "question. Call load_task_result with its full task id to read one "
+            "in full before deciding to search."
+        )
+        return "\n".join(lines)
 
     async def _handle_cancel_task(self, event: IncomingEvent) -> None:
         """The ack is NOT terminal (B6 §7). It used to be a second
@@ -631,7 +749,9 @@ class Runtime:
 
     # -- event plumbing -----------------------------------------------
 
-    def _make_stream_sink(self, request_id: str, session_id: str, message_id: str):
+    def _make_stream_sink(
+        self, request_id: str, session_id: str, message_id: str, *, background: bool = False,
+    ):
         _EVENT_TYPE_MAP = {
             StreamEventType.TEXT_DELTA: OutgoingEventType.TEXT_DELTA,
             StreamEventType.THINKING_DELTA: OutgoingEventType.THINKING_DELTA,
@@ -653,12 +773,20 @@ class Runtime:
                 # emits this before it pulls the first chunk out of the
                 # body, so TaskStarted always precedes everything the
                 # task causes.
+                #
+                # `background` (B11) rides this payload so a client can
+                # tell, from TaskStarted alone, whether to keep draining
+                # to a terminal event or treat the send as fired-and-
+                # forgotten -- `cli.py send --wait` overrides the default
+                # either way. Absent/false preserves every prior client's
+                # behaviour exactly: an inline agent's TaskStarted looks
+                # identical to what it always was.
                 await self._emit(OutgoingEvent(
                     type=OutgoingEventType.TASK_STARTED,
                     request_id=request_id,
                     task_id=task.id,
                     session_id=session_id,
-                    payload={"session": session_id, "message_id": message_id},
+                    payload={"session": session_id, "message_id": message_id, "background": background},
                 ))
                 return
 
@@ -848,6 +976,16 @@ class Runtime:
             error_code=task.result.code if task.result else None,
             agent_id=task.agent_id,
         )
+
+def _editor_context_from_payload(payload: Optional[dict[str, Any]]) -> Optional[EditorContext]:
+    """SendMessage's optional `editor_context` object -> an EditorContext
+    (B11). None on the wire means no EditorContext at all -- `cli.py`
+    only sends one when `--file` is given, and a real editor (F11) only
+    sends one when it is the invocation site."""
+    if not payload:
+        return None
+    return EditorContext.from_dict(payload)
+
 
 def _bounds_override(payload: Optional[dict[str, Any]]) -> Optional[BoundsOverride]:
     """SendMessage's optional `bounds` object -> a BoundsOverride (B10).
