@@ -39,6 +39,31 @@ func TestReadsUISection(t *testing.T) {
 	}
 }
 
+// F3's scrollback cap follows the same "empty/zero means not set" rule as the
+// two string fields.
+func TestReadsScrollback(t *testing.T) {
+	dir := t.TempDir()
+	p := write(t, dir, "config.toml", "[ui]\nscrollback = 2000\n")
+
+	cfg, err := loadFrom(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.UI.Scrollback != 2000 {
+		t.Fatalf("scrollback = %d, want 2000", cfg.UI.Scrollback)
+	}
+}
+
+func TestScrollbackZeroKeepsDefault(t *testing.T) {
+	dir := t.TempDir()
+	p := write(t, dir, "config.toml", "[ui]\ntheme = \"green\"\n")
+
+	cfg, _ := loadFrom(p)
+	if cfg.UI.Scrollback != Defaults().UI.Scrollback {
+		t.Fatalf("scrollback = %d, want the default %d", cfg.UI.Scrollback, Defaults().UI.Scrollback)
+	}
+}
+
 // A partial config keeps the defaults for everything it does not mention.
 func TestPartialConfigKeepsDefaults(t *testing.T) {
 	dir := t.TempDir()

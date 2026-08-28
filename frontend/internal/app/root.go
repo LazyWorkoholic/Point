@@ -144,6 +144,15 @@ func (r *Root) Init() tea.Cmd {
 	return tea.Batch(cmds...)
 }
 
+// SetWorkspace installs a workspace built outside this package.
+//
+// A real workspace's Update must return app.Workspace, which means its
+// package has to import app — so app cannot import it back without a cycle.
+// main.go imports both and wires them together after New, before Init runs.
+func (r *Root) SetWorkspace(id WorkspaceID, ws Workspace) {
+	r.workspaces[id] = ws
+}
+
 func (r *Root) current() Workspace {
 	if ws, ok := r.workspaces[r.active]; ok {
 		return ws
@@ -180,7 +189,14 @@ func (r *Root) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case PasteMsg:
 		r.recordPaste(m)
-		return r, r.pushDiagnostics()
+		// Forwarded to the workspace too: the burst detector this message
+		// comes from (paste.go) cannot tell a genuine paste from a HELD
+		// hotkey whose OS auto-repeat got batched the same way a real
+		// paste is — F3's Chat workspace recovers that case for its own
+		// single-letter keys. See chat\scroll.go's handlePastedBurst.
+		ws, wsCmd := r.current().Update(m)
+		r.workspaces[r.active] = ws
+		return r, tea.Batch(r.pushDiagnostics(), wsCmd)
 
 	case pasteFlushMsg:
 		if m.gen != r.paste.gen {
@@ -222,7 +238,12 @@ func (r *Root) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else {
 			r.status = "backend connected"
 		}
-		return r, r.afterBackend()
+		// The workspace sees this too — F3's Chat workspace waits for it
+		// before issuing its first query, since a query fails while
+		// c.backend is nil.
+		ws, wsCmd := r.current().Update(m)
+		r.workspaces[r.active] = ws
+		return r, tea.Batch(r.afterBackend(), wsCmd)
 
 	case protocol.VersionMismatchMsg:
 		// Refuse, with BOTH versions named. This is the envelope version from
@@ -267,13 +288,17 @@ func (r *Root) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return r, r.afterBackend()
 
 	case protocol.EnvelopeMsg:
-		// F2 does not interpret payloads beyond routing; consumers arrive in
-		// F3 and later. What the root keeps is the task lifecycle, which is
-		// what makes "every spinner stops" checkable.
+		// F2 does not interpret payloads beyond routing. What the root keeps
+		// for itself is the task lifecycle, which is what makes "every
+		// spinner stops" checkable — the payload itself goes to the
+		// workspace, which is the first consumer (F3's GetSession/
+		// ListSessions/CreateSession replies).
 		if r.client != nil {
 			r.conn.inFlight = r.client.InFlight()
 		}
-		return r, r.afterBackend()
+		ws, wsCmd := r.current().Update(m)
+		r.workspaces[r.active] = ws
+		return r, tea.Batch(r.afterBackend(), wsCmd)
 
 	case protocol.ClosedMsg:
 		if !r.quitting {

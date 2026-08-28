@@ -17,6 +17,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/lazyworkoholic/point/frontend/internal/app"
+	"github.com/lazyworkoholic/point/frontend/internal/chat"
 	"github.com/lazyworkoholic/point/frontend/internal/config"
 	"github.com/lazyworkoholic/point/frontend/internal/protocol"
 	"github.com/lazyworkoholic/point/frontend/internal/theme"
@@ -59,6 +60,12 @@ func run() error {
 	log := slog.New(slog.NewTextHandler(logFile, &slog.HandlerOptions{Level: slog.LevelDebug}))
 	log.Info("point starting",
 		"config", config.ConfigPath(), "state", config.StatePath())
+
+	// Both are no-ops unless their env var is set — see diagnostics.go.
+	stopMemLog := startMemLog(log)
+	defer stopMemLog()
+	stopPprof := startPprof(log)
+	defer stopPprof()
 
 	th := theme.New(cfg.UI.Theme, theme.Background(cfg.UI.Background))
 	if cfg.UI.Theme != "" && th.Name() != cfg.UI.Theme {
@@ -107,6 +114,18 @@ func run() error {
 		// both offenders named — not silently at a keypress six weeks later.
 		return err
 	}
+
+	// chat cannot be constructed inside app.New: its Update method has to
+	// return app.Workspace, which means the chat package imports app — so
+	// app cannot import chat back without a cycle. This is the one place
+	// that wires the two together, replacing F1's placeholder for the chat
+	// workspace with the real thing.
+	root.SetWorkspace(app.WorkspaceChat, chat.New(chat.Options{
+		Theme:      th,
+		Client:     client,
+		Log:        log,
+		Scrollback: cfg.UI.Scrollback,
+	}))
 
 	program := tea.NewProgram(root,
 		tea.WithAltScreen(),

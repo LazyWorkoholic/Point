@@ -14,7 +14,8 @@ it passed.
 |---|---|---|---|
 | F1 | Bootstrap, Layout, Registry, Theme | ✅ built + manually verified | `F01-bootstrap.md` |
 | F2 | Backend Client | ✅ built + manually verified | `F02-backend-client.md` |
-| F3–F17 | — | not started | — |
+| F3 | Chat Viewport | ✅ built + manually verified | `F03-chat-viewport.md` |
+| F4–F17 | — | not started | — |
 
 **F1 and F2 were built and verified in one session** (`batchable: yes`).
 
@@ -24,8 +25,12 @@ The two contracts the rest of the frontend is built on:
   into the rects it returns. Full field list in `F01-bootstrap.md`.
 - **`protocol.Envelope` and `protocol.Transport`** — every episode from F3 sends
   and receives through them. Full definitions in `F02-backend-client.md`.
+- **The message → block rendering pipeline** (`renderMessage`, the render
+  cache, the windowed scroll) — F5 (streaming) and F9 (task slots) both
+  build on it rather than inventing their own. Full account in
+  `F03-chat-viewport.md`'s "The message → block pipeline".
 
-**F3 can start now.** It needs F2 (done) and B2–B3 (done).
+**F4 can start now.** It needs F3 (done).
 
 ## How to add an entry
 

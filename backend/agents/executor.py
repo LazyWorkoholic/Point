@@ -545,10 +545,28 @@ class AgentExecutor:
     # -- task bodies --------------------------------------------------------
 
     async def _echo_body(self, text: str) -> AsyncIterator[dict[str, Any]]:
-        """Placeholder task body for the no-network `echo` provider."""
-        for word in text.split():
-            await asyncio.sleep(0.05)
-            yield {"text": word + " "}
+        """Placeholder task body for the no-network `echo` provider.
+
+        Chunked on whitespace RUNS via re.finditer, not `str.split()`'s
+        words. `split()` with no argument discards every separator it
+        splits on, so a blank line ("\\n\\n"), a fenced code block's
+        indentation, and a single space were all indistinguishable by the
+        time a chunk left here -- every run of whitespace collapsed to the
+        one literal " " each yielded word was reassembled with. That
+        corruption was in the stored message itself, before F3 or
+        anything else downstream ever touched it (see F03-chat-viewport.md's
+        completion notes for how it was found).
+
+        `\\S+|\\s+` alternates non-whitespace and whitespace runs, each
+        yielded verbatim, so concatenating every chunk reconstructs `text`
+        exactly. Only a non-whitespace chunk gets the pacing sleep — a run
+        of blank lines streaming instantly does not need to feel typed.
+        """
+        for m in re.finditer(r"\S+|\s+", text):
+            piece = m.group()
+            if piece.strip():
+                await asyncio.sleep(0.05)
+            yield {"text": piece}
 
     async def _loop_body(
         self,

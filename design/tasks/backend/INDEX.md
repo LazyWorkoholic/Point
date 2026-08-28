@@ -155,6 +155,13 @@ Format: `[ ] item — why parked · hook · anchor · what unparking takes`
       inferring. See `B11-three-agents.md`'s Handoff for the full account.
 - [ ] **Dynamic capabilities (declarative TOML layouts, Tier 2)** — hook:
       data-driven components from F3. Anchor: post-v1.
+- [ ] **Message pagination / lazy scrollback loading** — see
+      `design/tasks/backend/B18-message-pagination.md` (new episode, to be
+      written). F3 assumed a `session.messages(before, limit)` query that does
+      not exist; `GetSession` fetches the full unpaginated message list via
+      `SessionRepository.fetch_messages`. F3 caps rendering at 500 messages
+      client-side as the interim stopgap. Anchor: post-v1, or sooner if a real
+      session grows large enough for the full-fetch cost to be felt.
 - [ ] **Shared-runtime SSH (topology C) and live co-editing** — needs
       connection-scoped identity on every event, plus CRDTs. Anchor: post-v1.
 - [ ] **ClaudeCodeProvider (Agent SDK via Claude Code CLI)** —

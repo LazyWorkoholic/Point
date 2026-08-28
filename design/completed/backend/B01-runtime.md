@@ -204,3 +204,29 @@ the process's lifetime.
   code path is a dev-testing convenience only.
 
 ---
+
+## Correction — found in F3 (2026-08-29)
+
+**`_demo_echo_body` flattened every reply's newlines.** Documented above as
+"streams the input text back word-by-word" — true, but the implementation was
+`for word in text.split(): yield {"text": word + " "}`. `str.split()` with no
+argument splits on *any* run of whitespace and discards the separator
+entirely, so a blank line, a fenced code block's line breaks, and a single
+space were all indistinguishable by the time a chunk left this function. The
+echoed reply was corrupted in the **stored** message — verifiable straight
+from the database, before `cli.py`'s printing or any frontend rendering ever
+touched it.
+
+Invisible until now because nothing before F3 rendered a multi-line echoed
+reply in a way where flattening was obvious — B9's tool-loop and B10/B11's
+real providers don't go through this path at all (`echo` is the no-network
+dev path only), and every manual echo test through B11 sent single-line text.
+
+The code moved during B9's refactor — `_demo_echo_body` here became
+`AgentExecutor._echo_body` in `backend\agents\executor.py` — so the fix lives
+there, not in this file. It now iterates `re.finditer(r"\S+|\s+", text)`,
+yielding each whitespace run verbatim alongside each word, so concatenating
+every chunk reconstructs the original text exactly. Found and fixed while
+verifying `design/tasks/frontend/F03-chat-viewport.md`'s multi-line
+markdown/code-fence rendering; recorded here, not in F3's notes, because the
+defect predates F3 and lived entirely on the backend side of the wire.

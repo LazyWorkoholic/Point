@@ -70,6 +70,11 @@ func LogDir() string     { return filepath.Join(StateDir(), "logs") }
 type UI struct {
 	Theme      string `toml:"theme"`
 	Background string `toml:"background"`
+
+	// Scrollback caps how many messages F3's Chat workspace renders per
+	// session. Named here, not in LAYOUT.md, which only names the default
+	// (500) and the key (`ui.scrollback`).
+	Scrollback int `toml:"scrollback"`
 }
 
 // Config is the whole file, reduced to what the frontend reads. Keys the
@@ -82,7 +87,7 @@ type Config struct {
 
 // Defaults is what an absent config.toml means.
 func Defaults() Config {
-	return Config{UI: UI{Theme: "turquoise", Background: "transparent"}}
+	return Config{UI: UI{Theme: "turquoise", Background: "transparent", Scrollback: 500}}
 }
 
 // Load reads config.toml.
@@ -125,6 +130,9 @@ func loadFrom(path string) (Config, error) {
 	}
 	if parsed.UI.Background != "" {
 		cfg.UI.Background = parsed.UI.Background
+	}
+	if parsed.UI.Scrollback != 0 {
+		cfg.UI.Scrollback = parsed.UI.Scrollback
 	}
 	return cfg, nil
 }

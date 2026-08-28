@@ -60,6 +60,7 @@ from bootstrap import (
 from logging_setup import configure_logging, get_logger
 from managers import context
 from managers.editor_context import EditorContext, MODE_EXPLAIN, MODE_FILL
+from managers.message import Message, MessageRole
 from providers.mock import provider as mock_provider
 from providers.models import ProviderConfig, ProviderHealthStatus
 from runtime.errors import AgentNotFoundError, BuiltinAgentImmutableError, ContextOverflowError
@@ -378,6 +379,42 @@ async def cmd_session_list(runtime: Runtime, args: argparse.Namespace) -> int:
             f"{provider}/{model:<24}  {session['title']}"
         )
     print(f"\n{len(sessions)} session(s)")
+    return EXIT_OK
+
+
+async def cmd_seed_session(runtime: Runtime, args: argparse.Namespace) -> int:
+    """F3's own fixture generator (frontend\\...\\F03-chat-viewport.md): a
+    10,000-message session to open and scroll, without spending real
+    provider calls or agent turns on it. Messages alternate user/assistant
+    and are appended directly through SessionManager -- the same path
+    real turns use, just without a Runtime dispatch or a provider in
+    between.
+
+    Not wired through call()/the outbox: this never needs to round-trip
+    through an envelope, so it talks to the manager layer directly, same
+    as `doctor`/`migrate`.
+    """
+    if args.session:
+        session = await runtime.sessions.get(args.session)
+    else:
+        provider, model = await default_provider(runtime)
+        session = await runtime.sessions.create(
+            title=args.title or f"seed ({args.messages} messages)",
+            provider=provider, model=model,
+        )
+        print(f"[session {session.id}  {provider}/{model}]")
+
+    for i in range(args.messages):
+        role = MessageRole.USER if i % 2 == 0 else MessageRole.ASSISTANT
+        text = (
+            f"seed message {i + 1} of {args.messages} -- {role.value} filler "
+            "text for scrollback and render testing."
+        )
+        await runtime.sessions.append_message(Message.new(session.id, role, text=text))
+        if (i + 1) % 1000 == 0:
+            print(f"  {i + 1}/{args.messages}", file=sys.stderr)
+
+    print(f"seeded {args.messages} message(s) into session {session.id}")
     return EXIT_OK
 
 
@@ -1011,6 +1048,14 @@ def build_parser() -> argparse.ArgumentParser:
     listing = session.add_parser("list", help="list sessions", parents=[common])
     listing.add_argument("--all", action="store_true", help="include archived")
 
+    seed = sub.add_parser(
+        "seed-session", help="generate a synthetic session for scrollback/render testing",
+        parents=[common],
+    )
+    seed.add_argument("--messages", type=int, default=200, help="how many messages (default: 200)")
+    seed.add_argument("--session", default=None, help="append to an existing session id")
+    seed.add_argument("--title", default=None, help="title for a newly created session")
+
     send = sub.add_parser("send", help="send a message and stream the reply", parents=[common])
     send.add_argument("text")
     send.add_argument("--session", default=None, help="existing session id")
@@ -1156,6 +1201,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     handlers = {
         ("session", "new"): cmd_session_new,
         ("session", "list"): cmd_session_list,
+        ("seed-session", None): cmd_seed_session,
         ("send", None): cmd_send,
         ("context", "report"): cmd_context_report,
         ("tasks", "list"): cmd_tasks_list,
