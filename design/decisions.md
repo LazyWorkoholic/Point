@@ -778,3 +778,34 @@ later episode has to actively reconcile them instead of finding nothing there.
 Judged worth it every time so far: the alternative is building the real thing
 against imagined requirements, which is exactly what B13's own precondition
 exists to prevent.
+
+### D98 — The heartbeat pings unconditionally; a silent task is not proof of life
+**Alternatives:** keep suppressing `ping` while tasks are active and rely on
+tokens as the liveness signal; suppress only while a *streaming* task is active;
+have Go send the ping and the backend reply; emit `ping` on a fixed interval
+regardless of what the backend is doing.
+**Why:** `Runtime._heartbeat_loop` skips its ping whenever
+`self.tasks.active_count() > 0`, and its docstring gives the reason — "tokens are
+already proving liveness". That is true of a streaming reply and false of a tool
+call. B10's `web_search` against a slow endpoint emits `ToolStarted`, then
+nothing at all until `ToolCompleted`; a long `read_file` on a large file behaves
+the same. Inside that window the backend is producing no tokens *and* no pings,
+so the wire is indistinguishable from a deadlocked process — and it is
+indistinguishable during precisely the operation most likely to deadlock, which
+is the one waiting on something external.
+
+Detection cost is the visible half. F2 could not simply shorten its watchdog, so
+`Client.run` stretches the deadline by `busyGrace` (60s) whenever it believes a
+task is in flight. A genuine hang mid-task therefore takes ~72s to notice rather
+than ~12s. The alternative — not stretching it — would kill and restart a
+perfectly healthy backend every time a tool call ran longer than twelve seconds,
+which is worse: a false positive here cancels real work.
+
+Having Go drive the ping instead was rejected for the same reason the backend
+owns every other timer: it puts liveness on the render loop, and a frontend busy
+enough to be late with a ping is not evidence about the backend at all.
+**Cost:** one envelope every five seconds during a task that is already
+streaming thousands — negligible on the wire, and it removes a special case
+rather than adding one. B15 makes the change and deletes `busyGrace` with it;
+until then the frontend carries a workaround for a backend decision, which is
+the wrong side for it to live on.

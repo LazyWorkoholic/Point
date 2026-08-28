@@ -12,11 +12,20 @@ it passed.
 
 | # | Episode | State | File |
 |---|---|---|---|
-| F1 | Bootstrap, Layout, Registry, Theme | 🔜 not started | — |
-| F2–F16 | — | not started | — |
+| F1 | Bootstrap, Layout, Registry, Theme | ✅ built + manually verified | `F01-bootstrap.md` |
+| F2 | Backend Client | ✅ built + manually verified | `F02-backend-client.md` |
+| F3–F17 | — | not started | — |
 
-Nothing is built yet. **F1 and F2 can start immediately** — they need only
-backend B1–B5, which are complete.
+**F1 and F2 were built and verified in one session** (`batchable: yes`).
+
+The two contracts the rest of the frontend is built on:
+
+- **`layout.Compute(w, h int, s State) Layout`** — every episode from F3 renders
+  into the rects it returns. Full field list in `F01-bootstrap.md`.
+- **`protocol.Envelope` and `protocol.Transport`** — every episode from F3 sends
+  and receives through them. Full definitions in `F02-backend-client.md`.
+
+**F3 can start now.** It needs F2 (done) and B2–B3 (done).
 
 ## How to add an entry
 

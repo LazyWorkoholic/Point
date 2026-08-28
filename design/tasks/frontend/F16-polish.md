@@ -9,6 +9,26 @@ small; together they are what a viewer actually notices.
 
 ## Build
 
+### Header — carried forward from F1
+
+F1 built the header line and deliberately left two things unfinished. They are
+cosmetic, which is why they were not fixed there; they are recorded here because
+this is the episode that owns cosmetics.
+
+- **The animation slot is a static glyph.** `render.go`'s header draws a fixed
+  `◇ ◈ ◇` on the left where LAYOUT.md calls for an animation. Nothing animates
+  yet, and nothing schedules a frame tick. Whatever this becomes, it must be
+  cheap: a `tea.Tick` that repaints the whole frame several times a second is
+  the easiest way to make an idle TUI burn CPU, which is the thing
+  **"4. idle CPU"** in this episode's own verification is measuring.
+- **Header padding degrades rather than reflows at narrow widths.** The three
+  header segments are laid out by computing a left and a right gap, each clamped
+  to a minimum of one cell. Above roughly 90 columns this centres `P O I N T`
+  correctly; below it the clamp wins and the title drifts off-centre rather than
+  the right-hand segment dropping out. Decide the narrow-width behaviour here —
+  most likely: drop the right segment first, then the left, before letting the
+  title move.
+
 ### States audit
 Walk **every** list, pane and popup and confirm three states exist:
 ```

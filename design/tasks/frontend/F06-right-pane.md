@@ -17,6 +17,35 @@ Three **independently bordered** rounded boxes, stacked with no gap between them
 fixed 32 columns (26 at 90–119 width). `Compute` returns **one rect per card with
 different heights** — Status short, Task medium, Sessions taking the remainder.
 
+> **Inherited from F1 — `layout.CardSlot`.**
+> `Compute` cannot return one rect per card without being told how many cards
+> there are and what each wants, and it must not know what a "Status card" is.
+> F1 therefore added a deliberately narrow type:
+>
+> ```go
+> type CardSlot struct {
+>     MinHeight int   // rows this card wants, borders included
+>     Flex      bool  // may absorb leftover rows; the last Flex card gets them
+> }
+> ```
+>
+> `layout.State.RightCards []CardSlot` is what the workspace hands `Compute`,
+> and the distribution rule is already implemented and tested: every card gets
+> its `MinHeight`, the leftover goes to the last `Flex` card, and when the pane
+> is too short **trailing cards are dropped to a zero rect rather than every
+> card being squeezed below the three rows a bordered box needs**.
+>
+> This follows the B8 `ContextPolicy` precedent: F1 needed a shape that F6
+> formally owns, so it defined a narrower type under a different name instead of
+> claiming F6's. **F6's real card type must be adaptable to `CardSlot`, not
+> identical to it** — the card owns its title, its content and its state; the
+> slot owns only its height appetite. Do not widen `CardSlot` to carry rendering
+> concerns; `Compute` is pure and has no business knowing them.
+>
+> An open right pane with an empty `RightCards` renders no pane at all, and
+> `Main` reclaims the width. That is intentional — an open pane with nothing in
+> it is not a layout the app can produce.
+
 ```
 ╭─ Status ─────────╮
 │ ████████░░░░     │

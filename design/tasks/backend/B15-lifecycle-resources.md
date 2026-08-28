@@ -32,12 +32,42 @@ A registry of live references: anything held by a `RUNNING` or `QUEUED` task is
 `ping` every 5s while idle. Two missed pings marks the connection dead. This is
 what catches a **hung** backend — process-exit detection never will.
 
+**Change the suppression rule: emit `ping` unconditionally.** (D-heartbeat in
+`decisions.md`.) `Runtime._heartbeat_loop` currently skips the ping whenever
+`self.tasks.active_count() > 0`, on the reasoning that tokens already prove
+liveness. That holds for a streaming reply and **fails for a slow tool call**,
+which is silent by nature — `web_search` against a slow endpoint emits nothing
+between `ToolStarted` and `ToolCompleted`. During exactly that window the
+backend sends no tokens and no pings, so from Go a working tool call and a
+deadlocked process look identical.
+
+F2's client compensates by stretching its watchdog by 60s whenever it believes a
+task is in flight (`busyGrace` in `frontend\internal\protocol\client.go`), which
+means a genuine hang during a task takes up to ~72s to detect instead of ~12s.
+That is a workaround for a backend decision, and it belongs here rather than
+there. When the ping becomes unconditional, **delete `busyGrace`** and say so in
+this episode's handoff so the frontend side gets simplified with it.
+
 ### Crash recovery (backend half)
 - On startup, find tasks left `RUNNING` in the DB from a previous process. They
   are not running. Mark them `FAILED` with `code=backend_died`, preserving any
   partial assistant message with `interrupted=True`.
 - `session.events_since(session_id, seq)` → the events needed to rebuild UI state
   after a reconnect.
+
+  **This episode owns the command, and F2 is already waiting on it.** There is no
+  member of `IncomingEventType` for it in `backend\runtime\events.py` and no
+  handler, so F2 could not call it. F2's recovery ladder was therefore built
+  without the replay rung: `Client.afterReconnect` in
+  `frontend\internal\protocol\client.go` is a **logged no-op seam**, and every
+  task that was in flight when the backend died is marked FAILED/interrupted
+  rather than resumed. Partial text is kept; nothing is silently lost, but
+  nothing is recovered either.
+
+  Add the incoming event, the handler, and the outgoing reply here, then delete
+  the no-op and fill the seam. The frontend change is one function; the reason
+  it was left open is that inventing backend surface from a frontend episode is
+  exactly what CLAUDE.md forbids.
 - `tasks.list()` must be correct immediately after a restart.
 
 ### Graceful shutdown

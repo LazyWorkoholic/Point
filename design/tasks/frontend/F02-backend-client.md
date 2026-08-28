@@ -65,6 +65,10 @@ Wait for `hello {v, capabilities}`. On version mismatch, **refuse** and show bot
 versions plus the fix. Store `capabilities` on the root so later episodes can grey
 out unsupported features rather than lying.
 
+`v` is the **envelope** version — `ENVELOPE_VERSION` in `backend\runtime\events.py`,
+currently `1` — not the product version in the repo's `VERSION` file. Nothing on
+the wire reads `VERSION`; only `cli.py doctor` prints it.
+
 ### Heartbeat and recovery
 ```
 ping every 5s while idle
@@ -125,12 +129,23 @@ reply still on screen marked interrupted.
 **Fails if:** the UI hangs, the partial text vanishes, or it restarts in a loop.
 
 ```powershell
-# 2. version mismatch
-"9.9.9" | Set-Content VERSION -NoNewline
+# 2. version mismatch — the ENVELOPE version, not the repo's VERSION file.
+#    `hello` carries ENVELOPE_VERSION from backend\runtime\events.py, and
+#    nothing on the wire reads VERSION at all (only `cli.py doctor` prints it).
+#    So bump the one line the handshake actually compares, then revert it.
+#    NEVER edit VERSION for this check.
+$events = ".\backend\runtime\events.py"
+(Get-Content $events -Raw) -replace 'ENVELOPE_VERSION = 1', 'ENVELOPE_VERSION = 2' |
+  Set-Content $events -NoNewline
 go run .\frontend\cmd\point
-"0.1.0" | Set-Content VERSION -NoNewline
+# ... observe the refusal, quit, then put it back:
+(Get-Content $events -Raw) -replace 'ENVELOPE_VERSION = 2', 'ENVELOPE_VERSION = 1' |
+  Set-Content $events -NoNewline
+git diff --stat backend\runtime\events.py    # expect: no output
 ```
-**Expect:** a refusal naming both versions.
+**Expect:** a refusal naming both versions — "Point speaks v1, the backend
+speaks v2" — and no automatic restart, because a restart cannot fix it.
+**Fails if:** it connects anyway, or it retries in a loop.
 
 ```powershell
 # 6. protocol corruption — temporarily add print("hi") to backend\main.py
