@@ -42,11 +42,13 @@ All printed commands must be **PowerShell**.
 | F15 | Filler-Explainer Integration | P1 | no | F13, F9 | B11 |
 | F16 | Polish | P2 | no | all | — |
 | F17 | Web Preview | P2 | no | F14 | — |
+| F18 | windowed history | P1 | no | F5+B18 | B18 |
 
 **F1–F5 can start today** — they need only B1–B5, which are built.
 
 **Ordering:** F1–F5 are strictly serial. F7 before F6 (the right pane's expanded
 context card is a popup). F12 needs F6. F13–F15 are an independent block.
+F18 needs B18 and F5; must land before F12 (anchor lives in the Suspend blob).
 
 ## Cross-cutting rules — apply in every episode
 

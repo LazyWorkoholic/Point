@@ -551,6 +551,40 @@ land on here.
 
 ---
 
+# SESSION 11b — B18 Message Pagination
+
+**Goal:** make a bounded slice of history cheap to fetch, so F18 can window it.
+
+**Paste:**
+```
+Read CLAUDE.md and design/tasks/backend/B18-message-pagination.md.
+
+seq is migration v5, keyset only, GetSession stays unbounded when
+message_limit is omitted. Backend only — do not touch the frontend.
+
+Stop at the verification gate with PowerShell checks.
+
+If anything in this episode's Build section is ambiguous or seems to
+assume something not true of this repo, stop and tell me before writing
+code.
+```
+
+**Record:**
+```
+Write design/completed/backend/B18-message-pagination.md following the
+format in design/completed/backend/INDEX.md. Include the bugs we hit and
+how they were fixed, and what the next episode inherits. Add a row to
+design/completed/backend/INDEX.md's status table.
+
+Record the exact SessionMessages request/response payload shape and the
+has_more_before/has_more_after semantics. F18 pages against these names
+exactly.
+```
+
+**Then:** commit · `/clear`
+
+---
+
 # SESSION 12 — F7 Popup Framework
 
 **Paste:**
@@ -722,6 +756,54 @@ Also record the Settings popup's tab structure and how a new tab gets
 registered. F11 adds a Memory tab to this same popup later and should be
 able to do it without touching F10's code — write down what makes that
 true.
+```
+
+**Then:** commit · `/clear`
+
+---
+
+---
+
+# SESSION 16b — F18 Windowed History
+
+**Goal:** history obeys the same bounded-memory rule as workspace unload —
+flat memory regardless of session size and scroll depth, so a low-end device
+running a local model never competes with held scrollback.
+
+**Paste:**
+```
+Read CLAUDE.md and design/tasks/frontend/F18-windowed-history.md.
+
+Bounded contiguous resident window, keyset on seq, memory flat regardless
+of session size AND scroll depth. Never background-fetch the whole session.
+Defer history fetches while a task streams. The Suspend anchor is
+{anchorSeq, rowOffset, pinnedToBottom} and Resume degrades to bottom if the
+anchor is gone.
+
+Stop at the verification gate with PowerShell checks.
+
+If anything in this episode's Build section is ambiguous or seems to
+assume something not true of this repo, stop and tell me before writing
+code.
+```
+
+**You do:** the memory check is the whole point — run with POINT_MEMLOG, seed
+50k messages, scroll bottom to top and back, and confirm heap_alloc trends flat
+with no climb. A climb means eviction isn't working; treat it as a hard stop.
+
+**Record:**
+```
+Write design/completed/frontend/F18-windowed-history.md following the
+format in design/completed/backend/INDEX.md. Include the bugs we hit and
+how they were fixed, and what the next episode inherits. Add a row to
+design/completed/frontend/INDEX.md's status table.
+
+Record the Suspend-blob anchor shape exactly as implemented
+({anchorSeq, rowOffset, pinnedToBottom} or whatever you land on), the
+resume-degrades-to-bottom rule, and the pinned-to-bottom rule. F12's real
+workspace-state type must adopt this shape method-for-method, not
+approximate it, and must preserve both behaviours rather than re-deriving
+them.
 ```
 
 **Then:** commit · `/clear`

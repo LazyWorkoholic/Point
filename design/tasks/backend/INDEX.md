@@ -19,18 +19,19 @@ uv run python main.py
 | B3 | Message System | — | — | B2 | ✅ built |
 | B4 | Provider System | — | — | B3 | ✅ built |
 | B5 | Streaming Engine | — | — | B4 | ✅ built |
-| B6 | Schema v2 + Envelope v1 + Bootstrap | P1 | no | B5 | not started |
-| B7 | Project System | P1 | no | B6 | not started |
-| B8 | Context Builder v0 | P1 | no | B6 | not started |
-| B9 | Agent Foundation | P1 | no | B8 | not started |
-| B10 | Tool System | P1 | no | B9 | not started |
-| B11 | The Three Agents | P1 | no | B10 | not started |
-| B12 | Routing, Attachments, Caps | P1 | no | B11 | not started |
+| B6 | Schema v2 + Envelope v1 + Bootstrap | P1 | no | B5 | ✅ built |
+| B7 | Project System | P1 | no | B6 | ✅ built |
+| B8 | Context Builder v0 | P1 | no | B6 | ✅ built |
+| B9 | Agent Foundation | P1 | no | B8 | ✅ built |
+| B10 | Tool System | P1 | no | B9 | ✅ built |
+| B11 | The Three Agents | P1 | no | B10 | ✅ built |
+| B12 | Routing, Attachments, Caps | P1 | no | B11 | ✅ built |
 | B13 | Memory System | P2 | no | B12 + real usage | not started |
 | B14 | Usage & Limits | P2 | no | B12 | not started |
 | B15 | Lifecycle & Resources | P2 | no | B12 | **demo-critical** |
 | B16 | SSH Serving | P2 | no | B15, F12 | not started |
 | B17 | Hardening | P2 | no | all | not started |
+| B18 | Message Pagination | P2 | no | B6 | not started |
 
 **B1–B5 are frozen.** Additive changes only — new columns, new optional fields.
 Never refactors.
@@ -106,6 +107,7 @@ never returns on stdin EOF. See `B06-schema-bootstrap.md` §9.
 ## Parking lot
 
 Format: `[ ] item — why parked · hook · anchor · what unparking takes`
+`[✅] items - means it is written as an episode in above table and as a .md file.`
 
 - [ ] **Semantic retrieval (embeddings)** — keyword + tags closes most of the gap
       for zero cost. Hook: nullable `embedding` BLOB (B6), retrieval behind one
@@ -155,9 +157,9 @@ Format: `[ ] item — why parked · hook · anchor · what unparking takes`
       inferring. See `B11-three-agents.md`'s Handoff for the full account.
 - [ ] **Dynamic capabilities (declarative TOML layouts, Tier 2)** — hook:
       data-driven components from F3. Anchor: post-v1.
-- [ ] **Message pagination / lazy scrollback loading** — see
-      `design/tasks/backend/B18-message-pagination.md` (new episode, to be
-      written). F3 assumed a `session.messages(before, limit)` query that does
+- [✅] **Message pagination / lazy scrollback loading** — see
+      `design/tasks/backend/B18-message-pagination.md` (written).
+      F3 assumed a `session.messages(before, limit)` query that does
       not exist; `GetSession` fetches the full unpaginated message list via
       `SessionRepository.fetch_messages`. F3 caps rendering at 500 messages
       client-side as the interim stopgap. Anchor: post-v1, or sooner if a real

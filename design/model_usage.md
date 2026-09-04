@@ -14,11 +14,13 @@ SESSION  EPISODE                          MODEL         WHY
 9        F3  chat viewport                Sonnet high   rendering, spec is exact
 10       F4  query input                  Sonnet high   fiddly but mechanical
 11       F5  streaming, queue, cancel     Opus medium   async state machine
+11b      B18 message pagination           Sonnet high
 12       F7  popup framework              Sonnet high   one widget, clear spec
 13       F6  right pane                   Sonnet medium mostly wiring events to cards
 14       F8  @ picker                     Sonnet high   modes + guards, well defined
 15       F9  tray, cards, diff            Opus medium   diff computation + apply paths
 16       F10 settings, first run          Sonnet high   forms and flows
+16b      F18 windowed history             Opus high
 17       F12 workspace lifecycle          Opus high     Suspend/Resume + timers;
                                                         wrong here breaks silently
 18       F13 editor core                  Opus high     largest, subtlest — CRLF,
