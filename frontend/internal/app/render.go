@@ -16,9 +16,49 @@ import (
 // overlaid rather than given a row of its own.
 const watermarkText = "◈ point"
 
+// View renders the whole frame — or, while a paste burst is still
+// assembling, re-serves the last one.
+//
+// Bubble Tea calls View after EVERY Update (tea.go's eventLoop:
+// `model.Update(msg)` then `p.renderer.write(model.View())`), and on
+// Windows a paste arrives as one KeyMsg per pasted character (paste.go).
+// A 391-line paste is therefore ~13,000 full re-renders of a frame whose
+// visible content cannot have changed: the pasted text is still
+// accumulating in pasteState.buf and reaches the workspace only at flush.
+// Measured, that frame costs ~4.4ms with a large session and a grown input
+// — several seconds of pure wasted rendering per paste, and it gets worse
+// as the input buffer grows because the whole buffer is re-wrapped per
+// frame.
+//
+// That backlog is not just slow, it is CORRECTING: bubbletea's msgs
+// channel is unbuffered, so while the loop renders, key records queue in
+// the OS console buffer and are then drained back-to-back. paste.go's
+// burst detector times keys at UPDATE time, not arrival time, so a backlog
+// makes ordinary typing look like a paste (a verification round's Bug 4)
+// and, worse, makes a real paste's own records look far enough apart to
+// end the burst early — after which its trailing newline arrives as a
+// LONE Enter and reaches Send (Bug 1). Not rendering a frame nobody can
+// see is what keeps the loop ahead of the input.
+//
+// Suppression covers a merely HELD key as well as an active burst, and that
+// is not an optimisation -- it is what stops the failure from re-arming
+// itself. A burst only ACTIVATES when two pasteable keys are processed
+// within pasteBurstGap (6ms) of each other, and that is measured at Update
+// time. If rendering one keystroke costs more than the gap, the second
+// pasted character always looks too far apart to belong to a paste, the
+// burst never activates, suppression never engages, and the paste degrades
+// into thousands of individually-rendered keystrokes until the console
+// input buffer overflows. Measured, one keystroke reached ~5ms at 16k runes
+// in the input and passed 6ms at 33k, which is exactly the ~229-line
+// ceiling a verification round found. Skipping the frame for the 6ms a key
+// is held costs nothing visible -- the release tick repaints it -- and
+// makes activation independent of how expensive the frame is.
 func (r *Root) View() string {
 	if r.w == 0 || r.h == 0 {
 		return ""
+	}
+	if r.pasteInFlight() && r.lastFrame != "" {
+		return r.lastFrame
 	}
 	if r.layout.W != r.w || r.layout.H != r.h {
 		r.recompute()
@@ -56,6 +96,7 @@ func (r *Root) View() string {
 	if r.overlay != nil {
 		screen = r.withOverlay(screen)
 	}
+	r.lastFrame = screen
 	return screen
 }
 

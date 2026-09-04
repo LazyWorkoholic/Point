@@ -26,6 +26,22 @@ type State struct {
 	// LastWorkspace is the workspace to open on next launch. It is the one
 	// piece of state F1 genuinely produces, and it exercises the round trip.
 	LastWorkspace string `json:"last_workspace,omitempty"`
+
+	// Drafts is F4's own addition, not F12's eventual workspace-state shape.
+	// F12 owns scroll position, open files and cursor in general; F4.md asks
+	// specifically for unsent input text and cursor position to survive a
+	// restart, keyed by session so switching sessions (F6) does not cross
+	// drafts. Per the project's own rule for a shape a later episode will
+	// formally own: this is a narrower, differently-named local type, and
+	// F12's real WorkspaceState must be adaptable TO Draft, not identical to
+	// it — see F04-query-input.md's Handoff for the exact call site.
+	Drafts map[string]Draft `json:"drafts,omitempty"`
+}
+
+// Draft is one session's unsent input.
+type Draft struct {
+	Text   string `json:"text"`
+	Cursor int    `json:"cursor"` // a rune index into Text, not a byte offset
 }
 
 func DefaultState() State {

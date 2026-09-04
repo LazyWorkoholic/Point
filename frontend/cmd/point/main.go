@@ -125,6 +125,9 @@ func run() error {
 		Client:     client,
 		Log:        log,
 		Scrollback: cfg.UI.Scrollback,
+		// F4: chat.Workspace reads Drafts out of this and writes it back,
+		// debounced, as the query input's buffer changes — see draft.go.
+		State: state,
 	}))
 
 	program := tea.NewProgram(root,

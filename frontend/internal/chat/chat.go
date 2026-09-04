@@ -2,10 +2,12 @@ package chat
 
 import (
 	"log/slog"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/lazyworkoholic/point/frontend/internal/app"
+	"github.com/lazyworkoholic/point/frontend/internal/config"
 	"github.com/lazyworkoholic/point/frontend/internal/layout"
 	"github.com/lazyworkoholic/point/frontend/internal/protocol"
 	"github.com/lazyworkoholic/point/frontend/internal/theme"
@@ -20,6 +22,51 @@ type Options struct {
 	// Scrollback bounds the render cache — see cache.go. <= 0 falls back to
 	// 500, matching config.Defaults().UI.Scrollback.
 	Scrollback int
+
+	// State is F1's already-loaded state.json (main.go loads it once for
+	// app.Options; this is the same value). F4 reads Drafts out of it on
+	// session load and writes it back, debounced, as the buffer changes —
+	// see draft.go. Everything else in it (LastWorkspace) round-trips
+	// unchanged: this package never touches those fields.
+	State config.State
+}
+
+// inputState is F4's query input: the editing model (input.go/
+// input_wrap.go), the mode chip, attachment chips (F8 populates; always
+// empty here), focus, and the bookkeeping render.go's growth calculation
+// and draft.go's debounce both need.
+type inputState struct {
+	buf   inputBuffer
+	chips []AttachmentChip
+
+	// focused: true while the input holds keyboard focus (composing).
+	// false: F3's j/k/y/G browse the transcript instead — see
+	// input_keys.go's enterBrowseMode/enterInputMode and app\focus.go.
+	focused bool
+
+	// scrollTop is the first wrapped VISUAL line shown, in the box's own
+	// coordinate space — only relevant once growth has hit its cap and the
+	// input has gone internally scrollable (render.go).
+	scrollTop int
+
+	// textWidth and boxContentWidth are cached from the most recent render
+	// (render.go's splitGrowth) so handleInputKey's Up/Down/Home/End
+	// (input_keys.go) and queryLines' own render both use the exact same
+	// numbers splitGrowth's growth calculation used. textWidth already has
+	// the mode chip's prefix subtracted (what cursor movement wraps
+	// against); boxContentWidth has not (what renderInputLines takes, since
+	// it does that subtraction itself) — passing the wrong one double- or
+	// zero-subtracts the prefix and the two would silently disagree about
+	// where the cursor is.
+	textWidth       int
+	boxContentWidth int
+
+	draftGen int // draft.go's save-debounce generation counter
+
+	// lastPasteAt is when the most recent PasteMsg landed. input_keys.go's
+	// Enter case reads it so a paste's own trailing newline can never
+	// reach Send -- see pasteSettle there.
+	lastPasteAt time.Time
 }
 
 // Workspace is F3's Chat workspace: the transcript. Nothing here builds the
@@ -48,6 +95,14 @@ type Workspace struct {
 	// exercise the ListSessions/GetSession/CreateSession decision logic
 	// without a live protocol.Client — see protocol.go's send doc.
 	sendFn func(cmdType string, kind queryKind, payload map[string]any)
+
+	input inputState
+
+	// state and saveStateFn back draft persistence (draft.go). saveStateFn
+	// defaults to config.SaveState; a test substitutes a recorder for the
+	// same reason sendFn does — see draft.go's persistDraft doc.
+	state       config.State
+	saveStateFn func(config.State) error
 
 	all []wireMessage // every message GetSession returned, oldest first
 
@@ -82,8 +137,12 @@ func New(opts Options) *Workspace {
 		cache:      make(map[string][]string),
 		focus:      -1,
 		pinned:     true,
+		state:      opts.State,
 	}
 	w.sendFn = w.doSend
+	w.saveStateFn = config.SaveState
+	w.input.buf = newInputBuffer()
+	w.input.focused = true // the input holds focus by default — F4
 	return w
 }
 
@@ -112,3 +171,4 @@ func (w *Workspace) Suspend() ([]byte, error) { return nil, nil }
 func (w *Workspace) Resume([]byte) error      { return nil }
 
 var _ app.Workspace = (*Workspace)(nil)
+var _ app.FocusAware = (*Workspace)(nil)

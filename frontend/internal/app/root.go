@@ -42,8 +42,14 @@ type Root struct {
 	client *protocol.Client
 	conn   connection
 
-	leader   leaderState
-	paste    pasteState
+	leader leaderState
+	paste  pasteState
+
+	// lastFrame is the most recently rendered screen, re-served while a
+	// paste burst is assembling — see View's doc comment for why that is a
+	// correctness fix and not just a speed one.
+	lastFrame string
+
 	status   string
 	log      *slog.Logger
 	quitting bool
@@ -199,10 +205,7 @@ func (r *Root) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return r, tea.Batch(r.pushDiagnostics(), wsCmd)
 
 	case pasteFlushMsg:
-		if m.gen != r.paste.gen {
-			return r, nil // a later key superseded this burst
-		}
-		return r, r.flushPaste()
+		return r, r.onFlushTick()
 
 	case pasteReleaseMsg:
 		if m.gen != r.paste.gen {

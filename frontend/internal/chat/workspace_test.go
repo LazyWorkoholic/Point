@@ -230,6 +230,11 @@ func TestPastedGBurstRePins(t *testing.T) {
 	w.all = fakeMessages(50)
 	w.pinned = false
 	w.focus = 10
+	// F4: the input holds focus by default now, and a real "G" burst must
+	// insert those letters as text — this test is specifically about F3's
+	// browse-mode hotkey recovery, which only applies once focus has moved
+	// off the input (Esc/Tab — app\focus.go).
+	w.input.focused = false
 
 	w.Update(app.PasteMsg{Text: "GGGGGG"})
 	if !w.pinned {
@@ -248,6 +253,7 @@ func TestMixedPasteIsNeverReplayedAsKeystrokes(t *testing.T) {
 	w.all = fakeMessages(50)
 	w.pinned = true
 	w.focus = -1
+	w.input.focused = false // browse mode — see TestPastedGBurstRePins
 
 	w.Update(app.PasteMsg{Text: "just kidding, ok?"})
 	if !w.pinned || w.focus != -1 {
@@ -266,6 +272,7 @@ func TestRepeatedGReRepinsAndDoesNotLeak(t *testing.T) {
 	w.bootstrapped = true
 	w.all = fakeMessages(10000)
 	w.pinned = true
+	w.input.focused = false // browse mode — see TestPastedGBurstRePins
 
 	rect := layout.Rect{W: 100, H: 26}
 	_ = w.viewportLines(rect)

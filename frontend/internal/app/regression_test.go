@@ -327,6 +327,46 @@ func TestTypingIsNotAPaste(t *testing.T) {
 	}
 }
 
+// ---------------------------------------------------------------------------
+// 4 — a bare modifier keydown/up decoded as a zero-rune KeyRunes event
+// ---------------------------------------------------------------------------
+//
+// bubbletea's Windows console reader (key_windows.go's keyType) has no
+// named case for Ctrl/Alt/Win/CapsLock pressed or released alone — its
+// final fallback is `return KeyRunes` with Runes set to e.Char verbatim,
+// and for one of these events e.Char is 0. A verification round's Bug 4
+// caught the visible symptom: the paste-line counter read "pasted 1 line
+// as one event" on a fresh launch, before any real paste happened — two
+// such artifacts arriving close together (plausible around any modifier
+// key activity, e.g. focus changes) used to merge into a phantom 1-line
+// paste the same way two real characters would.
+
+func TestPasteableRejectsAZeroRuneEvent(t *testing.T) {
+	nul := tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{0}}
+	if pasteable(nul) {
+		t.Fatal("a zero-rune KeyRunes event must not be pasteable")
+	}
+	ok := tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'a'}}
+	if !pasteable(ok) {
+		t.Fatal("an ordinary rune must still be pasteable")
+	}
+}
+
+func TestBareModifierArtifactNeverCountsAsAPaste(t *testing.T) {
+	r := newRoot(t)
+	size(t, r, 120, 30)
+
+	msgs := []tea.Msg{
+		tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{0}},
+		tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{0}},
+	}
+	runBurst(t, r, msgs)
+
+	if r.env.PasteEvents != 0 {
+		t.Errorf("paste events = %d, want 0 — a bare modifier artifact is not a paste", r.env.PasteEvents)
+	}
+}
+
 // A chord in the middle of nothing still fires; the paste detector must not
 // swallow keys that are not text.
 func TestChordsStillFireWithTheDetectorInPlace(t *testing.T) {
@@ -400,5 +440,217 @@ func drainTicks(t *testing.T, r *Root) {
 	t.Helper()
 	if cmd := r.releaseHeldKey(); cmd != nil {
 		runCmd(t, r, cmd)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// 5 — the render storm behind the lag, Bug 1 and Bug 4
+// ---------------------------------------------------------------------------
+//
+// Bubble Tea calls View after every Update, and on Windows a paste arrives
+// as one KeyMsg per pasted character, so a large paste used to drive
+// thousands of full re-renders of a frame that cannot have changed — the
+// pasted text is still accumulating in pasteState.buf. While the loop is
+// busy rendering, the unbuffered msgs channel backs input up in the OS
+// console buffer, and the burst detector (which times keys at Update time,
+// not arrival time) starts misreading both real typing and real pastes.
+
+func TestViewIsSuppressedWhileAPasteIsAssembling(t *testing.T) {
+	r := newRoot(t)
+	first := size(t, r, 120, 30)
+	if first == "" {
+		t.Fatal("no first frame")
+	}
+
+	// Start a burst: two pasteable keys close enough together to activate.
+	r.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'a'}})
+	r.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'b'}})
+	if !r.paste.active {
+		t.Fatal("expected an active paste burst")
+	}
+
+	// Renders during the burst re-serve the cached frame verbatim.
+	r.status = "this status change must not reach the screen mid-burst"
+	if got := r.View(); got != first {
+		t.Fatal("View re-rendered while a paste burst was assembling")
+	}
+
+	// Once the burst flushes, rendering resumes and picks the change up.
+	if cmd := r.flushPaste(); cmd != nil {
+		if msg := cmd(); msg != nil {
+			r.Update(msg)
+		}
+	}
+	if got := r.View(); got == first {
+		t.Fatal("View did not resume rendering after the burst flushed")
+	}
+}
+
+// A held key's auto-repeat is not a paste. bubbletea's Windows reader
+// expands a console record's RepeatCount into that many identical KeyMsgs
+// with no delay between them, which the burst detector cannot tell from a
+// paste by timing — the counter used to report one (Bug 4, still reproducing
+// after the zero-rune fix).
+func TestAutoRepeatBurstIsNotCountedAsAPaste(t *testing.T) {
+	r := newRoot(t)
+	size(t, r, 120, 30)
+
+	var msgs []tea.Msg
+	for i := 0; i < 8; i++ {
+		msgs = append(msgs, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}})
+	}
+	runBurst(t, r, msgs)
+
+	if r.env.PasteEvents != 0 {
+		t.Errorf("a held key registered %d paste(s)", r.env.PasteEvents)
+	}
+	if strings.Contains(r.status, "pasted") {
+		t.Errorf("status claims a paste happened: %q", r.status)
+	}
+
+	// A genuine mixed burst is still a paste.
+	msgs = nil
+	for _, ch := range "real pasted text" {
+		msgs = append(msgs, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{ch}})
+	}
+	runBurst(t, r, msgs)
+	if r.env.PasteEvents != 1 {
+		t.Errorf("a real paste registered %d event(s), want 1", r.env.PasteEvents)
+	}
+}
+
+// Bug 1's cleanest reproduction: ONE large paste losing most of itself.
+// scheduleFlush used to return a tea.Tick per pasted character, so a big
+// paste queued thousands of goroutines against bubbletea's unbuffered msgs
+// channel and starved the console reader. At most one timer may ever be
+// outstanding now, however long the burst runs.
+func TestLargeBurstArmsExactlyOneFlushTimer(t *testing.T) {
+	r := newRoot(t)
+	size(t, r, 120, 30)
+
+	timers := 0
+	for i := 0; i < 5000; i++ {
+		cmd, consumed := r.handlePasteable(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'x'}})
+		if !consumed {
+			t.Fatalf("key %d was not consumed by the paste detector", i)
+		}
+		if cmd != nil {
+			timers++
+		}
+	}
+	// One for the held-key release, one for the flush. Never per character.
+	if timers > 2 {
+		t.Fatalf("armed %d timers across a 5,000-key burst, want at most 2", timers)
+	}
+	if !r.paste.active {
+		t.Fatal("the burst ended early")
+	}
+	if got := len(r.paste.buf); got != 5000 {
+		t.Fatalf("buffered %d runes, want 5000 — the burst dropped content", got)
+	}
+}
+
+// A flush tick that fires while keys are still arriving re-arms instead of
+// cutting the burst short. This is what stops a long paste being split.
+func TestFlushTickReArmsWhileTheBurstIsStillLive(t *testing.T) {
+	r := newRoot(t)
+	size(t, r, 120, 30)
+
+	// Paste-shaped on purpose: long enough that flushing it produces a real
+	// PasteMsg rather than being delivered back as keystrokes.
+	for _, ch := range "a genuinely pasted stretch of text" {
+		r.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{ch}})
+	}
+	if !r.paste.active {
+		t.Fatal("expected an active burst")
+	}
+
+	// A tick arriving immediately — long before pasteQuiet has elapsed.
+	if cmd := r.onFlushTick(); cmd == nil {
+		t.Fatal("an early tick should re-arm, not flush")
+	}
+	if !r.paste.active {
+		t.Fatal("an early tick ended the burst")
+	}
+
+	// Once the burst has actually been quiet, it flushes.
+	r.paste.lastAt = time.Now().Add(-2 * pasteQuiet)
+	cmd := r.onFlushTick()
+	if r.paste.active {
+		t.Fatal("a quiet burst did not flush")
+	}
+	if cmd == nil {
+		t.Fatal("flush produced no command")
+	}
+}
+
+// Bug 4: two DIFFERENT keys pressed at once deliver two console records
+// microseconds apart, which timing alone cannot tell from a paste. Shape
+// can: rollover is a couple of characters with no line break.
+func TestSimultaneousKeypressesAreNotAPaste(t *testing.T) {
+	r := newRoot(t)
+	size(t, r, 120, 30)
+
+	runBurst(t, r, []tea.Msg{
+		tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'t'}},
+		tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'h'}},
+		tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'e'}},
+	})
+
+	if r.env.PasteEvents != 0 {
+		t.Errorf("rollover registered %d paste(s)", r.env.PasteEvents)
+	}
+	if strings.Contains(r.status, "pasted") {
+		t.Errorf("status claims a paste happened: %q", r.status)
+	}
+}
+
+func TestLooksLikePaste(t *testing.T) {
+	cases := []struct {
+		text string
+		want bool
+	}{
+		{"th", false},                      // two-key rollover
+		{"the", false},                     // three-key rollover
+		{"jjjjjjjjjjjj", false},            // a held key
+		{"a\nb", true},                     // any line break
+		{"a longer stretch of text", true}, // past minPasteRunes
+	}
+	for _, c := range cases {
+		if got := looksLikePaste(c.text); got != c.want {
+			t.Errorf("looksLikePaste(%q) = %v, want %v", c.text, got, c.want)
+		}
+	}
+}
+
+// The feedback loop behind Bug 1's remaining ceiling: a burst only ACTIVATES
+// when two pasteable keys are processed within pasteBurstGap of each other,
+// measured at Update time, so a frame that costs more than the gap makes
+// activation impossible and suppression can never engage. Suppressing the
+// frame for a merely HELD key breaks that circularity.
+func TestViewIsSuppressedWhileAKeyIsHeld(t *testing.T) {
+	r := newRoot(t)
+	first := size(t, r, 120, 30)
+
+	r.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'a'}})
+	if r.paste.held == nil {
+		t.Fatal("expected the first pasteable key to be held")
+	}
+	if r.paste.active {
+		t.Fatal("one key should not activate a burst")
+	}
+
+	r.status = "must not reach the screen while a key is held"
+	if got := r.View(); got != first {
+		t.Fatal("View rendered a frame while a key was held")
+	}
+
+	// Releasing the held key resumes rendering.
+	r.releaseHeldKey()
+	if r.pasteInFlight() {
+		t.Fatal("nothing should be in flight after the release")
+	}
+	if got := r.View(); got == first {
+		t.Fatal("View did not resume after the held key was released")
 	}
 }

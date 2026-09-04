@@ -15,7 +15,8 @@ it passed.
 | F1 | Bootstrap, Layout, Registry, Theme | ✅ built + manually verified | `F01-bootstrap.md` |
 | F2 | Backend Client | ✅ built + manually verified | `F02-backend-client.md` |
 | F3 | Chat Viewport | ✅ built + manually verified | `F03-chat-viewport.md` |
-| F4–F17 | — | not started | — |
+| F4 | Query Input | ✅ built + manually verified | `F04-query-input.md` |
+| F5–F17 | — | not started | — |
 
 **F1 and F2 were built and verified in one session** (`batchable: yes`).
 
@@ -29,8 +30,26 @@ The two contracts the rest of the frontend is built on:
   cache, the windowed scroll) — F5 (streaming) and F9 (task slots) both
   build on it rather than inventing their own. Full account in
   `F03-chat-viewport.md`'s "The message → block pipeline".
+- **The cursor affinity model** (`inputBuffer.trailing`, `setCursor` as the
+  sole assignment point, the `TestEveryMoveMethodIsRegistered` reflection
+  guard) — any later episode adding a new cursor-movement operation must
+  follow this model from the start; it took three rounds to get right the
+  first time. Full account in `F04-query-input.md`'s "The cursor affinity
+  model".
+- **`app.DraftFlusher`** (`app\draft.go`) — a narrow interface, same pattern
+  as `FocusAware`, for a workspace to expose a synchronous escape hatch
+  from its own debounced saved state; `app.quit` calls it on the active
+  workspace before returning `tea.Quit`. Any future workspace with
+  debounced state to lose on quit should implement it rather than invent
+  its own quit-time flush. Full account in `F04-query-input.md`'s "Bug 17"
+  section under "Editing across a wrap gap".
 
-**F4 can start now.** It needs F3 (done).
+**F5 can start now.** It needs F4 (done). **F4 also carries one open watch
+item** — `F04-query-input.md`'s Bug 17b: a backspace round-trip at a wrap
+gap boundary was observed miscounting, traced with no cause found, then
+stopped reproducing on its own. Not blocking, but any episode touching
+`app\paste.go`'s burst timing or the delete path should re-run its exact
+repro.
 
 ## How to add an entry
 
@@ -75,3 +94,10 @@ These recur in TUI work, and writing them down the first time saves the second:
 - **Breakpoint adjustments.** `LAYOUT.md` marks the numbers provisional; separate
   bordered boxes plus outer margins cost more rows and columns than the original
   estimate. **F1 and F16 should both record the values actually settled on.**
+- **A timing-dependent heuristic that misfires once and then stops is not
+  proven fixed by it not misfiring again.** F2's paste-burst detector and
+  F4's Bug 17b both hit this: a bug traced exhaustively with no cause found,
+  then a clean re-test with no code change in between. Record it as
+  *observed, then not reproducible*, watched going forward — not as fixed —
+  and name the exact repro so a later episode can re-run it deliberately
+  rather than rediscover it from scratch.

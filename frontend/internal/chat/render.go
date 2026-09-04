@@ -21,13 +21,132 @@ const genericBoxPadding = 1
 
 func (w *Workspace) View(l layout.Layout) string {
 	th := w.theme
-	edge := th.Style(theme.BorderIdle)
 	label := th.Style(theme.TextSecondary)
 
+	mainRect, secRect := w.splitGrowth(l)
+
+	mainEdge := th.Style(mainBorderRole(w.input.focused))
+	secEdge := th.Style(queryBorderRole(w.input.currentMode(), w.input.focused))
+
 	return stackBlocks(
-		paneBox(edge, label, l.Main, "View Port", w.viewportLines(l.Main), paneHorizontalPadding),
-		paneBox(edge, label, l.Secondary, "Query Area", w.queryLines(l.Secondary), genericBoxPadding),
+		paneBox(mainEdge, label, mainRect, "View Port", w.viewportLines(mainRect), paneHorizontalPadding),
+		paneBox(secEdge, label, secRect, "Query Area", w.queryLines(secRect), genericBoxPadding),
 	)
+}
+
+// mainBorderRole is queryBorderRole's mirror image (input_render.go): the
+// View Port's own pane border goes BorderFocus exactly when the input is
+// NOT focused — i.e. while browsing the transcript, which is the pane that
+// actually has keyboard focus at that moment. Exactly one of the two panes
+// is ever "bright" at a time.
+func mainBorderRole(inputFocused bool) theme.Role {
+	if inputFocused {
+		return theme.BorderIdle
+	}
+	return theme.BorderFocus
+}
+
+// splitGrowth is F4's growth — overlay + auto-scroll: past its base height,
+// the query input grows upward over the viewport, to about half of it, and
+// the viewport auto-scrolls to compensate (LAYOUT.md's Chat workspace
+// section; F04-query-input.md's Growth section).
+//
+// It never touches layout.Compute, layout.State or the Workspace interface:
+// l.Main and l.Secondary already sum to the fixed row budget Root.View
+// expects for the whole left column (Root pads/clips to exactly the
+// terminal's height — growing one box without shrinking the other by the
+// same amount would push the status bar down and off), so this only ever
+// TRADES rows between the two, at the SAME width, using the two rects
+// Compute already handed this workspace. The transcript's own wrapped
+// content is untouched by this — fewer rows are simply drawn from it, and
+// the existing pinned/bottom-anchored scroll (scroll.go) already keeps the
+// newest message visible as `rows` shrinks, which is the auto-scroll half
+// of the requirement, with zero extra state.
+func (w *Workspace) splitGrowth(l layout.Layout) (mainRect, secRect layout.Rect) {
+	totalH := l.Main.H + l.Secondary.H
+	if totalH <= 0 || l.Secondary.H <= 0 {
+		return l.Main, l.Secondary
+	}
+
+	contentWidth := (l.Secondary.W - 2) - 2*genericBoxPadding
+	if contentWidth < 1 {
+		contentWidth = 1
+	}
+	prefixW := visibleWidth(activePrefix(w.input.currentMode(), w.input.focused))
+	textWidth := contentWidth - prefixW
+	if textWidth < 1 {
+		textWidth = 1
+	}
+	w.input.boxContentWidth = contentWidth
+	w.input.textWidth = textWidth
+
+	wantRows := w.input.buf.visualLineCount(textWidth)
+	if len(w.input.chips) > 0 {
+		wantRows++
+	}
+	wantSecondaryH := wantRows + 2 // border rows, top and bottom
+	if wantSecondaryH < l.Secondary.H {
+		// Never shrink below what Compute gave — that is the base height
+		// (LAYOUT.md: "base height 1 row, grows with content"), not a
+		// growth ceiling.
+		wantSecondaryH = l.Secondary.H
+	}
+
+	// "to about half of it [the viewport]": the viewport may give up at
+	// most half of its OWN nominal height, l.Main.H as Compute computed it
+	// — not half of the combined total, and not a moving target as the
+	// viewport itself shrinks. Past this cap the input stops growing and
+	// goes internally scrollable instead (queryLines/ensureCursorVisible,
+	// below).
+	minMainH := (l.Main.H + 1) / 2
+	maxSecondaryH := totalH - minMainH
+	if maxSecondaryH < l.Secondary.H {
+		maxSecondaryH = l.Secondary.H
+	}
+	if wantSecondaryH > maxSecondaryH {
+		wantSecondaryH = maxSecondaryH
+	}
+
+	secondaryH := wantSecondaryH
+	mainH := totalH - secondaryH
+
+	mainRect = layout.Rect{X: l.Main.X, Y: l.Main.Y, W: l.Main.W, H: mainH}
+	secRect = layout.Rect{X: l.Secondary.X, Y: l.Main.Y + mainH, W: l.Secondary.W, H: secondaryH}
+
+	contentRows := secondaryH - 2
+	if len(w.input.chips) > 0 {
+		contentRows--
+	}
+	w.ensureCursorVisible(textWidth, contentRows)
+
+	return mainRect, secRect
+}
+
+// ensureCursorVisible keeps the cursor's wrapped line inside
+// [scrollTop, scrollTop+rows) — only relevant once growth has hit its cap
+// (splitGrowth, above) and the input has gone internally scrollable, per
+// F04-query-input.md: "past that maximum, the input becomes internally
+// scrollable — no more growth."
+func (w *Workspace) ensureCursorVisible(width, rows int) {
+	if rows < 1 {
+		rows = 1
+	}
+	lines := w.input.buf.lines(width)
+	li := lineForCursor(lines, w.input.buf.cursor, w.input.buf.trailing)
+
+	top := w.input.scrollTop
+	if li < top {
+		top = li
+	}
+	if li >= top+rows {
+		top = li - rows + 1
+	}
+	maxTop := len(lines) - rows
+	if maxTop < 0 {
+		maxTop = 0
+	}
+	top = clampInt(top, 0, maxTop)
+	w.input.scrollTop = top
 }
 
 // viewportLines is the View Port box's content: rows-2 lines, already fit to
@@ -81,12 +200,21 @@ func overlayRight(line, note string, width int) string {
 	return padCells(left, width-nw-1) + " " + note
 }
 
+// queryLines is the Query Area box's content: the pinned attachment chips
+// (if any), the mode chip, and the input's own wrapped, cursor-painted
+// text — see input_render.go's renderInputLines, which does the actual
+// work. boxContentWidth is splitGrowth's — the SAME number, not
+// w.input.textWidth (which already has the mode chip's prefix subtracted;
+// renderInputLines subtracts it again itself, so passing textWidth here
+// would double-subtract).
 func (w *Workspace) queryLines(rect layout.Rect) []string {
 	rows := rect.H - 2
 	if rows <= 0 {
 		return nil
 	}
-	return clip([]string{w.theme.Style(theme.TextDim).Render("nothing can be typed yet — F4")}, rows)
+	lines := renderInputLines(w.theme, &w.input.buf, w.input.currentMode(), w.input.chips,
+		w.input.focused, w.input.boxContentWidth, rows, w.input.scrollTop)
+	return clip(lines, rows)
 }
 
 func centred(s string, rows, width int) []string {

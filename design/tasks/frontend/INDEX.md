@@ -114,6 +114,31 @@ context card is a popup). F12 needs F6. F13–F15 are an independent block.
       mandatory if unparked: start language servers **lazily, per language, on
       first file open** — never at startup. Anchor: post-v1.
 
+- [ ] **Oversized input rollover** — once the query area passes a threshold
+      (~200 lines), the earlier portion automatically becomes an attached
+      `.txt`/`.md` and the input continues empty, so a very long message never
+      fills the visible input. The rolled-over portion stays accessible and can
+      be folded back in. Applies to BOTH a large paste and a message typed past
+      the threshold progressively — more ambitious than Claude/ChatGPT, which
+      convert pastes only, not actively-typed text.
+
+      The hard parts are all in the mid-typing case: cursor placement after a
+      rollover, whether undo can reverse one, and what happens when the user
+      edits a line that now lives in an attachment rather than the buffer. That
+      is a redesign of the input's data model, not an addition to it.
+
+      **Explicitly NOT a workaround for F4's paste ceiling.** A rollover at 200
+      lines is only safe while the input's real ceiling stays above 200, so
+      shipping it before that ceiling is fixed and understood would mean tuning
+      a feature threshold to dodge a defect — and it would fire past the ceiling
+      the moment conditions change (a different terminal, different content,
+      F5's streaming load), losing data again with an extra layer of machinery
+      hiding it.
+
+      Hook: B12's attachment resolution (built) + F8's `@` picker UI (not built).
+      Anchor: after F8, and only once F4's paste ceiling is fixed and understood.
+
+
 ## Rejected
 
 | Item | Why |

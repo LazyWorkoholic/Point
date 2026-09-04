@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 )
 
@@ -174,7 +175,7 @@ func TestMissingStateIsAFirstRun(t *testing.T) {
 	if err != nil {
 		t.Fatalf("missing state reported an error: %v", err)
 	}
-	if st != DefaultState() {
+	if !reflect.DeepEqual(st, DefaultState()) {
 		t.Fatalf("got %+v, want %+v", st, DefaultState())
 	}
 }
@@ -187,7 +188,7 @@ func TestCorruptStateFallsBackToDefaults(t *testing.T) {
 	if err == nil {
 		t.Fatal("corrupt state parsed silently")
 	}
-	if st != DefaultState() {
+	if !reflect.DeepEqual(st, DefaultState()) {
 		t.Fatalf("got %+v, want defaults", st)
 	}
 }

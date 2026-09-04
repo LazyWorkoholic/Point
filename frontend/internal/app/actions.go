@@ -25,6 +25,15 @@ func registerActions() *actions.Registry[*Root] {
 		Chord:       "ctrl+c",
 		Leader:      "q",
 		Run: func(root *Root) tea.Cmd {
+			// Bug 17: flush the active workspace's own debounced state
+			// (chat's draft save) BEFORE returning tea.Quit — once bubbletea
+			// has that, a still-pending tea.Tick never gets delivered, so
+			// this is the only chance a debounced write gets to catch up
+			// with whatever was typed since its last successful save. See
+			// app\draft.go's DraftFlusher doc for the full trace.
+			if f, ok := root.current().(DraftFlusher); ok {
+				f.FlushDraft()
+			}
 			root.quitting = true
 			return tea.Quit
 		},
@@ -80,10 +89,36 @@ func registerActions() *actions.Registry[*Root] {
 		Category:    "Navigation",
 		Chord:       "tab",
 		Run: func(root *Root) tea.Cmd {
-			// F1 has one pane worth focusing. The action exists because the
-			// registry is the contract every later episode registers against,
-			// and a binding that appears in F6 is a binding nobody tested.
+			// F4: Chat now has two focusable panes — the query input and the
+			// transcript — so this stub gets its first real job, toggling
+			// between them. A workspace with nothing to focus (Placeholder,
+			// the future Editor) does not implement FocusAware, and the type
+			// assertion below just falls through to the old placeholder
+			// status, unchanged for those.
+			if fa, ok := root.current().(FocusAware); ok {
+				if fa.InputFocused() {
+					return func() tea.Msg { return EnterBrowseMsg{} }
+				}
+				return func() tea.Msg { return FocusInputMsg{} }
+			}
 			return status("pane focus arrives with the panes, in F3–F6")
+		},
+	})
+
+	r.Register(actions.Action[*Root]{
+		ID:          "chat.browse",
+		Name:        "Browse Transcript",
+		Description: "Leave the query input and move focus onto the transcript, for j/k/y/G",
+		Category:    "Navigation",
+		Chord:       "esc",
+		When: func(root *Root) bool {
+			return root.active == WorkspaceChat
+		},
+		Run: func(root *Root) tea.Cmd {
+			// Unconditional and idempotent — no status noise for pressing esc
+			// a second time while already browsing. Tab (above) is the other
+			// direction, and also toggles back to the input from here.
+			return func() tea.Msg { return EnterBrowseMsg{} }
 		},
 	})
 
