@@ -20,7 +20,10 @@ import (
 // width is the OUTER width, matching every other line in the message — the
 // border columns are included in it, not added on top of it.
 func renderCodeBlock(th theme.Theme, lang, code string, width int) []string {
-	code = strings.TrimRight(code, "\n")
+	// Tabs measure as zero cells and draw as up to eight — see textutil.go's
+	// expandTabs. A fenced block is their commonest carrier, and one left
+	// unexpanded overflows the box drawn around it.
+	code = expandTabs(strings.TrimRight(code, "\n"))
 	if width < 4 {
 		return []string{padCells(code, width)}
 	}

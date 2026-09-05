@@ -22,8 +22,14 @@ func registerActions() *actions.Registry[*Root] {
 		Name:        "Quit",
 		Description: "Leave Point, restoring the terminal",
 		Category:    "Application",
-		Chord:       "ctrl+c",
-		Leader:      "q",
+		// F5: ctrl+q, not ctrl+c. Ctrl+C is cancel-the-running-thing from
+		// this episode on (F05-streaming-queue.md: "quit is `ctrl+q`"),
+		// which is what that chord means in every other tool that streams.
+		// Bug 17's draft flush below moved WITH the action, not with the
+		// old chord — leaving it behind would have restored the exact
+		// data loss F4 spent a verification round finding.
+		Chord:  "ctrl+q",
+		Leader: "q",
 		Run: func(root *Root) tea.Cmd {
 			// Bug 17: flush the active workspace's own debounced state
 			// (chat's draft save) BEFORE returning tea.Quit — once bubbletea
@@ -115,10 +121,72 @@ func registerActions() *actions.Registry[*Root] {
 			return root.active == WorkspaceChat
 		},
 		Run: func(root *Root) tea.Cmd {
+			// F5: at queue capacity esc discards the pending message
+			// instead — F05's "editable (ctrl+e) and discardable (esc)
+			// until it fires". Registering a second action on "esc" would
+			// be a duplicate-chord failure at boot (registry.Validate), so
+			// the choice is made here, from the one bit QueueAware exposes
+			// — the same shape pane.focus.next already uses to choose a
+			// direction from FocusAware.InputFocused.
+			if root.hasPending() {
+				return discardPendingCmd()
+			}
 			// Unconditional and idempotent — no status noise for pressing esc
 			// a second time while already browsing. Tab (above) is the other
 			// direction, and also toggles back to the input from here.
 			return func() tea.Msg { return EnterBrowseMsg{} }
+		},
+	})
+
+	// ---- F5 ------------------------------------------------------------
+
+	r.Register(actions.Action[*Root]{
+		ID:          "chat.cancel",
+		Name:        "Cancel Stream",
+		Description: "Stop the reply that is streaming, keeping what has arrived so far",
+		Category:    "Chat",
+		Chord:       "ctrl+c",
+		When: func(root *Root) bool {
+			return root.active == WorkspaceChat
+		},
+		Run: func(root *Root) tea.Cmd {
+			// Deliberately NOT gated on root.streaming(): F5 requires
+			// ctrl+c with nothing streaming to do nothing at all, and a
+			// false When predicate would print "Cancel Stream is not
+			// available right now" instead. The workspace decides there is
+			// nothing to cancel, silently. See app\stream.go.
+			return cancelStreamCmd()
+		},
+	})
+
+	r.Register(actions.Action[*Root]{
+		ID:          "chat.queue.edit",
+		Name:        "Edit Queued Message",
+		Description: "Pull the pending message back into the input before it fires",
+		Category:    "Chat",
+		Chord:       "ctrl+e",
+		When: func(root *Root) bool {
+			return root.active == WorkspaceChat && root.hasPending()
+		},
+		Run: func(root *Root) tea.Cmd {
+			return editPendingCmd()
+		},
+	})
+
+	r.Register(actions.Action[*Root]{
+		ID:          "chat.retry",
+		Name:        "Retry",
+		Description: "Send the last interrupted, failed or unanswered message again",
+		Category:    "Chat",
+		Chord:       "ctrl+r",
+		When: func(root *Root) bool {
+			return root.active == WorkspaceChat
+		},
+		Run: func(root *Root) tea.Cmd {
+			// The `[Retry]` footer F5 attaches to an interrupted, failed or
+			// timed-out reply names this chord, so the affordance is not a
+			// label with no key behind it.
+			return retryCmd()
 		},
 	})
 

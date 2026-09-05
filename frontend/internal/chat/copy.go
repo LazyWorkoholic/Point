@@ -17,18 +17,15 @@ import (
 // corrupt a frame, and stderr is otherwise silent from this side (backend
 // logs go to their own file, never here).
 func (w *Workspace) copyFocused() {
-	idx := w.focus
-	if idx < 0 {
-		// Pinned mode has no explicit focus yet — same convention as
-		// moveFocus: "focused" defaults to whatever is on screen at the
-		// bottom, so `y` works immediately without pressing k first.
-		idx = len(w.all) - 1
-	}
-	if idx < 0 || idx >= len(w.all) {
+	// F5: "focused" spans entries.go's three lists now, so a streaming or
+	// finished live reply is as copyable as a persisted one. focusedIndex
+	// keeps the pinned-mode convention — no explicit focus means the
+	// newest entry, so `y` works without pressing k first.
+	text, ok := w.entryText(w.focusedIndex())
+	if !ok {
 		w.copyNote = "nothing focused to copy"
 		return
 	}
-	text := w.all[idx].Content.Text
 	fmt.Fprint(os.Stderr, osc52.New(text))
 	w.copyNote = fmt.Sprintf("copied %d byte(s)", len(text))
 }

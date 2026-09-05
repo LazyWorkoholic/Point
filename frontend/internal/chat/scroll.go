@@ -8,9 +8,8 @@ import (
 // user question and its own reply, 2 between a reply and the next
 // question, 1 for anything else (a system/error/tool message involved, or
 // two messages of the same role back to back) — not specified, and 1 is the
-// least surprising default. Only ever called for a message that is not the
-// first one in the current scroll window; the first visible message never
-// gets a leading gap.
+// least surprising default. Only ever called for an entry that is not the
+// first one in the transcript; the first entry never gets a leading gap.
 func gapLines(prevRole, role string) int {
 	switch {
 	case prevRole == roleUser && role == roleAssistant:
@@ -22,39 +21,63 @@ func gapLines(prevRole, role string) int {
 	}
 }
 
-// visibleWindow returns the absolute index of the first rendered message and
-// exactly `rows` lines (padded/clipped) for the current scroll state.
+// The scroll position is a ROW, expressed as (entry, row-within-entry).
 //
-// Cost is O(rows) message-height lookups per call, each cached — never
-// O(len(all)) — which is what keeps a 10,000-message session's scroll smooth:
-// nothing here ever measures more than one screenful of messages at a time.
+// F5's first cut scrolled by ENTRY: j and k moved topAbs by one whole
+// message, so a reply taller than the viewport could not be scrolled
+// THROUGH — everything below its first screenful was unreachable. Scrolling
+// is row-based here, over the flattened rows of all three sources as one
+// sequence, which is what F3 did over its single flat list.
+//
+// The position stays a PAIR rather than one absolute row number on purpose:
+// an absolute row would have to be recomputed against every entry's height
+// on every render, which is O(all entries) and throws away F3's "never more
+// than one screenful is ever measured" property. Anchoring to an entry and
+// an offset inside it keeps each scroll step O(1) and each render O(rows),
+// at 10,000 messages the same as at ten.
+
+// entryBlock is one entry's rows INCLUDING the blank gap that precedes it.
+// The transcript is exactly the concatenation of block(0) … block(n-1), so
+// every row of the transcript belongs to exactly one block — which is what
+// makes (entry, offset) a complete address for any row.
+func (w *Workspace) entryBlock(i, width int) []string {
+	lines := w.entryLines(i, width, i == w.focus)
+	if i == 0 {
+		return lines
+	}
+	gap := gapLines(w.entryRole(i-1), w.entryRole(i))
+	out := make([]string, 0, gap+len(lines))
+	for g := 0; g < gap; g++ {
+		out = append(out, "")
+	}
+	return append(out, lines...)
+}
+
+// visibleWindow returns the absolute index of the first rendered entry and
+// exactly `rows` lines for the current scroll position.
 func (w *Workspace) visibleWindow(rows, width int) (topAbs int, lines []string) {
-	if len(w.all) == 0 || rows <= 0 {
+	n := w.entryCount()
+	if n == 0 || rows <= 0 {
 		return 0, nil
 	}
 
 	if w.pinned {
-		topAbs = w.bottomAnchoredTop(rows, width)
+		w.topAbs, w.topRow = w.bottomAnchored(rows, width)
 	} else {
-		topAbs = clampInt(w.topAbs, 0, len(w.all)-1)
-		if w.focus >= 0 {
-			topAbs = w.ensureFocusInWindow(topAbs, rows, width)
-		}
+		w.clampScroll(width)
 	}
-	w.topAbs = topAbs
+	topAbs = w.topAbs
 
 	out := make([]string, 0, rows)
-	for i := topAbs; i < len(w.all) && len(out) < rows; i++ {
-		if i > topAbs {
-			for g := 0; g < gapLines(w.all[i-1].Role, w.all[i].Role); g++ {
-				out = append(out, "")
+	for i := topAbs; i < n && len(out) < rows; i++ {
+		block := w.entryBlock(i, width)
+		if i == topAbs {
+			// The only partial block: the top one, entered part-way down.
+			if w.topRow < len(block) {
+				block = block[w.topRow:]
+			} else {
+				block = nil
 			}
-		}
-		var block []string
-		if i == w.focus {
-			block = renderMessage(w.theme, w.all[i], width, true)
-		} else {
-			block = w.renderCached(w.all[i], width)
 		}
 		out = append(out, block...)
 	}
@@ -64,63 +87,110 @@ func (w *Workspace) visibleWindow(rows, width int) (topAbs int, lines []string) 
 	return topAbs, out
 }
 
-// bottomAnchoredTop walks backward from the newest message until rows fills,
-// so pinned mode always shows the tail — the same "always O(rows)" property
-// as the focused path. The gap between each pair of included messages counts
-// toward `rows` too, so a screen near the exchange spacing's boundary does
-// not overflow once the blank rows are actually drawn.
-func (w *Workspace) bottomAnchoredTop(rows, width int) int {
-	total := 0
-	i := len(w.all) - 1
-	next := -1 // index of the previously-included (more recent) message
-	for i >= 0 {
-		n := len(w.renderCached(w.all[i], width))
-		gap := 0
-		if next >= 0 {
-			gap = gapLines(w.all[i].Role, w.all[next].Role)
-		}
-		if total+n+gap > rows && total > 0 {
-			break
-		}
-		total += n + gap
-		next = i
-		i--
+// bottomAnchored is the position that puts the transcript's LAST row on the
+// viewport's last row — pinned mode, and where G lands. Walking backward
+// keeps it O(rows) rather than O(entries).
+func (w *Workspace) bottomAnchored(rows, width int) (topAbs, topRow int) {
+	if rows <= 0 {
+		// A key can arrive before the first render has recorded the
+		// viewport size. One row is a harmless stand-in; the next render
+		// re-anchors against the real height.
+		rows = 1
 	}
-	return i + 1
+	total := 0
+	for i := w.entryCount() - 1; i >= 0; i-- {
+		h := len(w.entryBlock(i, width))
+		if total+h >= rows {
+			// This block is the one the top row falls inside.
+			return i, h - (rows - total)
+		}
+		total += h
+	}
+	return 0, 0
 }
 
-// ensureFocusInWindow slides topAbs just far enough that the focused
-// message's whole block is inside the rows-tall window — scrolling up
-// immediately if focus moved above it, or forward message-by-message if
-// focus's bottom would spill past the last row.
-func (w *Workspace) ensureFocusInWindow(topAbs, rows, width int) int {
-	if w.focus < topAbs {
-		return w.focus
+// scrollRows moves the position by delta ROWS, one row at a time so that a
+// step never lands outside a block. Scrolling up unpins — the stream keeps
+// going underneath, and G is how the user comes back to it.
+func (w *Workspace) scrollRows(delta, width int) {
+	if delta == 0 || w.entryCount() == 0 {
+		return
 	}
-	total := 0
-	focusBottom := -1
-	for i := topAbs; i <= w.focus && i < len(w.all); i++ {
-		if i > topAbs {
-			total += gapLines(w.all[i-1].Role, w.all[i].Role)
+	if w.pinned {
+		// Leaving pinned mode has to start from where pinned mode
+		// currently IS, or the first press jumps somewhere unrelated.
+		w.topAbs, w.topRow = w.bottomAnchored(w.viewRows, width)
+	}
+	step := 1
+	if delta < 0 {
+		step = -1
+		delta = -delta
+	}
+	for ; delta > 0; delta-- {
+		if step > 0 {
+			w.topRow++
+			if w.topRow >= len(w.entryBlock(w.topAbs, width)) {
+				if w.topAbs >= w.entryCount()-1 {
+					w.topRow-- // already at the last row of the last block
+					break
+				}
+				w.topAbs++
+				w.topRow = 0
+			}
+		} else {
+			w.topRow--
+			if w.topRow < 0 {
+				if w.topAbs == 0 {
+					w.topRow = 0
+					break
+				}
+				w.topAbs--
+				w.topRow = len(w.entryBlock(w.topAbs, width)) - 1
+				if w.topRow < 0 {
+					w.topRow = 0
+				}
+			}
 		}
-		total += len(w.renderCached(w.all[i], width))
-		if i == w.focus {
-			focusBottom = total
-		}
 	}
-	if focusBottom <= rows {
-		return topAbs
+
+	// Scrolling to (or past) the bottom re-pins, so following a stream
+	// resumes without needing G — the same "you are at the live edge"
+	// meaning pinned already had.
+	//
+	// The CLAMP matters as much as the flag: without it the position keeps
+	// walking past the bottom-anchored row while the pinned render keeps
+	// snapping it back, so every further press moves the state and changes
+	// nothing on screen. Holding j at the bottom would drift the position
+	// arbitrarily far past the end of the transcript.
+	bAbs, bRow := w.bottomAnchored(w.viewRows, width)
+	if w.topAbs > bAbs || (w.topAbs == bAbs && w.topRow >= bRow) {
+		w.topAbs, w.topRow = bAbs, bRow
+		w.pinned = true
+		return
 	}
-	over := focusBottom - rows
-	for over > 0 && topAbs < w.focus {
-		removed := len(w.renderCached(w.all[topAbs], width))
-		if topAbs+1 <= w.focus {
-			removed += gapLines(w.all[topAbs].Role, w.all[topAbs+1].Role)
-		}
-		topAbs++
-		over -= removed
+	// Anywhere above the live edge is unpinned, and it has to be assigned
+	// here rather than left alone: a scroll that STARTED pinned would
+	// otherwise stay pinned, the pinned render would snap the position
+	// straight back to the bottom, and scrolling up would do nothing at all.
+	w.pinned = false
+}
+
+// clampScroll keeps an unpinned position addressable after the content under
+// it changes — a streaming reply grows rows, and a block that shrank could
+// otherwise leave topRow past its end.
+func (w *Workspace) clampScroll(width int) {
+	n := w.entryCount()
+	if n == 0 {
+		w.topAbs, w.topRow = 0, 0
+		return
 	}
-	return topAbs
+	w.topAbs = clampInt(w.topAbs, 0, n-1)
+	h := len(w.entryBlock(w.topAbs, width))
+	if h == 0 {
+		w.topRow = 0
+		return
+	}
+	w.topRow = clampInt(w.topRow, 0, h-1)
 }
 
 func clampInt(v, lo, hi int) int {
@@ -136,11 +206,21 @@ func clampInt(v, lo, hi int) int {
 	return v
 }
 
-// handleKey is F3's whole input surface: j/k or arrows move message focus
-// (F3.md's "Selection and copy"), G re-pins to the latest message, y copies
-// the focused message's raw text. Everything else falls through untouched —
-// F4 owns the query input, and a key this package does not recognise must
-// not consume the event.
+// handleKey is the transcript's input surface, reached only while the query
+// input does not hold focus (F4's focus model).
+//
+//	j/k · ↓/↑   scroll ONE ROW
+//	n/p         move entry focus (what y, o, t and ^R act on)
+//	G           pin to the live bottom
+//	y           copy the focused entry's raw text
+//	t           toggle the focused reply's thinking block
+//	o / enter   expand the focused task slot
+//
+// j/k scroll rather than moving focus because a reply taller than the
+// viewport has to be readable, and entry-granular movement made its lower
+// half unreachable. Focus moved to n/p rather than being dropped: y, o, t
+// and Retry all need a target, and "whichever entry happens to be at the
+// bottom" is not one a user can aim.
 func (w *Workspace) handleKey(k tea.KeyMsg) tea.Cmd {
 	return w.handleKeyString(k.String())
 }
@@ -149,41 +229,67 @@ func (w *Workspace) handleKey(k tea.KeyMsg) tea.Cmd {
 // handlePastedBurst (below) can replay a recovered keystroke without
 // fabricating a tea.KeyMsg.
 func (w *Workspace) handleKeyString(s string) tea.Cmd {
+	width := w.viewWidth
 	switch s {
 	case "j", "down":
-		w.moveFocus(1)
+		w.scrollRows(1, width)
 	case "k", "up":
-		w.moveFocus(-1)
+		w.scrollRows(-1, width)
+	case "pgdown", "ctrl+d":
+		w.scrollRows(w.pageRows(), width)
+	case "pgup", "ctrl+u":
+		w.scrollRows(-w.pageRows(), width)
+	case "n":
+		w.moveFocus(1, width)
+	case "p":
+		w.moveFocus(-1, width)
 	case "G":
 		w.pinned = true
 		w.focus = -1
 	case "y":
 		w.copyFocused()
+	case "t":
+		// F5: the thinking block is collapsible and collapsed by default.
+		if e := w.liveAt(w.focusedIndex()); e != nil {
+			e.expanded = !e.expanded
+			e.version++
+		}
+	case "o", "enter":
+		// The task slot's expandable state — the third step of F5's
+		// `⟳ running` → `✓ done` → expandable.
+		if e := w.liveAt(w.focusedIndex()); e != nil && e.lane == laneTask {
+			e.slotOpen = !e.slotOpen
+			e.version++
+		}
 	}
 	return nil
+}
+
+// pageRows is one screenful less a row of overlap, so a page never skips a
+// line the reader was mid-way through.
+func (w *Workspace) pageRows() int {
+	if w.viewRows <= 2 {
+		return 1
+	}
+	return w.viewRows - 1
 }
 
 // handlePastedBurst recovers a hotkey that Root's paste-burst detector
 // (app\paste.go) misread as the start of a paste.
 //
-// That detector exists for F4's eventual text input and has no way to know
-// this workspace's single-letter keys are hotkeys, not typing: it treats
-// any two plain keystrokes arriving closer together than pasteBurstGap
-// (6ms) as one paste. A HELD key's OS auto-repeat can look exactly like
-// that once Windows Console batches the repeat records — paste.go's own
-// comment notes a real paste "is delivered ... as a single batch of
-// records", and a held key's repeats are drained the same way. The result:
-// pressing (or holding) G arrives here as app.PasteMsg{Text: "GGGG"}, which
-// nothing in this workspace's Update ever consumed — G looked like it did
-// nothing.
+// That detector exists for F4's query input and has no way to know this
+// workspace's single-letter keys are hotkeys, not typing: it treats any two
+// plain keystrokes arriving closer together than pasteBurstGap (6ms) as one
+// paste. A HELD key's OS auto-repeat can look exactly like that once
+// Windows Console batches the repeat records — so pressing (or holding) G
+// arrives as app.PasteMsg{Text: "GGGG"}, which nothing would otherwise
+// consume, and G looks like it did nothing.
 //
-// F3 has no text input for a genuine multi-character paste to go into yet
-// (F03-chat-viewport.md's own Handoff: "Nothing can be typed yet"), so only
-// a burst that is entirely ONE repeated character is replayed as that many
-// keystrokes here. Anything else — a real accidental paste of prose — is
+// Only a burst that is entirely ONE repeated character is replayed as that
+// many keystrokes. Anything else — a real accidental paste of prose — is
 // left alone: replaying arbitrary pasted text char-by-char would let a
-// stray 'j', 'k', 'y' or 'G' inside it move focus or overwrite the
-// clipboard, which is a worse outcome than doing nothing.
+// stray j, k, y or G inside it scroll or overwrite the clipboard, which is
+// worse than doing nothing.
 func (w *Workspace) handlePastedBurst(text string) tea.Cmd {
 	runes := []rune(text)
 	if len(runes) == 0 {
@@ -202,18 +308,33 @@ func (w *Workspace) handlePastedBurst(text string) tea.Cmd {
 	return cmd
 }
 
-// moveFocus is relative to the newest message when nothing is explicitly
-// focused yet (the pinned/no-focus state), so the first press of k always
-// moves off the message currently at the bottom of the screen.
-func (w *Workspace) moveFocus(delta int) {
-	if len(w.all) == 0 {
+// moveFocus walks the entry focus and scrolls just enough to show it. It is
+// relative to the newest entry when nothing is explicitly focused yet, so
+// the first press of p always moves off the entry at the bottom.
+func (w *Workspace) moveFocus(delta, width int) {
+	n := w.entryCount()
+	if n == 0 {
 		return
 	}
 	cur := w.focus
 	if cur < 0 {
-		cur = len(w.all) - 1
+		cur = n - 1
 	}
-	next := clampInt(cur+delta, 0, len(w.all)-1)
+	next := clampInt(cur+delta, 0, n-1)
 	w.focus = next
-	w.pinned = next == len(w.all)-1 && delta > 0
+
+	if next == n-1 && delta > 0 {
+		w.pinned = true
+		return
+	}
+	// Anchor the focused entry at the top of the viewport: predictable, and
+	// it always shows the head of the entry — which is the line a task slot
+	// puts its whole state on.
+	w.pinned = false
+	w.topAbs = next
+	w.topRow = 0
+	if next > 0 {
+		// Skip the leading gap so the entry's own first row is at the top.
+		w.topRow = gapLines(w.entryRole(next-1), w.entryRole(next))
+	}
 }

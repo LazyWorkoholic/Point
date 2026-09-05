@@ -199,17 +199,23 @@ func TestPinnedShowsTheTail(t *testing.T) {
 	}
 }
 
+// F5 changed what k does: it scrolls ONE ROW rather than moving focus by a
+// whole message, because a reply taller than the viewport has to be
+// readable. What it still does is unpin, and G still re-pins.
 func TestScrollUpUnpinsAndGRepins(t *testing.T) {
 	w := newTestWorkspace(t)
 	w.all = fakeMessages(50)
 	w.pinned = true
+	w.viewRows, w.viewWidth = 20, 60
+	w.visibleWindow(20, 60) // establish the pinned position
 
+	before := w.rowPosition()
 	w.handleKey(keyMsg("k"))
 	if w.pinned {
 		t.Fatal("k should unpin from the bottom")
 	}
-	if w.focus != len(w.all)-2 {
-		t.Fatalf("focus = %d, want %d", w.focus, len(w.all)-2)
+	if w.rowPosition() == before {
+		t.Fatal("k did not scroll")
 	}
 
 	w.handleKey(keyMsg("G"))
@@ -218,6 +224,66 @@ func TestScrollUpUnpinsAndGRepins(t *testing.T) {
 	}
 	if w.focus != -1 {
 		t.Fatalf("focus = %d, want -1 after G", w.focus)
+	}
+}
+
+// rowPosition is the scroll position as one comparable pair — tests only.
+func (w *Workspace) rowPosition() [2]int { return [2]int{w.topAbs, w.topRow} }
+
+// BUG A: a single entry taller than the viewport must be scrollable
+// THROUGH. Entry-granular scrolling made everything below its first
+// screenful unreachable, which is the whole reason scrolling is row-based.
+func TestATallEntryIsScrollableRowByRow(t *testing.T) {
+	w := newTestWorkspace(t)
+	long := strings.Repeat("word ", 400)
+	w.all = []wireMessage{{ID: "tall", Role: roleAssistant, Content: wireContent{Text: long}}}
+	rows, width := 10, 40
+	w.viewRows, w.viewWidth = rows, width
+
+	all := w.entryBlock(0, width)
+	if len(all) <= rows {
+		t.Fatalf("fixture is not taller than the viewport: %d rows", len(all))
+	}
+
+	// Walking down one row at a time, the window's top row must be the
+	// entry's rows in order, with nothing skipped.
+	w.pinned = false
+	w.topAbs, w.topRow = 0, 0
+	steps := 0
+	for {
+		_, lines := w.visibleWindow(rows, width)
+		if len(lines) != rows {
+			t.Fatalf("step %d: window has %d rows, want %d", steps, len(lines), rows)
+		}
+		if lines[0] != all[steps] {
+			t.Fatalf("step %d: top row is not the entry's row %d", steps, steps)
+		}
+		before := w.rowPosition()
+		w.handleKey(keyMsg("j"))
+		if w.rowPosition() == before {
+			break // the bottom stop
+		}
+		steps++
+		if steps >= len(all) {
+			t.Fatal("scrolling ran past the end of the entry")
+		}
+	}
+
+	// The stop is exactly "last row of the entry on the last row of the
+	// viewport" — every row is reachable, and none is scrolled past.
+	if steps != len(all)-rows {
+		t.Fatalf("scrolling stopped after %d rows, want %d", steps, len(all)-rows)
+	}
+	_, lines := w.visibleWindow(rows, width)
+	if lines[len(lines)-1] != all[len(all)-1] {
+		t.Fatal("the entry's last row is unreachable")
+	}
+
+	// And G lands on that same last row.
+	w.handleKey(keyMsg("G"))
+	_, lines = w.visibleWindow(rows, width)
+	if lines[len(lines)-1] != all[len(all)-1] {
+		t.Fatal("G did not land on the transcript's last row")
 	}
 }
 
@@ -428,14 +494,43 @@ func TestExchangeSpacing(t *testing.T) {
 	}
 }
 
+// Focus moved to n/p in F5 (j/k scroll rows now). It still clamps.
 func TestFocusClampsAtBothEnds(t *testing.T) {
 	w := newTestWorkspace(t)
 	w.all = fakeMessages(3)
+	w.viewRows, w.viewWidth = 20, 60
 	for i := 0; i < 10; i++ {
-		w.handleKey(keyMsg("k"))
+		w.handleKey(keyMsg("p"))
 	}
 	if w.focus != 0 {
 		t.Fatalf("focus = %d, want clamped to 0", w.focus)
+	}
+	for i := 0; i < 10; i++ {
+		w.handleKey(keyMsg("n"))
+	}
+	if w.focus != w.entryCount()-1 {
+		t.Fatalf("focus = %d, want clamped to %d", w.focus, w.entryCount()-1)
+	}
+}
+
+// Scrolling must never run off either end of the transcript.
+func TestScrollClampsAtBothEnds(t *testing.T) {
+	w := newTestWorkspace(t)
+	w.all = fakeMessages(6)
+	w.viewRows, w.viewWidth = 10, 60
+	w.visibleWindow(10, 60)
+
+	for i := 0; i < 500; i++ {
+		w.handleKey(keyMsg("k"))
+	}
+	if w.topAbs != 0 || w.topRow != 0 {
+		t.Fatalf("scrolling up stopped at (%d,%d), want the very top", w.topAbs, w.topRow)
+	}
+	for i := 0; i < 500; i++ {
+		w.handleKey(keyMsg("j"))
+	}
+	if !w.pinned {
+		t.Fatal("scrolling to the bottom did not re-pin to the live edge")
 	}
 }
 

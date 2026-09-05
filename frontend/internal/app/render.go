@@ -100,6 +100,23 @@ func (r *Root) View() string {
 	return screen
 }
 
+// animFrames is the header's activity indicator: one bright diamond
+// travelling across three dim ones. Every frame is the same five display
+// cells wide, so the centred title never shifts as it animates.
+//
+// animFrames[0] is also the IDLE frame, and is exactly what the header drew
+// before F5 — an untouched app looks identical to how it always did.
+var animFrames = []string{"◇ ◈ ◇", "◈ ◇ ◇", "◇ ◈ ◇", "◇ ◇ ◈"}
+
+// animFrame is the current frame. When nothing is streaming this is frozen
+// wherever the last tick left it (root.go's animTickMsg case) rather than
+// reset — F05-streaming-queue.md wants the animation to be an activity
+// indicator, and an indicator that snaps home on completion is telling the
+// user about the reset, not about the work.
+func (r *Root) animFrame() string {
+	return animFrames[r.anim.frame%len(animFrames)]
+}
+
 // header is a single UNBOXED line: animation left, POINT centre, trademark
 // right. Below 30 rows it collapses to the title only.
 func (r *Root) header(l layout.Layout) string {
@@ -112,7 +129,7 @@ func (r *Root) header(l layout.Layout) string {
 		return centre(title, width)
 	}
 
-	left := th.Style(theme.TextDim).Render("◇ ◈ ◇")
+	left := th.Style(theme.TextDim).Render(r.animFrame())
 	right := th.Style(theme.TextDim).Render("◈ " + r.connWord())
 
 	lw := visibleWidth(left)

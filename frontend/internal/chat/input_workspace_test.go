@@ -41,12 +41,13 @@ func TestEnterBrowseAndFocusInputMessagesToggleRouting(t *testing.T) {
 	if w.InputFocused() {
 		t.Fatal("EnterBrowseMsg should have blurred the input")
 	}
-	w.Update(keyMsg("k")) // now a hotkey, not a keystroke
+	w.Update(keyMsg("p")) // now a hotkey, not a keystroke
 	if got := w.input.buf.text(); got != "" {
-		t.Fatalf("browse mode: k typed %q into the input, want nothing", got)
+		t.Fatalf("browse mode: p typed %q into the input, want nothing", got)
 	}
+	// F5 moved entry focus onto n/p; j/k scroll by row instead.
 	if w.focus == -1 {
-		t.Fatal("k in browse mode should have moved message focus")
+		t.Fatal("p in browse mode should have moved entry focus")
 	}
 
 	w.Update(app.FocusInputMsg{})

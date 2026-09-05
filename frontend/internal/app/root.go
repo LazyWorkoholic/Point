@@ -19,6 +19,11 @@ import (
 // it.
 const leaderHintDelay = 400 * time.Millisecond
 
+// animInterval is one frame of the header animation. Slow enough to read as
+// a pulse rather than a flicker, and — since it only ever runs while
+// something is streaming — never a cost the app pays at rest.
+const animInterval = 120 * time.Millisecond
+
 // maxProtocolErrors bounds what the placeholder shows; a backend printing on
 // every line must not grow the model without limit.
 const maxProtocolErrors = 5
@@ -44,6 +49,7 @@ type Root struct {
 
 	leader leaderState
 	paste  pasteState
+	anim   animState
 
 	// lastFrame is the most recently rendered screen, re-served while a
 	// paste burst is assembling — see View's doc comment for why that is a
@@ -71,6 +77,20 @@ type connection struct {
 	unknown         []string
 	interrupted     []string
 	protocolErrors  []string
+}
+
+// animState drives the header animation (render.go's header).
+//
+// running is the whole idle-CPU guarantee: the tick re-arms itself ONLY
+// while the active workspace reports Streaming(), so an untouched app
+// schedules nothing at all and its frame count stops changing. gen makes a
+// stale tick — one already in flight when streaming ended — harmless
+// instead of a second, parallel loop, the same generation-counter shape
+// draft.go and paste.go both use.
+type animState struct {
+	running bool
+	frame   int
+	gen     int
 }
 
 type leaderState struct {
@@ -172,7 +192,39 @@ func (r *Root) current() Workspace {
 // Update
 // ---------------------------------------------------------------------------
 
+// Update wraps the real update so ONE place decides whether the header
+// animation should be running. Streaming starts and stops in a dozen
+// different messages (an envelope, a key, a tick of chat's own); asking
+// afterwards, once, is what keeps "the animation runs only while something
+// streams" from being a rule every new case has to remember.
 func (r *Root) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	model, cmd := r.update(msg)
+	if anim := r.ensureAnimation(); anim != nil {
+		return model, tea.Batch(cmd, anim)
+	}
+	return model, cmd
+}
+
+// ensureAnimation starts the tick loop if something is streaming and it is
+// not already running. It never STOPS one: a tick that finds nothing
+// streaming simply does not re-arm (see the animTickMsg case), which is the
+// only way to end a tea.Tick that has already been scheduled.
+func (r *Root) ensureAnimation() tea.Cmd {
+	if !r.streaming() || r.anim.running {
+		return nil
+	}
+	r.anim.running = true
+	r.anim.gen++
+	return animTick(r.anim.gen)
+}
+
+func animTick(gen int) tea.Cmd {
+	return tea.Tick(animInterval, func(time.Time) tea.Msg {
+		return animTickMsg{gen: gen}
+	})
+}
+
+func (r *Root) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch m := msg.(type) {
 
 	case tea.WindowSizeMsg:
@@ -182,6 +234,20 @@ func (r *Root) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case tea.KeyMsg:
 		return r.handleKey(m)
+
+	case animTickMsg:
+		if m.gen != r.anim.gen {
+			return r, nil // a tick left over from an earlier loop
+		}
+		if !r.streaming() {
+			// Freeze, and re-arm nothing. The frame stays where it stopped
+			// rather than snapping back, which is what makes a frozen
+			// animation read as "idle" instead of "broken".
+			r.anim.running = false
+			return r, nil
+		}
+		r.anim.frame++
+		return r, animTick(m.gen)
 
 	case leaderHintMsg:
 		if r.leader.pending && m.gen == r.leader.gen {
@@ -265,7 +331,15 @@ func (r *Root) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		r.conn.banner = "backend lost — restarting"
 		r.conn.bannerDetail = m.Reason
 		r.status = "backend lost"
-		return r, r.afterBackend()
+		// F5: the workspace sees this too. A task that was streaming when
+		// the backend died has to end SOMEWHERE, and F5 requires it end in
+		// the same interrupted state a user cancel produces — one
+		// rendering path, two causes. Without this forward the only thing
+		// that ever stopped such a spinner was the stream_timeout
+		// watchdog, two minutes later.
+		ws, wsCmd := r.current().Update(m)
+		r.workspaces[r.active] = ws
+		return r, tea.Batch(r.afterBackend(), wsCmd)
 
 	case protocol.TasksInterruptedMsg:
 		r.conn.interrupted = append(r.conn.interrupted, m.TaskIDs...)
@@ -365,6 +439,7 @@ func (r *Root) pushDiagnostics() tea.Cmd {
 // ---------------------------------------------------------------------------
 
 type leaderHintMsg struct{ gen int }
+type animTickMsg struct{ gen int }
 type statusMsg string
 
 func (r *Root) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {

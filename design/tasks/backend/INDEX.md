@@ -25,7 +25,7 @@ uv run python main.py
 | B9 | Agent Foundation | P1 | no | B8 | ✅ built |
 | B10 | Tool System | P1 | no | B9 | ✅ built |
 | B11 | The Three Agents | P1 | no | B10 | ✅ built |
-| B12 | Routing, Attachments, Caps | P1 | no | B11 | ✅ built |
+| B12 | Routing, Attachments, Caps | P1 | no | B11 | not started |
 | B13 | Memory System | P2 | no | B12 + real usage | not started |
 | B14 | Usage & Limits | P2 | no | B12 | not started |
 | B15 | Lifecycle & Resources | P2 | no | B12 | **demo-critical** |

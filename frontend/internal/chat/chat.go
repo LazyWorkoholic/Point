@@ -23,6 +23,13 @@ type Options struct {
 	// 500, matching config.Defaults().UI.Scrollback.
 	Scrollback int
 
+	// StreamTimeout is F5's watchdog: how long a running task may say
+	// nothing before the UI stops its spinner and offers Retry. <= 0 falls
+	// back to defaultStreamTimeout (120s), matching
+	// config.Defaults().UI.StreamTimeout — a workspace built without it
+	// still has a watchdog rather than silently having none.
+	StreamTimeout time.Duration
+
 	// State is F1's already-loaded state.json (main.go loads it once for
 	// app.Options; this is the same value). F4 reads Drafts out of it on
 	// session load and writes it back, debounced, as the buffer changes —
@@ -95,6 +102,12 @@ type Workspace struct {
 	// exercise the ListSessions/GetSession/CreateSession decision logic
 	// without a live protocol.Client — see protocol.go's send doc.
 	sendFn func(cmdType string, kind queryKind, payload map[string]any)
+	// sendMsgFn defaults to writeSend — F5's CmdSendMessage write, which is
+	// a different shape from sendFn's one-shot queries (one request, a
+	// whole stream of replies). Substituted by a test for the same reason
+	// sendFn is: what these tests exercise is the lane/queue/lifecycle
+	// logic, not protocol.Client's send path, which that package tests.
+	sendMsgFn func(e *liveEntry, payload map[string]any) tea.Cmd
 
 	input inputState
 
@@ -104,13 +117,56 @@ type Workspace struct {
 	state       config.State
 	saveStateFn func(config.State) error
 
-	all []wireMessage // every message GetSession returned, oldest first
+	// all is every message GetSession returned, oldest first, rendered
+	// verbatim in that order.
+	//
+	// F5 briefly folded adjacent identical user messages here, to hide the
+	// duplicate question a retry leaves behind (a retry re-sends, and the
+	// backend persists a user message per send). That fold was WRONG and is
+	// gone. Adjacency does not identify a retry: two successful task-lane
+	// sends of the same question persist their questions adjacently while
+	// their answers arrive afterwards, so the database legitimately holds
+	// Q · Q · A · A — and the fold merged the two questions and orphaned an
+	// answer under the survivor, inventing a "retried" label for a send
+	// that was never retried. Corrupting a correct transcript is strictly
+	// worse than showing the duplicate it was hiding.
+	//
+	// It cannot be done correctly yet, either. A question and its answer
+	// have NO link in the database: agents\executor.py builds its
+	// UserMessage before a task_id exists and never assigns one, so only
+	// the assistant side carries task_id. Without that link there is no way
+	// to pair an answer to its question, let alone to tell a retry from a
+	// repeat. B12 is where that data can appear — see this episode's
+	// handoff.
+	all []wireMessage
 
-	focus  int  // absolute index into all; -1 means "no explicit focus"
-	pinned bool // true: viewport tracks the newest message
-	topAbs int  // absolute index of the first message rendered, when not pinned
+	focus  int  // absolute entry index; -1 means "no explicit focus"
+	pinned bool // true: viewport tracks the live bottom
+
+	// The scroll position is a ROW, addressed as (entry, row within that
+	// entry's block) — see scroll.go's doc comment on why it is a pair and
+	// not one absolute row number.
+	topAbs int
+	topRow int
+
+	// viewRows and viewWidth are the viewport's content dimensions from the
+	// most recent render (render.go's viewportLines). The key handlers need
+	// them — scrolling a row and paging a screenful are both measured
+	// against the box that is actually on screen — and a keypress does not
+	// otherwise know how big that box is.
+	viewRows  int
+	viewWidth int
 
 	copyNote string // last y-copy result, shown briefly at the foot of the viewport
+
+	// F5 — see stream.go. live holds one entry per send made this session,
+	// in send order; queued is the depth-1 queue; the tick fields pace the
+	// render throttle and the no-response watchdog.
+	live          []*liveEntry
+	queued        *queuedSend
+	streamTimeout time.Duration
+	tickArmed     bool
+	tickGen       int
 
 	cacheWidth int
 	cache      map[string][]string
@@ -128,18 +184,24 @@ func New(opts Options) *Workspace {
 	if sb <= 0 {
 		sb = 500
 	}
+	st := opts.StreamTimeout
+	if st <= 0 {
+		st = defaultStreamTimeout
+	}
 	w := &Workspace{
-		theme:      opts.Theme,
-		client:     opts.Client,
-		log:        opts.Log,
-		scrollback: sb,
-		pending:    make(map[string]queryKind),
-		cache:      make(map[string][]string),
-		focus:      -1,
-		pinned:     true,
-		state:      opts.State,
+		theme:         opts.Theme,
+		client:        opts.Client,
+		log:           opts.Log,
+		scrollback:    sb,
+		streamTimeout: st,
+		pending:       make(map[string]queryKind),
+		cache:         make(map[string][]string),
+		focus:         -1,
+		pinned:        true,
+		state:         opts.State,
 	}
 	w.sendFn = w.doSend
+	w.sendMsgFn = w.writeSend
 	w.saveStateFn = config.SaveState
 	w.input.buf = newInputBuffer()
 	w.input.focused = true // the input holds focus by default — F4

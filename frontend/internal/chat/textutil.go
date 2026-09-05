@@ -101,3 +101,46 @@ func clip(lines []string, rows int) []string {
 	}
 	return lines
 }
+
+// tabStop is the column interval expandTabs aligns to.
+//
+// The VALUE is cosmetic; the expansion is not. Once the tabs are gone, what
+// this package measures and what the terminal draws agree whatever stop is
+// used — which is the entire point. 4 is the common convention for code and
+// costs less of a narrow box than the terminal's own default of 8.
+const tabStop = 4
+
+// expandTabs replaces tabs with spaces, aligned to the next tab stop.
+//
+// runewidth.StringWidth reports a tab as ZERO cells; every terminal draws it
+// as up to eight. Preformatted text carrying tabs therefore measured as
+// fitting and then overflowed on screen, wrapping to the far left — the
+// symptom reads as broken wrapping, but the wrapping was correct and the
+// measurement was wrong.
+//
+// Prose escapes this because splitWords goes through strings.Fields, which
+// drops tabs entirely. Code blocks, an unclosed fence's raw tail and a
+// thinking block all keep their text verbatim, so they are exactly the paths
+// that need this.
+func expandTabs(s string) string {
+	if !strings.ContainsRune(s, '\t') {
+		return s
+	}
+	var b strings.Builder
+	col := 0
+	for _, r := range s {
+		switch r {
+		case '\t':
+			n := tabStop - col%tabStop
+			b.WriteString(strings.Repeat(" ", n))
+			col += n
+		case '\n':
+			b.WriteRune(r)
+			col = 0
+		default:
+			b.WriteRune(r)
+			col += runewidth.RuneWidth(r)
+		}
+	}
+	return b.String()
+}

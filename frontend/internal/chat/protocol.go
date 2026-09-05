@@ -96,10 +96,18 @@ func (w *Workspace) beginBootstrap() {
 	w.send(protocol.CmdListSessions, queryListSessions, map[string]any{"include_archived": false})
 }
 
-func (w *Workspace) handleEnvelope(env protocol.Envelope) {
+// handleEnvelope routes a reply. F5's stream events are tried FIRST: they
+// share a corr_id with the CmdSendMessage that caused them, arrive many to
+// a request, and are matched by live entry rather than by the one-shot
+// query map below — which would consume the first of them and drop the
+// rest.
+func (w *Workspace) handleEnvelope(env protocol.Envelope) tea.Cmd {
+	if cmd, taken := w.handleStreamEvent(env); taken {
+		return cmd
+	}
 	kind, ok := w.pending[env.CorrID]
 	if !ok {
-		return // not one of ours
+		return nil // not one of ours
 	}
 	delete(w.pending, env.CorrID)
 	if w.client != nil {
@@ -119,7 +127,7 @@ func (w *Workspace) handleEnvelope(env protocol.Envelope) {
 		if w.loadErr == "" {
 			w.loadErr = "the backend reported an error"
 		}
-		return
+		return nil
 	}
 
 	switch kind {
@@ -130,6 +138,7 @@ func (w *Workspace) handleEnvelope(env protocol.Envelope) {
 	case queryGetSession:
 		w.onSession(env)
 	}
+	return nil
 }
 
 func (w *Workspace) onSessionList(env protocol.Envelope) {
@@ -181,10 +190,20 @@ func (w *Workspace) setSession(s wireSession) {
 	w.loadErr = ""
 	w.sessionID = s.ID
 	w.sessionTitle = s.Title
+	// Rendered exactly as the database returned it, in its order, with
+	// nothing merged or relabelled. See chat.go's `all` field for why the
+	// retry-fold that briefly lived here was removed.
 	w.all = s.Messages
+	// F5: live entries and the queue belong to the session that made them.
+	// Nothing switches sessions yet (F6 owns that), but leaving them
+	// attached across a setSession would render one session's stream into
+	// another's transcript the day it does.
+	w.live = nil
+	w.queued = nil
 	w.pinned = true
 	w.focus = -1
 	w.topAbs = 0
+	w.topRow = 0
 	w.invalidateCache()
 	// F4: the draft is scoped per session, so it is only loadable once
 	// sessionID is known — this is also the point F3 already resets
@@ -213,7 +232,17 @@ func (w *Workspace) Update(msg tea.Msg) (app.Workspace, tea.Cmd) {
 	case protocol.ConnectedMsg:
 		w.beginBootstrap()
 	case protocol.EnvelopeMsg:
-		w.handleEnvelope(m.Envelope)
+		return w, w.handleEnvelope(m.Envelope)
+
+	case protocol.BackendLostMsg:
+		// F5's "one path, two causes": a backend that died under a running
+		// task leaves exactly what a cancel leaves — partial text, marked
+		// interrupted, with Retry. Nothing here is a separate crash-
+		// recovery renderer, which is precisely what stops it rotting
+		// against the cancellation path that gets exercised daily.
+		for _, e := range w.live {
+			w.finish(e, statusCancelled)
+		}
 	case app.PasteMsg:
 		if w.input.focused {
 			return w, w.handleInputPaste(m.Text)
@@ -225,6 +254,12 @@ func (w *Workspace) Update(msg tea.Msg) (app.Workspace, tea.Cmd) {
 		return w, w.enterInputMode()
 	case draftSaveMsg:
 		w.saveDraftIfDue(m.gen)
+	case app.CancelStreamMsg, app.DiscardPendingMsg, app.EditPendingMsg,
+		app.RetryMsg, streamTickMsg:
+		// F5's own messages — cancel, the queue's edit/discard, retry, and
+		// the render/watchdog tick. See stream.go's handleStreamMsg.
+		cmd, _ := w.handleStreamMsg(msg)
+		return w, cmd
 	case OpenAttachmentPickerMsg:
 		// F8's seam — see input_keys.go's doc comment on this type.
 	case tea.KeyMsg:

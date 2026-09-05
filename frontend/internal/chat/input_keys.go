@@ -53,6 +53,16 @@ func (w *Workspace) handleInputKey(k tea.KeyMsg) tea.Cmd {
 	in := &w.input.buf
 	width := w.input.textWidth
 
+	// F5's ONE lock: at queue capacity, editing is refused until the
+	// pending message is discarded (esc) or pulled back (ctrl+e). Both of
+	// those are chords the root owns, so they never arrive here — which is
+	// why refusing everything that does is safe. The reason is on screen
+	// the whole time (render.go's queryLines); a lock the user cannot
+	// explain is the failure F05-streaming-queue.md checks for by name.
+	if w.inputLocked() {
+		return nil
+	}
+
 	switch k.Type {
 	case tea.KeyEnter:
 		if k.Alt {
@@ -155,28 +165,17 @@ func (w *Workspace) handleInputKey(k tea.KeyMsg) tea.Cmd {
 // focused: the whole pasted block lands as one InsertText call — one undo
 // step, one draft, never N keystrokes and never a send.
 func (w *Workspace) handleInputPaste(text string) tea.Cmd {
+	if w.inputLocked() {
+		return nil // the lock covers pasting, not just typing
+	}
 	w.input.lastPasteAt = time.Now()
 	w.input.buf.InsertText(text)
 	return w.scheduleDraftSave()
 }
 
-// onSend is F4's whole implementation of "Enter sends."
-//
-// F04-query-input.md's Do-NOT forbids implementing F5's queueing behaviour
-// here — only the mode chip's display of what Enter WOULD do. So this does
-// not call protocol.CmdSendMessage and creates no task slot; it clears the
-// input as if the message had been sent, which is the seam F5 replaces:
-// swap this function's body for the real send (CmdSendMessage, a task slot
-// via render.go's renderTaskSlot), keeping the clear as its last step.
-func (w *Workspace) onSend() tea.Cmd {
-	if len(w.input.buf.runes) == 0 {
-		return nil
-	}
-	w.input.buf.ClearKeepingUndo() // see its doc — recoverable via Ctrl+Z
-	w.input.chips = nil
-	w.input.scrollTop = 0
-	return w.clearDraft()
-}
+// onSend moved to stream.go in F5 — this is the seam F4's own stub named,
+// and it is now the real send: CmdSendMessage, a live entry, and the queue.
+// The clear is still its last step, exactly as that stub asked.
 
 // OpenAttachmentPickerMsg is F4's whole implementation of "emit an 'open
 // picker' message when @ is typed" (F04-query-input.md's Do-NOT forbids

@@ -13,6 +13,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 
@@ -125,6 +126,9 @@ func run() error {
 		Client:     client,
 		Log:        log,
 		Scrollback: cfg.UI.Scrollback,
+		// F5: ui.stream_timeout, in seconds — the client-side watchdog
+		// that stops a spinner no backend event is ever going to stop.
+		StreamTimeout: time.Duration(cfg.UI.StreamTimeout) * time.Second,
 		// F4: chat.Workspace reads Drafts out of this and writes it back,
 		// debounced, as the query input's buffer changes — see draft.go.
 		State: state,

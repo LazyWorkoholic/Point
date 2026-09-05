@@ -1,6 +1,6 @@
 # F5 — Streaming, Queue, Cancel
 
-**Phase:** P1 · **Batchable:** no · **Depends on:** F4 · **Backend:** B5 ✅, B12
+**Phase:** P1 · **Batchable:** no · **Depends on:** F4 · **Backend:** B5 ✅, B11 ✅
 
 ## Purpose
 

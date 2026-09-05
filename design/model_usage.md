@@ -14,7 +14,8 @@ SESSION  EPISODE                          MODEL         WHY
 9        F3  chat viewport                Sonnet high   rendering, spec is exact
 10       F4  query input                  Sonnet high   fiddly but mechanical
 11       F5  streaming, queue, cancel     Opus medium   async state machine
-11b      B18 message pagination           Sonnet high
+11b      F5 re-verifying after B12        Opus medium
+11c      B18 message pagination           Sonnet high
 12       F7  popup framework              Sonnet high   one widget, clear spec
 13       F6  right pane                   Sonnet medium mostly wiring events to cards
 14       F8  @ picker                     Sonnet high   modes + guards, well defined

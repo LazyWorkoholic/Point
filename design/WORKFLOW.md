@@ -551,7 +551,57 @@ land on here.
 
 ---
 
-# SESSION 11b — B18 Message Pagination
+# SESSION 11b — B12 Verify + F5 Reload Pairing
+
+**Goal:** spend B12's new data — make a reloaded transcript render exactly like a live one, in every send pattern.
+
+**Paste:**
+```
+Read CLAUDE.md and design/tasks/frontend/S10b-b12-verify-f5-pairing.md.
+
+B12 must be complete and its gate passed first. Pair on task_id only --
+never adjacency, ordering, or timing. Frontend only; every backend field
+this needs is B12's and must already exist.
+
+Stop at the verification gate with PowerShell checks.
+
+If anything in this episode's Build section is ambiguous or seems to
+assume something not true of this repo, stop and tell me before writing
+code.
+```
+
+**You do:** run all four send patterns and restart after each — sequential, queued,
+two `@research` fired together, and plain + `@research` fired together. All four must
+reload `Q,A,Q,A`. The last two are the ones that split today; if either still groups,
+the pairing isn't using `task_id`.
+
+**Record:**
+```
+Write design/completed/frontend/S10b-b12-verify-f5-pairing.md following
+the format in design/completed/backend/INDEX.md. Include the bugs we hit
+and how they were fixed, and what the next episode inherits. Add a row to
+design/completed/frontend/INDEX.md's status table.
+
+Record the exact pairing key and rule as implemented -- that reload
+groups a user message with the assistant message sharing its task_id,
+and that adjacency, ordering, and elapsed time are never used. F6's task
+panel and F9's result cards both group messages and must use this same
+key, exactly.
+
+Also record what a reloaded exchange looks like in each state: a
+completed slot, a failed/timed-out one with its footer, a plain answer
+(which must NOT become a slot despite carrying an invocation), and a
+question whose task produced nothing.
+
+If B12 did not persist a retry link, record that retried attempts still
+render as separate questions and name the episode that would add it.
+```
+
+**Then:** commit · `/clear`
+
+---
+
+# SESSION 11c — B18 Message Pagination
 
 **Goal:** make a bounded slice of history cheap to fetch, so F18 can window it.
 

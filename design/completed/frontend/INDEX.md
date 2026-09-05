@@ -16,7 +16,8 @@ it passed.
 | F2 | Backend Client | ✅ built + manually verified | `F02-backend-client.md` |
 | F3 | Chat Viewport | ✅ built + manually verified | `F03-chat-viewport.md` |
 | F4 | Query Input | ✅ built + manually verified | `F04-query-input.md` |
-| F5–F17 | — | not started | — |
+| F5 | Streaming, Queue, Cancel | ✅ built + manually verified | `F05-streaming-queue.md` |
+| F6–F18 | — | not started | — |
 
 **F1 and F2 were built and verified in one session** (`batchable: yes`).
 
@@ -43,8 +44,28 @@ The two contracts the rest of the frontend is built on:
   debounced state to lose on quit should implement it rather than invent
   its own quit-time flush. Full account in `F04-query-input.md`'s "Bug 17"
   section under "Editing across a wrap gap".
+- **The ordered entry model** (`chat\entries.go`) — the transcript is ONE
+  sequence assembled from persisted messages, live entries and the pending
+  bubble, and **display position is creation order, never role and never
+  which list a thing lives in**. Getting this wrong produced four separate
+  visible bugs at once. Anything adding a fourth source adds it here, not
+  beside it. Full account in `F05-streaming-queue.md`'s "Bug 1".
+- **The row-based scroll position** (`(topAbs, topRow)`, `entryBlock`) — an
+  entry index plus a row offset inside it, deliberately NOT an absolute row
+  number, which would cost O(all entries) per render. Full account in
+  `F05-streaming-queue.md`'s "Bug 2".
+- **The task lifecycle identifiers** — `TaskStarted` + its `background`
+  field for the lane, `protocol.IsTerminal` for the three terminal events,
+  and the `TextDelta`/`TaskToken` pair for tokens. **F6's task card and
+  F9's result card must use these names exactly.** Full table in
+  `F05-streaming-queue.md`'s "The two contracts F6 and F9 must use EXACTLY".
+- **`app.StreamAware` / `app.QueueAware`** (`app\stream.go`) — the same
+  narrow-interface pattern as `FocusAware` and `DraftFlusher`, for "is
+  anything running" (the header animation, which must freeze when idle or
+  it becomes a permanent idle-CPU drain) and "is a message queued" (which
+  esc means). Full account in `F05-streaming-queue.md`'s "Bug 3".
 
-**F5 can start now.** It needs F4 (done). **F4 also carries one open watch
+**F6 can start now.** It needs F5 (done) and F7. **F4 carries one open watch
 item** — `F04-query-input.md`'s Bug 17b: a backspace round-trip at a wrap
 gap boundary was observed miscounting, traced with no cause found, then
 stopped reproducing on its own. Not blocking, but any episode touching

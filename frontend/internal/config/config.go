@@ -75,6 +75,16 @@ type UI struct {
 	// session. Named here, not in LAYOUT.md, which only names the default
 	// (500) and the key (`ui.scrollback`).
 	Scrollback int `toml:"scrollback"`
+
+	// StreamTimeout is how many seconds a task may sit in a running state
+	// with no events before F5's Chat workspace stops its spinner and shows
+	// "no response". F05-streaming-queue.md asks for it as "(config,
+	// default 120s)" and names no key, the same gap ui.scrollback had, so
+	// F5 names it here for the same reason F1 named that one: [ui] is the
+	// table the frontend reads, and this is a CLIENT-side watchdog. The
+	// backend has its own, unrelated per-request timeouts and does not read
+	// this key.
+	StreamTimeout int `toml:"stream_timeout"`
 }
 
 // Config is the whole file, reduced to what the frontend reads. Keys the
@@ -87,7 +97,7 @@ type Config struct {
 
 // Defaults is what an absent config.toml means.
 func Defaults() Config {
-	return Config{UI: UI{Theme: "turquoise", Background: "transparent", Scrollback: 500}}
+	return Config{UI: UI{Theme: "turquoise", Background: "transparent", Scrollback: 500, StreamTimeout: 120}}
 }
 
 // Load reads config.toml.
@@ -133,6 +143,9 @@ func loadFrom(path string) (Config, error) {
 	}
 	if parsed.UI.Scrollback != 0 {
 		cfg.UI.Scrollback = parsed.UI.Scrollback
+	}
+	if parsed.UI.StreamTimeout != 0 {
+		cfg.UI.StreamTimeout = parsed.UI.StreamTimeout
 	}
 	return cfg, nil
 }

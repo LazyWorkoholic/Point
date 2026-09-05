@@ -1,7 +1,6 @@
 package chat
 
 import (
-	"fmt"
 	"strings"
 
 	"github.com/lazyworkoholic/point/frontend/internal/layout"
@@ -161,6 +160,9 @@ func (w *Workspace) viewportLines(rect layout.Rect) []string {
 	if contentWidth < 4 {
 		contentWidth = 4
 	}
+	// The key handlers scroll and page against the box actually on screen;
+	// a keypress has no other way to know its size. See scroll.go.
+	w.viewRows, w.viewWidth = rows, contentWidth
 
 	switch {
 	case w.client == nil:
@@ -169,7 +171,7 @@ func (w *Workspace) viewportLines(rect layout.Rect) []string {
 		return clip(centred(th.Style(theme.Error).Render("! "+w.loadErr), rows, contentWidth), rows)
 	case w.loading || (!w.bootstrapped && w.sessionID == ""):
 		return clip(centred(th.Style(theme.TextDim).Render("◐ loading session…"), rows, contentWidth), rows)
-	case len(w.all) == 0:
+	case w.entryCount() == 0:
 		hint := th.Style(theme.TextDim).Render("type a message") + "   " +
 			th.Style(theme.AccentPrimary).Render("^P palette")
 		return clip(centred(hint, rows, contentWidth), rows)
@@ -211,6 +213,16 @@ func (w *Workspace) queryLines(rect layout.Rect) []string {
 	rows := rect.H - 2
 	if rows <= 0 {
 		return nil
+	}
+	// F5: at queue capacity the input is locked, and the reason takes the
+	// input's own place rather than being tucked into a status bar the eye
+	// is not on. "the input is dead with no explanation" is the stated
+	// failure; the explanation is therefore rendered where the dead input
+	// would be, and it names the key that clears it.
+	if w.inputLocked() {
+		width := w.input.boxContentWidth
+		reason := w.theme.Style(theme.Warning).Render("⊘ " + lockReason)
+		return clip([]string{padCells(reason, width)}, rows)
 	}
 	lines := renderInputLines(w.theme, &w.input.buf, w.input.currentMode(), w.input.chips,
 		w.input.focused, w.input.boxContentWidth, rows, w.input.scrollTop)
@@ -344,29 +356,10 @@ func max0(n int) int {
 	return n
 }
 
-func short(id string) string {
-	if len(id) <= 8 {
-		return id
-	}
-	return id[:8]
-}
-
-// renderTaskSlot is the collapsed one-line placeholder a task reserves at
-// send time. F4 (input) is what creates a slot and F5 (streaming) is what
-// transitions its status; this episode builds neither, so nothing calls this
-// yet. It exists because F3.md asks for the slot's OWN rendering to live
-// here, ready for F4/F5 to invoke once a task can actually be started.
-func renderTaskSlot(th theme.Theme, taskID, status string, width int) string {
-	var role theme.Role
-	var glyph string
-	switch status {
-	case "running":
-		role, glyph = theme.Running, "▶"
-	case "queued":
-		role, glyph = theme.Queued, "◌"
-	default:
-		role, glyph = theme.TextDim, "·"
-	}
-	line := th.Style(role).Render(fmt.Sprintf("%s task %s — %s", glyph, short(taskID), status))
-	return padCells(line, width)
-}
+// renderTaskSlot was F3's placeholder for the collapsed slot, written
+// against a status STRING and never called by anything. F5 owns the slot's
+// real state transitions, and they are a liveStatus, not a string — so the
+// renderer moved to stream_render.go's renderTaskEntry rather than being
+// kept alongside it. Two slot renderers, one of them dead and disagreeing
+// about what a status is, is the "second abstraction" this repo deletes on
+// sight (managers\provider.py, managers	ool.py); this is the same call.
