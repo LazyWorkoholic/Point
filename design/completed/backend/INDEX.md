@@ -23,7 +23,8 @@ it passed.
 | B9 | Agent Foundation | ✅ built + manually verified | `B09-agent-foundation.md` |
 | B10 | Tool System | ✅ built + manually verified | `B10-tool-system.md` |
 | B11 | The Three Agents | ✅ built + manually verified | `B11-three-agents.md` |
-| B12–B17 | — | not started | — |
+| B12 | Routing, Attachments, Concurrency Caps | ✅ built + manually verified | `B12-routing-attachments.md` |
+| B13–B17 | — | not started | — |
 
 ## Verified file structure — end of Episode 11
 
@@ -361,6 +362,77 @@ backend\
 planned directories alongside `agents\`; `agents\` was created in B9 and
 `tools\` in B10 (both above). `memory\` and `schemas\` are still not created
 — B13 and (per the original plan) a later episode create what they need.
+
+## Delta — Episode 12
+
+Recorded as a delta rather than a rewritten tree: B12 added no top-level
+package, so restating 330 lines to insert five entries would risk more than it
+documents. Full reasoning in `B12-routing-attachments.md`.
+
+```
+backend\
+├── managers\
+│   ├── invocation.py         NEW — Invocation / AttachmentRef /
+│   │                          parse_invocation(). The ambiguity rule
+│   │                          ("an exact agent name wins, otherwise it is
+│   │                          a path") lives here and nowhere else, so the
+│   │                          CLI and F8's picker cannot disagree. Zero
+│   │                          I/O: takes is_agent / is_indexed_path as
+│   │                          predicates                                  [B12]
+│   ├── attachment_manager.py NEW — the guards (path, exists, directory,
+│   │                          BINARY, size — in that order), the token
+│   │                          estimate produced by context.py's own
+│   │                          _render_attachment, preview(), and
+│   │                          attach / detach / set_mode                  [B12]
+│   ├── session_manager.py    + set_project() — project_id was write-once
+│   │                          at CreateSession, which left a session
+│   │                          unable to attach anything                   [B12]
+│   └── message.py            + Outcome enum; outcome / interrupted /
+│                              error_code on Message                       [B12]
+├── runtime\
+│   ├── scheduler.py          NEW — TaskScheduler. Two lanes
+│   │                          (provider, turn), first-fit, in-process by
+│   │                          design (lockfile.py makes the backend
+│   │                          single-instance)                            [B12]
+│   ├── task.py               + TaskState.QUEUED (NEW — not a B1 state),
+│   │                          cancel-while-queued, `bound` on the failed
+│   │                          chunk                                       [B12]
+│   ├── task_manager.py       create_task() submits to the scheduler
+│   │                          instead of starting                         [B12]
+│   ├── errors.py             + AdvancedUnavailableError, QueueFullError,
+│   │                          AttachmentRefusedError,
+│   │                          AttachmentNotFoundError — all with `code`   [B12]
+│   ├── events.py             + AttachContext / DetachContext /
+│   │                          SetAttachmentMode / ListAttachments /
+│   │                          ResolveAttachment, and the four replies     [B12]
+│   └── runtime.py            input parsing, --advanced refusal, turn-queue
+│                              admission, attachment handlers,
+│                              _attachment_scope(), _adopt_project_for(),
+│                              _outcome_for(), tasks.list(scope);
+│                              Error payloads now carry `code` + `offer`   [B12]
+├── database\
+│   ├── migrations.py         SCHEMA_VERSION 4 -> 5                        [B12]
+│   ├── attachment_repository.py + insert / delete / set_mode /
+│   │                          fetch_by_source (the writes B8 left)        [B12]
+│   ├── session_repository.py writes the three new message columns         [B12]
+│   └── task_repository.py    LIVE_STATUSES gained "queued"                [B12]
+├── streaming\
+│   ├── accumulator.py        finalize() takes invocation + outcome;
+│   │                          stops writing metadata["interrupted"]       [B12]
+│   └── manager.py            + register_invocation / invocation_for,
+│                              keyed per TASK (the echo path persists a
+│                              reply without ever registering a stream)    [B12]
+└── tests\
+    ├── manual_b12_verify.ps1      the whole gate, one script              [B12]
+    ├── manual_b12_concurrency.py  cap + queue, ONE backend, exit code     [B12]
+    └── manual_b12_parser.py       routing rules, no I/O, exit code        [B12]
+```
+
+`cli.py` gained `attach` / `detach` / `set-mode` / `attachments list` /
+`task cancel [--last]`, `tasks list --scope`, `send --agent`, and
+`session new --path/--no-project` (which resolves and binds the project, so no
+uuid is threaded by hand). `_strip_agent_prefix` was **deleted** — the backend
+parses now.
 
 ## ⚠ One inaccuracy inherited from the original log
 

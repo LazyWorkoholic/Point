@@ -14,7 +14,9 @@ from typing import Any, Optional
 
 import aiosqlite
 
-from managers.message import ContentType, InvocationMetadata, Message, MessageContent, MessageRole, TokenUsage
+from managers.message import (
+    ContentType, InvocationMetadata, Message, MessageContent, MessageRole, Outcome, TokenUsage,
+)
 from managers.session import Session, SessionState
 
 class SessionRepository:
@@ -74,6 +76,13 @@ class SessionRepository:
     # -- messages ---------------------------------------------------------
 
     async def insert_message(self, message: Message) -> None:
+        """B12: `outcome`, `interrupted` and `error_code` go into real
+        columns (migration v5), not into the `metadata` blob beside
+        `invocation`. They are the three things a reloaded transcript
+        has to know about how a reply ended, and a footer that can only
+        be rebuilt by JSON-decoding every row is a footer that gets
+        rebuilt wrong. `interrupted` is deliberately NOT also written to
+        `metadata` -- one writer, one reader, no drift."""
         storage_metadata = {
             "metadata": message.metadata,
             "invocation": message.invocation.to_dict() if message.invocation else None,
@@ -82,14 +91,18 @@ class SessionRepository:
             """
             INSERT INTO messages
                 (id, session_id, task_id, role, content, created_at, metadata,
-                 input_tokens, output_tokens, total_tokens)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 input_tokens, output_tokens, total_tokens,
+                 interrupted, outcome, error_code)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 message.id, message.session_id, message.task_id, message.role.value,
                 json.dumps(message.content.to_dict()), message.timestamp,
                 json.dumps(storage_metadata),
                 message.usage.input_tokens, message.usage.output_tokens, message.usage.total_tokens,
+                1 if message.interrupted else 0,
+                message.outcome.value if message.outcome else None,
+                message.error_code,
             ),
         )
         await self._conn.commit()
@@ -154,4 +167,11 @@ class SessionRepository:
                 output_tokens=row["output_tokens"],
                 total_tokens=row["total_tokens"],
             ),
+            # NULL outcome means the row predates migration v5. Left as
+            # None rather than defaulted to DONE: "we do not know how
+            # this ended" and "this ended cleanly" are different claims,
+            # and only one of them is true of an old row.
+            outcome=Outcome(row["outcome"]) if row["outcome"] else None,
+            interrupted=bool(row["interrupted"]),
+            error_code=row["error_code"],
         )

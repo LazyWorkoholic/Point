@@ -8,9 +8,14 @@ verified without Go (B6 14).
     uv run python cli.py send "count to five" [--cancel-after 2]
     uv run python cli.py send "@filler-explainer explain" --file <path> --select 12
     uv run python cli.py send "@research <question>" --wait
-    uv run python cli.py tasks list
+    uv run python cli.py tasks list [--scope all|active]
+    uv run python cli.py task cancel <task-id> | --last
     uv run python cli.py context report [--session ID | --last] [--json]
     uv run python cli.py memory list --status pending
+    uv run python cli.py attach <path> [--mode full|reference|detached] [--preview]
+    uv run python cli.py detach <attachment-id>
+    uv run python cli.py set-mode <attachment-id> reference
+    uv run python cli.py attachments list
 
 Run from inside `backend\`, like everything else here.
 
@@ -63,7 +68,12 @@ from managers.editor_context import EditorContext, MODE_EXPLAIN, MODE_FILL
 from managers.message import Message, MessageRole
 from providers.mock import provider as mock_provider
 from providers.models import ProviderConfig, ProviderHealthStatus
-from runtime.errors import AgentNotFoundError, BuiltinAgentImmutableError, ContextOverflowError
+from runtime.errors import (
+    AgentNotFoundError,
+    BuiltinAgentImmutableError,
+    ContextOverflowError,
+    RuntimeException,
+)
 from runtime.events import ENVELOPE_VERSION
 from runtime.runtime import Runtime
 
@@ -87,6 +97,11 @@ _EXPECTED_REPLY: dict[str, set[str]] = {
     "ReleaseFileLock": {"FileLockReleased"},
     "TakeOverFileLock": {"FileLockResult"},
     "CheckFileStale": {"FileStaleResult"},
+    "AttachContext": {"Attachment"},
+    "ResolveAttachment": {"AttachmentResolution"},
+    "DetachContext": {"AttachmentDetached"},
+    "SetAttachmentMode": {"Attachment"},
+    "ListAttachments": {"AttachmentList"},
 }
 
 _TASK_TERMINAL = {"TaskDone", "TaskFailed", "TaskCancelled"}
@@ -168,7 +183,10 @@ def _failed(envelopes: list[dict[str, Any]]) -> bool:
 def _print_errors(envelopes: list[dict[str, Any]]) -> None:
     for envelope in envelopes:
         if envelope["type"] in ("Error", "TaskFailed"):
-            print(f"error: {envelope['payload'].get('error', 'unknown error')}", file=sys.stderr)
+            payload = envelope["payload"]
+            code = payload.get("code")
+            tag = f"[{code}] " if code else ""
+            print(f"error: {tag}{payload.get('error', 'unknown error')}", file=sys.stderr)
 
 
 # ---------------------------------------------------------------------------
@@ -231,27 +249,15 @@ def available_scripts() -> list[str]:
 # would the next turn cost" needs it supplied again, not remembered.
 # ---------------------------------------------------------------------------
 
-async def _strip_agent_prefix(runtime: Runtime, text: str) -> tuple[str, Optional[str]]:
-    """`@agent-id rest of the message` -> (rest, agent_id) when the first
-    token exactly names a registered agent; otherwise the text is
-    returned untouched and no override is set. This is the CLI playing
-    the part of F8's `@` picker for exactly the one case that already
-    resolves without a picker -- an exact id/name match (F8's own
-    ambiguity rule: an exact agent name wins). `@path\\to\\file` and
-    `@C:\\...` stay B12's; a token that is not a known agent is left as
-    plain text rather than guessed at.
-    """
-    if not text.startswith("@"):
-        return text, None
-    token, _, rest = text.partition(" ")
-    candidate = token[1:]
-    if not candidate:
-        return text, None
-    try:
-        agent = await runtime.agents.resolve(candidate)
-    except AgentNotFoundError:
-        return text, None
-    return rest, agent.id
+# B12 deleted `_strip_agent_prefix`. The CLI used to pull `@agent` off
+# the front of the text itself and send the remainder, which meant the
+# ambiguity rule ("an exact agent name wins, otherwise it is a path")
+# lived in two places -- here and, eventually, in F8's picker. It now
+# lives in exactly one: `managers\\invocation.py`, called by
+# `Runtime._handle_send_message`. The CLI sends what the user typed,
+# verbatim, and lets the backend route it. `--agent` below is still
+# accepted as an explicit override, and an explicit override still wins
+# over anything parsed out of the text.
 
 
 def _resolve_mode(args: argparse.Namespace) -> str:
@@ -340,10 +346,24 @@ async def cmd_session_new(runtime: Runtime, args: argparse.Namespace) -> int:
     # B10: a session's project is what gives read_file/list_files a root
     # to be guarded against. CreateSession has carried `project_id` since
     # B7; nothing on the CLI could set it until a tool needed one.
+    #
+    # B12: and it is now resolved from the working directory by default,
+    # rather than only when you happen to know the uuid. Every
+    # attachment is guarded against `session.project_id`, so a session
+    # created inside a project but not bound to it could not attach a
+    # single file from that project -- the failure looked like "no
+    # project is open" while standing in one. `--project` still wins;
+    # `--no-project` opts out.
+    project_id = args.project_id
+    if project_id is None and not args.no_project:
+        found = await runtime.projects.resolve(args.path)
+        if found is not None:
+            project_id = found.id
+
     envelopes = await call(
         runtime, "CreateSession", verbose=args.verbose,
         title=args.title, provider=provider, model=model,
-        project_id=args.project_id,
+        project_id=project_id,
         settings={"agent_id": args.agent} if args.agent else None,
     )
     _print_errors(envelopes)
@@ -351,7 +371,7 @@ async def cmd_session_new(runtime: Runtime, args: argparse.Namespace) -> int:
         return EXIT_FAILED
     session = envelopes[-1]["payload"]["session"]
     agent_note = f"  agent={args.agent}" if args.agent else ""
-    project_note = f"  project={args.project_id}" if args.project_id else ""
+    project_note = f"  project={project_id}" if project_id else ""
     print(
         f"{session['id']}  {session['title']}  "
         f"[{session['provider']}/{session['model']}]{agent_note}{project_note}"
@@ -419,7 +439,12 @@ async def cmd_seed_session(runtime: Runtime, args: argparse.Namespace) -> int:
 
 
 async def cmd_send(runtime: Runtime, args: argparse.Namespace) -> int:
-    text, agent_override = await _strip_agent_prefix(runtime, args.text)
+    # Sent verbatim. `@research ...`, `@C:\\path\\file.py`, and
+    # `--advanced` are all the backend's to parse and, in the last
+    # case, to refuse -- see the note where `_strip_agent_prefix` used
+    # to be.
+    text = args.text
+    agent_override = args.agent
     try:
         editor_context = _build_editor_context(args)
     except ValueError as exc:
@@ -617,22 +642,228 @@ async def cmd_context_report(runtime: Runtime, args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+async def _session_for(runtime: Runtime, args: argparse.Namespace) -> Optional[str]:
+    """The session an attachment command acts on: `--session`, else the
+    most recently updated one.
+
+    Defaulting rather than requiring the flag, because attachments are a
+    thing you do to the session you are already talking to, and B2
+    already orders `session list` by `updated_at DESC` for exactly this
+    reason. Prints a clear error rather than creating a session: an
+    `attach` that silently invents a session attaches the file to
+    something the user will never look at.
+    """
+    if args.session:
+        return args.session
+    sessions = await runtime.sessions.list_all()
+    if not sessions:
+        print(
+            "error: no sessions exist -- run 'session new' or pass --session",
+            file=sys.stderr,
+        )
+        return None
+    return sessions[0].id
+
+
+async def cmd_attach(runtime: Runtime, args: argparse.Namespace) -> int:
+    session_id = await _session_for(runtime, args)
+    if session_id is None:
+        return EXIT_FAILED
+
+    if args.preview:
+        # Making good on whatever the refusal offered: the first 200
+        # lines of an oversized file, or a listing for a directory. A
+        # refusal that offers a fallback nobody can accept is a refusal
+        # with a decoration on it.
+        #
+        # Resolved under the session's own scope, the same as the attach
+        # it is a fallback for -- previewing a file you would not be
+        # allowed to attach would make this a way around the guard.
+        project, allow_outside = await runtime._attachment_scope(session_id)
+        try:
+            print(runtime.attachments.preview(
+                args.file, project=project, allow_outside_project=allow_outside,
+            ))
+        except (OSError, RuntimeException) as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return EXIT_FAILED
+        return EXIT_OK
+
+    extra: dict[str, Any] = {}
+    if args.mode:
+        extra["mode"] = args.mode
+    envelopes = await call(
+        runtime, "AttachContext", verbose=args.verbose,
+        session=session_id, path=args.file, **extra,
+    )
+    _print_errors(envelopes)
+    if _failed(envelopes) or not envelopes:
+        _print_offer(envelopes)
+        return EXIT_FAILED
+
+    payload = envelopes[-1]["payload"]
+    attachment = payload["attachment"]
+    resolution = payload["resolution"]
+    print(f"attached  {attachment['id']}")
+    print(f"  path    {resolution['path']}")
+    print(f"  mode    {attachment['mode']}")
+    print(f"  size    {resolution['size']} bytes")
+    print(f"  tokens  ~{resolution['tokens_estimate']} (estimate)")
+    if resolution["outside_project"]:
+        print("  note    outside the project root")
+    return EXIT_OK
+
+
+def _print_offer(envelopes: list[dict[str, Any]]) -> None:
+    """A refusal names its fallback and how to take it.
+
+    The text comes from the error itself, not from a sentence written
+    here: the guard knows whether the fallback is "the first 200 lines",
+    "a directory listing", or "bind this session to a project", and a
+    hint hard-coded in the CLI drifts from it the moment a flag changes.
+    """
+    for envelope in envelopes:
+        if envelope["type"] != "Error":
+            continue
+        payload = envelope["payload"]
+        if payload.get("code") != "attachment_refused":
+            continue
+        offer = payload.get("offer")
+        if offer:
+            print(f"hint: {offer}", file=sys.stderr)
+        if any(word in str(offer) for word in ("200 lines", "listing")):
+            print("      take it with: attach <path> --preview", file=sys.stderr)
+
+
+async def cmd_detach(runtime: Runtime, args: argparse.Namespace) -> int:
+    session_id = await _session_for(runtime, args)
+    if session_id is None:
+        return EXIT_FAILED
+    envelopes = await call(
+        runtime, "DetachContext", verbose=args.verbose,
+        session=session_id, attachment=args.attachment,
+    )
+    _print_errors(envelopes)
+    if _failed(envelopes) or not envelopes:
+        return EXIT_FAILED
+    attachment = envelopes[-1]["payload"]["attachment"]
+    print(f"detached  {attachment['id']}")
+    print(f"  path    {attachment['source_id']}")
+    print("  note    the binding is gone; the file is untouched")
+    return EXIT_OK
+
+
+async def cmd_set_mode(runtime: Runtime, args: argparse.Namespace) -> int:
+    session_id = await _session_for(runtime, args)
+    if session_id is None:
+        return EXIT_FAILED
+    envelopes = await call(
+        runtime, "SetAttachmentMode", verbose=args.verbose,
+        session=session_id, attachment=args.attachment, mode=args.mode,
+    )
+    _print_errors(envelopes)
+    if _failed(envelopes) or not envelopes:
+        return EXIT_FAILED
+    attachment = envelopes[-1]["payload"]["attachment"]
+    print(f"{attachment['id']}  mode={attachment['mode']}")
+    return EXIT_OK
+
+
+async def cmd_attachments_list(runtime: Runtime, args: argparse.Namespace) -> int:
+    session_id = await _session_for(runtime, args)
+    if session_id is None:
+        return EXIT_FAILED
+    envelopes = await call(
+        runtime, "ListAttachments", verbose=args.verbose, session=session_id,
+    )
+    _print_errors(envelopes)
+    if _failed(envelopes) or not envelopes:
+        return EXIT_FAILED
+    rows = envelopes[-1]["payload"]["attachments"]
+    if not rows:
+        print("(nothing attached)")
+        return EXIT_OK
+    print(f"{'id':<38}{'mode':<11}source")
+    for row in rows:
+        print(f"{row['id']:<38}{row['mode']:<11}{row['source_id']}")
+    print(f"\n{len(rows)} attachment(s)")
+    return EXIT_OK
+
+
+async def cmd_task_cancel(runtime: Runtime, args: argparse.Namespace) -> int:
+    """Cancel one task, or the most recent still-active one with
+    `--last`.
+
+    `--last` reads the live TaskManager rather than the `tasks` table:
+    only a live object can be cancelled, and a row for a task belonging
+    to some other process is not something this process can stop. It
+    says so rather than reporting a cancel that never happened.
+    """
+    task_id = args.task_id
+    if args.last:
+        active = sorted(runtime.tasks.list_active(), key=lambda t: t.created_at)
+        if not active:
+            print(
+                "error: no active task in this process to cancel "
+                "(a task started by a different process cannot be cancelled from here)",
+                file=sys.stderr,
+            )
+            return EXIT_FAILED
+        task_id = active[-1].id
+    if not task_id:
+        print("error: pass a task id or --last", file=sys.stderr)
+        return EXIT_FAILED
+
+    envelopes = await call(runtime, "CancelTask", verbose=args.verbose, task_id=task_id)
+    _print_errors(envelopes)
+    if _failed(envelopes) or not envelopes:
+        return EXIT_FAILED
+    accepted = envelopes[-1]["payload"].get("accepted")
+    print(f"cancel {task_id}: {'accepted' if accepted else 'not accepted (already finished?)'}")
+    return EXIT_OK
+
+
 async def cmd_tasks_list(runtime: Runtime, args: argparse.Namespace) -> int:
-    """Reads the durable rows, not TaskManager's in-memory dict -- a
-    fresh CLI process has no in-memory tasks, and the whole point of §3
-    is that the answer outlives the process that produced it."""
-    rows = await runtime.task_repo.list_recent(limit=args.limit)
+    """`tasks.list(scope)` -- running + queued + recent, across all
+    sessions (B12).
+
+    Goes through ListTasks rather than reading `task_repo` directly, as
+    it did before B12. The handler merges the live TaskManager objects
+    over the durable rows, and only the live objects know that a task is
+    QUEUED rather than running -- the row is a mirror written a moment
+    behind them. Reading the table alone is what would let this command
+    report three tasks as running while the scheduler has one running
+    and two waiting, which is the exact dishonesty B12 exists to remove.
+
+    Caveat worth knowing when reading the output: a *different* process
+    (another `cli.py`, or the backend) has its own TaskManager, and this
+    process cannot see its live objects -- only its rows. Rows say
+    `running` for anything that was running when they were last written.
+    """
+    envelopes = await call(
+        runtime, "ListTasks", verbose=args.verbose,
+        scope=args.scope, limit=args.limit,
+    )
+    _print_errors(envelopes)
+    if _failed(envelopes) or not envelopes:
+        return EXIT_FAILED
+    rows = envelopes[-1]["payload"]["tasks"]
     if not rows:
         print("(no tasks recorded)")
         return EXIT_OK
-    print(f"{'id':<38}{'kind':<8}{'status':<11}{'error':<14}{'created':<20}finished")
+    print(
+        f"{'id':<38}{'kind':<8}{'state':<11}{'agent':<12}{'error':<14}"
+        f"{'created':<20}finished"
+    )
     for row in rows:
         print(
-            f"{row['id']:<38}{row['kind']:<8}{row['status']:<11}"
-            f"{(row['error_code'] or '-'):<14}{_ts(row['created_at']):<20}"
-            f"{_ts(row['finished_at'])}"
+            f"{row['id']:<38}{row['kind']:<8}{row['state']:<11}"
+            f"{(row['agent'] or '-'):<12}{(row['error_code'] or '-'):<14}"
+            f"{_ts(row['created_at']):<20}{_ts(row['finished_at'])}"
         )
-    print(f"\n{len(rows)} task(s)")
+    running = sum(1 for r in rows if r["state"] == "running")
+    queued = sum(1 for r in rows if r["state"] == "queued")
+    print(f"\n{len(rows)} task(s) -- {running} running, {queued} queued")
     return EXIT_OK
 
 
@@ -1045,6 +1276,14 @@ def build_parser() -> argparse.ArgumentParser:
         "--project", dest="project_id", default=None,
         help="project id (from `project init`) -- the root file tools are guarded against",
     )
+    new.add_argument(
+        "--path", default=".",
+        help="where to look for a project when --project is not given (default: cwd)",
+    )
+    new.add_argument(
+        "--no-project", dest="no_project", action="store_true",
+        help="create the session with no project, even inside one",
+    )
     listing = session.add_parser("list", help="list sessions", parents=[common])
     listing.add_argument("--all", action="store_true", help="include archived")
 
@@ -1059,6 +1298,10 @@ def build_parser() -> argparse.ArgumentParser:
     send = sub.add_parser("send", help="send a message and stream the reply", parents=[common])
     send.add_argument("text")
     send.add_argument("--session", default=None, help="existing session id")
+    send.add_argument(
+        "--agent", default=None,
+        help="explicit agent override; wins over an @agent parsed from the text",
+    )
     send.add_argument("--cancel-after", type=float, default=None, metavar="SECONDS")
     send.add_argument("--timeout", type=float, default=180.0)
     send.add_argument(
@@ -1100,8 +1343,64 @@ def build_parser() -> argparse.ArgumentParser:
     tasks = sub.add_parser("tasks", help="task operations", parents=[common]).add_subparsers(
         dest="tasks_command", required=True
     )
-    tasks_list = tasks.add_parser("list", help="list recorded tasks", parents=[common])
+    tasks_list = tasks.add_parser(
+        "list", help="list running, queued and recent tasks", parents=[common]
+    )
     tasks_list.add_argument("--limit", type=int, default=20)
+    tasks_list.add_argument(
+        "--scope", choices=("all", "active"), default="all",
+        help="all (default) or active (running + queued only)",
+    )
+
+    task = sub.add_parser("task", help="one task", parents=[common]).add_subparsers(
+        dest="task_command", required=True
+    )
+    task_cancel = task.add_parser("cancel", help="cancel a running or queued task", parents=[common])
+    task_cancel.add_argument("task_id", nargs="?", default=None)
+    task_cancel.add_argument(
+        "--last", action="store_true",
+        help="cancel the most recent active task in THIS process",
+    )
+
+    # Attachments (B12). `--session` defaults to the most recently
+    # updated session, because an attachment is something you do to the
+    # conversation you are already having.
+    attach = sub.add_parser("attach", help="attach a file to a session", parents=[common])
+    attach.add_argument("file", help="path to attach; \\ and / are both accepted")
+    attach.add_argument("--session", default=None)
+    attach.add_argument(
+        "--mode", choices=("full", "reference", "detached"), default=None,
+        help="default: the agent's default_attach_mode",
+    )
+    # No --allow-outside here. An attachment is guarded under the
+    # SESSION's project and the config key `project.allow_outside_project`
+    # -- the same two things the context builder will use at send time.
+    # A per-command override would let `attach` report a cost the builder
+    # then refuses to spend, which is the one thing the estimate exists
+    # to prevent.
+    attach.add_argument(
+        "--preview", action="store_true",
+        help="take the offered fallback: first 200 lines, or a directory listing",
+    )
+
+    detach = sub.add_parser(
+        "detach", help="remove an attachment binding (never deletes the file)", parents=[common]
+    )
+    detach.add_argument("attachment", help="attachment id")
+    detach.add_argument("--session", default=None)
+
+    set_mode = sub.add_parser("set-mode", help="change an attachment's mode", parents=[common])
+    set_mode.add_argument("attachment", help="attachment id")
+    set_mode.add_argument("mode", choices=("full", "reference", "detached"))
+    set_mode.add_argument("--session", default=None)
+
+    attachments = sub.add_parser(
+        "attachments", help="attachment operations", parents=[common]
+    ).add_subparsers(dest="attachments_command", required=True)
+    attachments_list = attachments.add_parser(
+        "list", help="what is attached to a session", parents=[common]
+    )
+    attachments_list.add_argument("--session", default=None)
 
     # B11's agent_proposals stopgap -- not B13's eventual full `memory`
     # surface (accept/reject/edit/bind/unbind/forget/search).
@@ -1214,6 +1513,12 @@ def main(argv: Optional[list[str]] = None) -> int:
         ("project", "list-files"): cmd_project_list_files,
         ("project", "read-file"): cmd_project_read_file,
         ("project", "check-stale"): cmd_project_check_stale,
+        # Attachments and single-task cancel (B12).
+        ("attach", None): cmd_attach,
+        ("detach", None): cmd_detach,
+        ("set-mode", None): cmd_set_mode,
+        ("attachments", "list"): cmd_attachments_list,
+        ("task", "cancel"): cmd_task_cancel,
     }
     # "project lock <verb>" is a third level of subcommand, one deeper
     # than the (command, X_command) shape every other tree uses.

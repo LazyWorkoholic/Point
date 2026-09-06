@@ -29,7 +29,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional, Union
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 # Applied to every connection, here and in database/connection.py.
 #   WAL          -- 12 makes shared-WAL the basis of SSH topology B, and
@@ -334,6 +334,39 @@ CREATE INDEX IF NOT EXISTS idx_agent_proposals_status  ON agent_proposals(status
 """
 
 
+# ---------------------------------------------------------------------------
+# v5 -- B12's terminal-outcome columns on `messages`.
+#
+# Real columns, not JSON inside `metadata`. Everything about how a reply
+# ENDED is what a reloaded session has to re-render: a footer, a
+# collapsed slot, an "interrupted" marker. F5 reconstructs those from
+# these rows, and a value buried in a JSON blob is one that cannot be
+# filtered, indexed, or read by a `sqlite3` one-liner during triage.
+# `interrupted` in particular already existed as `metadata.interrupted`
+# (B5); it is promoted here rather than duplicated, and the writer stops
+# putting it in the blob.
+#
+#   interrupted  1 when the reply stopped before the model was finished.
+#                Redundant with `outcome != 'done'` by construction, and
+#                kept anyway: B5 shipped the concept, F5 already reads
+#                it, and a boolean is the cheap answer to the cheap
+#                question.
+#   outcome      done | cancelled | failed | timed_out | bounds_exceeded.
+#                NULL only on rows written before this migration -- the
+#                honest value for "this predates the marker", which is
+#                not the same claim as `done`.
+#   error_code   The slug from TaskResult.code (`bounds_exceeded`,
+#                `tool_timeout`, ...), mirrored beside the outcome so a
+#                reader does not have to join `tasks` to know why.
+# ---------------------------------------------------------------------------
+
+_V5 = """
+ALTER TABLE messages ADD COLUMN interrupted INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE messages ADD COLUMN outcome     TEXT;
+ALTER TABLE messages ADD COLUMN error_code  TEXT;
+"""
+
+
 @dataclass(frozen=True)
 class Migration:
     version: int
@@ -346,6 +379,7 @@ MIGRATIONS: tuple[Migration, ...] = (
     Migration(2, "tasks, projects, agents, memory, nullable session provider/model", _V2),
     Migration(3, "tool_calls ledger", _V3),
     Migration(4, "agent_proposals (B11 stopgap, not memory_records)", _V4),
+    Migration(5, "message terminal outcome: interrupted, outcome, error_code", _V5),
 )
 
 

@@ -70,6 +70,21 @@ class SessionManager:
         await self._ensure_exists(session_id)
         await self._repo.update_fields(session_id, {"provider": provider, "model": model})
 
+    async def set_project(self, session_id: str, project_id: str) -> None:
+        """Bind a session to a project (B12).
+
+        `project_id` was write-once-at-CreateSession until now, which
+        left a session created outside a project permanently unable to
+        attach anything: every attachment is guarded against
+        `session.project_id`, and there was no way to give it one.
+
+        The counterpart of `set_provider`, and deliberately the same
+        shape -- a column the session owns, changed through the manager
+        that owns the session.
+        """
+        await self._ensure_exists(session_id)
+        await self._repo.update_fields(session_id, {"project_id": project_id})
+
     async def unarchive(self, session_id: str) -> None:
         await self._ensure_exists(session_id)
         await self._repo.update_fields(

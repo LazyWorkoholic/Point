@@ -28,7 +28,14 @@ ERROR_BACKEND_DIED = "backend_died"
 
 # A row in one of these at startup is a corpse: a task cannot survive the
 # process that ran it.
-LIVE_STATUSES = ("pending", "running")
+#
+# B12 added `queued`, and it belongs here for the same reason the other
+# two do -- more so, in fact. A queued task never started, so nothing
+# will ever move it out of `queued` on its own; without this entry a
+# backend crash would leave rows claiming to be waiting for a slot in a
+# scheduler that no longer exists, and `tasks list` would report them as
+# pending work forever.
+LIVE_STATUSES = ("pending", "queued", "running")
 
 _UPSERT = """
 INSERT INTO tasks

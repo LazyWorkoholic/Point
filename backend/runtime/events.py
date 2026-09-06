@@ -78,6 +78,12 @@ class IncomingEventType(str, Enum):
     RELEASE_FILE_LOCK = "ReleaseFileLock"
     TAKE_OVER_FILE_LOCK = "TakeOverFileLock"
     CHECK_FILE_STALE = "CheckFileStale"
+    # Attachments (B12). B8 built the read half; these are the writes.
+    ATTACH_CONTEXT = "AttachContext"
+    DETACH_CONTEXT = "DetachContext"
+    SET_ATTACHMENT_MODE = "SetAttachmentMode"
+    LIST_ATTACHMENTS = "ListAttachments"
+    RESOLVE_ATTACHMENT = "ResolveAttachment"
 
 
 @dataclass(frozen=True)
@@ -174,6 +180,11 @@ class OutgoingEventType(str, Enum):
     FILE_LOCK_RESULT = "FileLockResult"
     FILE_LOCK_RELEASED = "FileLockReleased"
     FILE_STALE_RESULT = "FileStaleResult"
+    # Attachments (B12).
+    ATTACHMENT = "Attachment"
+    ATTACHMENT_LIST = "AttachmentList"
+    ATTACHMENT_DETACHED = "AttachmentDetached"
+    ATTACHMENT_RESOLUTION = "AttachmentResolution"
     # Connection-level, caused by no request: corr_id is null on both.
     HELLO = "hello"
     PING = "ping"

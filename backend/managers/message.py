@@ -41,6 +41,23 @@ usage       -> TokenUsage for this message. Zero/unset until Episode 5
                billing) needs to change when real numbers start
                flowing through it.
 
+outcome     -> How this message ENDED, one of Outcome's five values
+               (B12). NULL only on rows written before migration v5 --
+               "this predates the marker", which is deliberately not
+               the same claim as `done`. A real column, not a
+               `metadata` key: F5 rebuilds a footer or a collapsed
+               slot from it on reload, and a value inside a JSON blob
+               cannot be filtered or read during triage.
+interrupted -> True when the reply stopped before the model was
+               finished. Redundant with `outcome != DONE` by
+               construction; kept because B5 shipped the concept and
+               a boolean is the cheap answer to the cheap question.
+               Was `metadata["interrupted"]` until B12 promoted it --
+               it is no longer written to the dict as well.
+error_code  -> The slug from TaskResult.code, mirrored beside the
+               outcome so a reader never has to join `tasks` to learn
+               why a reply ended the way it did.
+
 invocation  -> InvocationMetadata. Kept as its own typed field rather
                than stuffed into the generic `metadata` dict, because
                "which workspace/capability/agent/provider/model
@@ -174,6 +191,35 @@ class TokenUsage:
         )
 
 
+class Outcome(str, Enum):
+    """How a reply ended (B12).
+
+    The whole point is that a transcript must never assert an answer
+    finished when it did not. Before B12 a cancelled reply kept its
+    partial text with an `interrupted` flag and nothing else, so a
+    failure, a timeout, and a loop that stopped at its bounds were all
+    indistinguishable from each other -- and a run that produced text
+    before dying was indistinguishable from a complete answer.
+
+    `timed_out` and `bounds_exceeded` are split even though both come
+    from the same BoundsExceededError, because they mean different
+    things to a reader: `timed_out` is "this took too long", which
+    invites retrying it; `bounds_exceeded` is "this agent was allowed
+    N steps and used them", which invites raising the bound. The
+    exception's own `bound` attribute is what separates them.
+    """
+
+    DONE = "done"
+    CANCELLED = "cancelled"
+    FAILED = "failed"
+    TIMED_OUT = "timed_out"
+    BOUNDS_EXCEEDED = "bounds_exceeded"
+
+    @property
+    def is_clean(self) -> bool:
+        return self is Outcome.DONE
+
+
 @dataclass
 class InvocationMetadata:
     """Answers "which workspace/capability/agent/provider/model
@@ -229,6 +275,11 @@ class Message:
     metadata: dict[str, Any] = field(default_factory=dict)
     invocation: Optional[InvocationMetadata] = None
     usage: TokenUsage = field(default_factory=TokenUsage)
+    # B12's terminal marker. Defaults say "nothing has ended yet",
+    # which is the correct state for a message being built.
+    outcome: Optional[Outcome] = None
+    interrupted: bool = False
+    error_code: Optional[str] = None
 
     @staticmethod
     def new(
@@ -241,6 +292,9 @@ class Message:
         invocation: Optional[InvocationMetadata] = None,
         usage: Optional[TokenUsage] = None,
         message_id: Optional[str] = None,
+        outcome: Optional[Outcome] = None,
+        interrupted: bool = False,
+        error_code: Optional[str] = None,
     ) -> "Message":
         if content is None:
             content = MessageContent.from_text(text or "")
@@ -253,6 +307,9 @@ class Message:
             metadata=metadata or {},
             invocation=invocation,
             usage=usage or TokenUsage(),
+            outcome=outcome,
+            interrupted=interrupted,
+            error_code=error_code,
         )
         message.validate()
         return message
@@ -289,6 +346,9 @@ class Message:
             "metadata": self.metadata,
             "invocation": self.invocation.to_dict() if self.invocation else None,
             "usage": self.usage.to_dict(),
+            "outcome": self.outcome.value if self.outcome else None,
+            "interrupted": self.interrupted,
+            "error_code": self.error_code,
         }
 
     @staticmethod
@@ -303,6 +363,9 @@ class Message:
             metadata=d.get("metadata", {}),
             invocation=InvocationMetadata.from_dict(d.get("invocation")),
             usage=TokenUsage.from_dict(d.get("usage")),
+            outcome=Outcome(d["outcome"]) if d.get("outcome") else None,
+            interrupted=bool(d.get("interrupted", False)),
+            error_code=d.get("error_code"),
         )
         message.validate()
         return message

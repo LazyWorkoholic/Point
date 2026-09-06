@@ -22,6 +22,20 @@ from typing import Any, AsyncIterator, Awaitable, Callable, Optional
 
 class TaskState(str, Enum):
     PENDING = "pending"
+    # Admitted, not yet started: every lane this task needs is full
+    # (B12). New in B12 -- B12's own spec called this "the existing B1
+    # state", which was wrong; B1 shipped PENDING/RUNNING/COMPLETED/
+    # FAILED/CANCELLED and nothing between "created" and "running".
+    #
+    # PENDING and QUEUED are not the same thing and are not merged.
+    # PENDING is the sub-millisecond gap between construction and the
+    # event loop getting a turn -- nobody waits on it and nothing shows
+    # it. QUEUED is a real, user-visible, possibly-minutes-long wait
+    # that the UI must be able to display and the user must be able to
+    # cancel out of. Collapsing them would make "is this thing actually
+    # running?" unanswerable, which is the exact dishonesty this
+    # episode exists to remove.
+    QUEUED = "queued"
     RUNNING = "running"
     COMPLETED = "completed"
     FAILED = "failed"
@@ -143,11 +157,21 @@ class Task:
             # still knows nothing about tools: it copies an attribute if
             # it is there and leaves it None if it is not.
             code = getattr(exc, "code", None)
+            # B12: `bound` rides beside `code` by the same rule -- copied
+            # off the exception if it is there, ignored if it is not.
+            # BoundsExceededError is raised for max_steps, max_tool_calls
+            # AND timeout_s, but a reader has to tell "this took too
+            # long" (retry it) from "this agent was allowed N steps and
+            # used them" (raise the bound). `code` alone cannot say
+            # which; `bound` can.
+            bound = getattr(exc, "bound", None)
             self.state = TaskState.FAILED
             self.result = TaskResult(state=TaskState.FAILED, error=str(exc), code=code)
             self.finished_at = self.result.finished_at
             await self._record()
-            await self._sink(self, {"type": "failed", "error": str(exc), "code": code})
+            await self._sink(
+                self, {"type": "failed", "error": str(exc), "code": code, "bound": bound}
+            )
 
     async def _record(self) -> None:
         """Mirror the current state to durable storage, if anyone asked
@@ -171,6 +195,18 @@ class Task:
         `pending` until the next startup buried it. That case is recorded
         here.
         """
+        if self._asyncio_task is None and self.state is TaskState.QUEUED:
+            # B12: "queued turns are cancellable before they start."
+            # `_run()` will never execute for this task, so nothing else
+            # will ever write its terminal state or emit its terminal
+            # event -- both happen here instead. The scheduler skips it
+            # on the next pump because it is no longer QUEUED.
+            self.state = TaskState.CANCELLED
+            self.result = TaskResult(state=TaskState.CANCELLED)
+            self.finished_at = self.result.finished_at
+            self._record_soon()
+            self._emit_soon({"type": "cancelled"})
+            return True
         if self._asyncio_task is None or self._asyncio_task.done():
             return False
         self._asyncio_task.cancel()
@@ -180,6 +216,17 @@ class Task:
             self.finished_at = self.result.finished_at
             self._record_soon()
         return True
+
+    def _emit_soon(self, chunk: dict[str, Any]) -> None:
+        """Fire-and-forget sink call for a task whose `_run()` never
+        executes. Only the cancelled-while-queued path uses it: every
+        other terminal event is emitted from inside `_run()`, and there
+        is exactly one of them per task either way.
+        """
+        try:
+            asyncio.get_running_loop().create_task(self._sink(self, chunk))
+        except RuntimeError:
+            pass  # no loop running: nobody is listening either
 
     def _record_soon(self) -> None:
         """Fire-and-forget variant of _record() for synchronous callers."""
@@ -191,7 +238,11 @@ class Task:
             pass  # no loop running: nothing is streaming either
 
     def is_active(self) -> bool:
-        return self.state in (TaskState.PENDING, TaskState.RUNNING)
+        """QUEUED counts as active (B12). A queued task is work the user
+        has asked for and has not got yet -- excluding it would make
+        `active_task_count` under-report, let `sweep_finished` drop a
+        task that has not run, and let shutdown skip cancelling it."""
+        return self.state in (TaskState.PENDING, TaskState.QUEUED, TaskState.RUNNING)
 
     async def wait(self) -> None:
         """Wait for `_run()` to actually finish -- not just for

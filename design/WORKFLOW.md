@@ -557,7 +557,7 @@ land on here.
 
 **Paste:**
 ```
-Read CLAUDE.md and design/tasks/frontend/S10b-b12-verify-f5-pairing.md.
+Read CLAUDE.md and design/tasks/frontend/S11b-b12-verify-f5-pairing.md.
 
 B12 must be complete and its gate passed first. Pair on task_id only --
 never adjacency, ordering, or timing. Frontend only; every backend field

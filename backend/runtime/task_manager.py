@@ -8,9 +8,10 @@ create_task().
 
 from __future__ import annotations
 
-from typing import Optional
+from typing import Iterable, Optional
 
 from runtime.errors import TaskNotFoundError
+from runtime.scheduler import LaneKey, TaskScheduler
 from runtime.task import EventSink, Task, TaskBody, TaskRecorder
 
 
@@ -20,9 +21,19 @@ class TaskManager:
     written through the optional `recorder` -- not a replacement for it,
     and not a second lifecycle."""
 
-    def __init__(self, recorder: Optional[TaskRecorder] = None) -> None:
+    def __init__(
+        self,
+        recorder: Optional[TaskRecorder] = None,
+        scheduler: Optional[TaskScheduler] = None,
+    ) -> None:
         self._tasks: dict[str, Task] = {}
         self._recorder = recorder
+        # B12. TaskManager still owns lifetime; the scheduler owns only
+        # *when* a task may begin. Optional so a TaskManager built
+        # without one behaves exactly as it did before B12 -- every task
+        # starts immediately, which is also what happens with a
+        # scheduler and no lanes.
+        self.scheduler = scheduler or TaskScheduler()
 
     def create_task(
         self,
@@ -32,16 +43,25 @@ class TaskManager:
         sink: EventSink,
         task_id: Optional[str] = None,
         agent_id: Optional[str] = None,
+        lanes: Iterable[LaneKey] = (),
     ) -> Task:
-        """Create, register, and start a new task. Never blocks the caller."""
+        """Create, register, and submit a new task. Never blocks the caller.
+
+        B12: "start" became "submit". A task with no `lanes` still
+        starts immediately -- a task that names lanes starts when they
+        all have room, and sits in QUEUED until then. The caller is what
+        decides which lanes a task belongs to, because TaskManager
+        deliberately does not know what a provider or a session is.
+        """
         task = Task(body=body, session_id=session_id, kind=kind, sink=sink,
                     task_id=task_id, recorder=self._recorder, agent_id=agent_id)
         self._tasks[task.id] = task
-        # The row is scheduled before start(), so the insert reaches the
-        # connection ahead of the first state update. Every write is an
-        # upsert anyway, so ordering is a nicety, not a dependency.
+        # The row is scheduled before the task can start, so the insert
+        # reaches the connection ahead of the first state update. Every
+        # write is an upsert anyway, so ordering is a nicety, not a
+        # dependency.
         task._record_soon()
-        task.start()
+        self.scheduler.submit(task, lanes)
         return task
 
     def get(self, task_id: str) -> Task:

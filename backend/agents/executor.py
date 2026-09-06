@@ -58,7 +58,7 @@ from managers.agent import AgentConfig
 from managers.context import SessionMemoryService
 from managers.editor_context import MODE_FILL, EditorContext
 from managers.memory import Proposal
-from managers.message import Message, ToolMessage, UserMessage
+from managers.message import InvocationMetadata, Message, ToolMessage, UserMessage
 from managers.project import Project
 from managers.project_manager import ProjectManager
 from managers.session import Session
@@ -67,6 +67,7 @@ from providers import retry
 from providers.models import Effort, GenerationRequest, ToolCall
 from providers.registry import ProviderRegistry
 from runtime.errors import BoundsExceededError, InvalidEventError, ToolsUnsupportedError
+from runtime.scheduler import LaneKey, provider_lane, turn_lane
 from runtime.task import EventSink, Task
 from runtime.task_manager import TaskManager
 from streaming.adapter import StreamAdapter
@@ -415,11 +416,42 @@ class AgentExecutor:
             "text": text,
         })
 
-        user_message = UserMessage(session.id, text)
-        await self._sessions.append_message(user_message)
-
+        # B12: the task id is generated BEFORE the user message, and
+        # recorded on it.
+        #
+        # Until now it was generated after (the two lines were the other
+        # way round), so a user message never carried a task_id and only
+        # the assistant reply did. That made a question impossible to
+        # pair with its own answer on reload -- a session with three
+        # questions and three answers has no stored link saying which
+        # answered which, and ordering is not a link the moment anything
+        # runs concurrently, which is the entire premise of this
+        # runtime. It is also the prerequisite for ever telling a retry
+        # apart from a genuine repeat: same text, same session, and only
+        # the task id says whether the user asked twice or the app ran
+        # it twice.
         task_id = str(uuid.uuid4())
         message_id = str(uuid.uuid4())
+
+        user_message = UserMessage(session.id, text, task_id=task_id)
+        await self._sessions.append_message(user_message)
+
+        # Provenance for whatever this task persists (B12). Registered
+        # here, per task, so it is in place before the body can produce
+        # anything -- and so the echo and refusal paths, which never
+        # register a stream, still have an answer to "which agent
+        # produced this".
+        #
+        # A plain turn records the session's current agent rather than
+        # null: B12's own rule is that EVERY message routes through an
+        # agent config, plain chat included, so null would not mean
+        # "no agent" -- it would mean "we did not write it down".
+        self._streams.register_invocation(task_id, InvocationMetadata(
+            workspace=session.workspace,
+            agent=agent.id,
+            provider=resolved_provider,
+            model=model,
+        ))
 
         agent_context = AgentContext(
             config=agent,
@@ -451,6 +483,23 @@ class AgentExecutor:
             )
 
         sink = make_sink(message_id)
+        # B12's two lanes. Every task takes a slot in its provider's
+        # lane; only an INLINE conversational turn also takes the
+        # session's turn lane. That asymmetry is "agent tasks never
+        # enter this queue", expressed as the one line that decides it:
+        # three background research runs can saturate Ollama without
+        # costing the user the ability to ask a question, and a slow
+        # question cannot jump ahead of research already waiting.
+        #
+        # The echo provider is exempt from the provider lane entirely --
+        # it is a local dev path with no resource to contend for, and
+        # capping it would make the mock slower than the real thing.
+        lanes: list[LaneKey] = []
+        if resolved_provider != "echo":
+            lanes.append(provider_lane(resolved_provider))
+        if inline:
+            lanes.append(turn_lane(session.id))
+
         task = self._tasks.create_task(
             body=body_factory,
             session_id=session.id,
@@ -458,6 +507,7 @@ class AgentExecutor:
             sink=sink,
             task_id=task_id,
             agent_id=agent.id,
+            lanes=lanes,
         )
         await self._sessions.set_active_task(session.id, task.id)
         return AgentRun(task=task, message_id=message_id)

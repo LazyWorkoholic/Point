@@ -21,15 +21,25 @@ from database.task_repository import TaskRepository
 from database.tool_call_repository import ToolCallRepository
 from logging_setup import get_logger
 from managers.agent import AgentConfig
+from managers.attachment import MODE_FULL
+from managers.attachment_manager import AttachmentManager
 from managers.context import SessionMemoryService
+from managers.invocation import parse_invocation
 from managers.editor_context import EditorContext
-from managers.message import MessageRole
+from managers.message import MessageRole, Outcome
 from managers.project import Project
 from managers.project_manager import ProjectManager
 from managers.session import Session
 from managers.session_manager import SessionManager
 from runtime.dispatcher import Dispatcher
-from runtime.errors import InvalidEventError, ProjectNotFoundError, RuntimeException, TaskNotFoundError
+from runtime.errors import (
+    AdvancedUnavailableError,
+    InvalidEventError,
+    ProjectNotFoundError,
+    QueueFullError,
+    RuntimeException,
+    TaskNotFoundError,
+)
 from runtime.events import (
     ENVELOPE_VERSION,
     IncomingEvent,
@@ -37,6 +47,7 @@ from runtime.events import (
     OutgoingEvent,
     OutgoingEventType,
 )
+from runtime.scheduler import turn_lane, turn_queue_depth
 from runtime.state import RuntimeState, RuntimeStatus
 from runtime.task import Task
 from runtime.task_manager import TaskManager
@@ -62,6 +73,34 @@ _CORRELATION_LIMIT = 1000
 HEARTBEAT_INTERVAL_S = 5.0
 
 
+def _outcome_for(kind: str, code: Optional[str], bound: Optional[str]) -> Outcome:
+    """Map a terminal chunk to the outcome that gets persisted (B12).
+
+    `bound` is what separates `timed_out` from `bounds_exceeded`. Both
+    arrive as BoundsExceededError with `code="bounds_exceeded"`, but they
+    mean different things to whoever reads the transcript later:
+    `timed_out` says "this took too long", which invites re-running it;
+    `bounds_exceeded` says "this agent was allowed N steps and used
+    them", which invites raising the bound. A single code cannot carry
+    that distinction, which is why `Task._run()` copies the exception's
+    `bound` attribute out beside the code.
+
+    Anything unrecognised falls through to `failed`. That is the honest
+    default: a new error slug nobody has mapped yet is a failure whose
+    kind we do not know, and guessing `done` would be the one answer
+    that is definitely wrong.
+    """
+    if kind == "done":
+        return Outcome.DONE
+    if kind == "cancelled":
+        return Outcome.CANCELLED
+    if code == "bounds_exceeded":
+        return Outcome.TIMED_OUT if bound == "timeout_s" else Outcome.BOUNDS_EXCEEDED
+    if code == "tool_timeout":
+        return Outcome.TIMED_OUT
+    return Outcome.FAILED
+
+
 class Runtime:
     def __init__(self, db_conn: aiosqlite.Connection) -> None:
         self.state = RuntimeState()
@@ -75,6 +114,10 @@ class Runtime:
         # B8: the only way into the context builder's data. The builder
         # never touches SQLite itself.
         self.memory = SessionMemoryService(db_conn)
+        # B12: the write half of attachments (attach/detach/set_mode)
+        # plus the guards and the pre-send cost estimate. B8's
+        # AttachmentRepository stays where it is -- this sits above it.
+        self.attachments = AttachmentManager(db_conn)
         self.dispatcher = Dispatcher()
         self.outbox: asyncio.Queue[OutgoingEvent] = asyncio.Queue(maxsize=1000)
 
@@ -188,6 +231,15 @@ class Runtime:
                     len(active),
                 )
 
+        # B12: the scheduler's lane-release watchers, drained for the
+        # same reason as everything above -- a watcher killed by
+        # `asyncio.run()` returning is one whose `finally` never ran, so
+        # its `_record()`-adjacent work is cut off mid-flight against a
+        # database that is about to close. Nothing is waiting on a slot
+        # by this point (every task was just cancelled), so this is a
+        # short wait in practice.
+        await self.tasks.scheduler.drain()
+
         try:
             await self.db.close()
         except Exception as exc:  # noqa: BLE001
@@ -212,6 +264,11 @@ class Runtime:
         self.dispatcher.register(IncomingEventType.LIST_PROVIDER_MODELS, self._handle_list_provider_models)
         self.dispatcher.register(IncomingEventType.SET_PROVIDER_API_KEY, self._handle_set_provider_api_key)
         self.dispatcher.register(IncomingEventType.SET_SESSION_PROVIDER, self._handle_set_session_provider)
+        self.dispatcher.register(IncomingEventType.ATTACH_CONTEXT, self._handle_attach_context)
+        self.dispatcher.register(IncomingEventType.DETACH_CONTEXT, self._handle_detach_context)
+        self.dispatcher.register(IncomingEventType.SET_ATTACHMENT_MODE, self._handle_set_attachment_mode)
+        self.dispatcher.register(IncomingEventType.LIST_ATTACHMENTS, self._handle_list_attachments)
+        self.dispatcher.register(IncomingEventType.RESOLVE_ATTACHMENT, self._handle_resolve_attachment)
         self.dispatcher.register(IncomingEventType.PROJECT_INIT, self._handle_project_init)
         self.dispatcher.register(IncomingEventType.PROJECT_RESOLVE, self._handle_project_resolve)
         self.dispatcher.register(IncomingEventType.LIST_PROJECT_FILES, self._handle_list_project_files)
@@ -251,10 +308,25 @@ class Runtime:
         try:
             await self.dispatcher.dispatch(event)
         except RuntimeException as exc:
+            # B12: `code` rides beside `error`. `queue_full` in
+            # particular is not a message to show and forget -- the UI
+            # locks its input box on it and has to say why, and a client
+            # that has to regex an English sentence to decide that is a
+            # client coupled to the sentence. Every RuntimeException
+            # subclass that carries a slug exposes it as `code`; the
+            # ones that do not send null, exactly as before.
             await self._emit(OutgoingEvent(
                 type=OutgoingEventType.ERROR,
                 request_id=event.request_id,
-                payload={"error": str(exc)},
+                payload={
+                    "error": str(exc),
+                    "code": getattr(exc, "code", None),
+                    # B12: a refusal that offers a fallback has to carry
+                    # the offer, or the client is left inventing its own
+                    # advice -- which is how a CLI ends up printing a
+                    # flag that no longer exists.
+                    "offer": getattr(exc, "offer", None) or None,
+                },
             ))
 
     # -- session handlers -----------------------------------------------
@@ -599,6 +671,24 @@ class Runtime:
         # session twice, and only one of the two copies would be the one
         # actually sent.
         session = await self.sessions.get(session_id)
+
+        # B12: routing is decided HERE, not in the client. `cli.py` used
+        # to strip its own `@agent` prefix and hand the remainder over as
+        # text, which meant the CLI and a future picker each owned a copy
+        # of the ambiguity rule. One parser, one rule, both callers.
+        invocation = await self._parse_invocation(session, text)
+        if invocation.advanced:
+            # Parsed and refused, which is the whole requirement. The
+            # Invocation already records `advanced=True`, so the day the
+            # capability exists nothing about the parser changes.
+            raise AdvancedUnavailableError()
+        text = invocation.text
+        if invocation.agent and not event.payload.get("agent"):
+            # An explicit `payload["agent"]` still wins: that is a picker
+            # that already resolved a choice, and re-deriving it from
+            # text it may have rewritten would be second-guessing it.
+            event.payload["agent"] = invocation.agent
+
         agent = await self._resolve_agent_for_send(session, event.payload)
         editor_context = _editor_context_from_payload(event.payload.get("editor_context"))
 
@@ -635,6 +725,13 @@ class Runtime:
         # global config means it may still resolve. The executor raises
         # InvalidEventError (-> a clean Error event) only when nothing in
         # that whole chain names a provider/model.
+        # B12's turn queue, checked before a task exists so a refusal is
+        # still a clean answer to the request rather than a task that
+        # dies immediately. Inline turns only: an agent task runs in its
+        # own lane and is explicitly never queued behind conversation.
+        if not is_bounded_loop:
+            self._check_turn_queue(session.id)
+
         run = await self.agent_executor.run(
             session=session,
             text=text,
@@ -669,6 +766,50 @@ class Runtime:
         if override_id:
             return await self.agents.resolve(override_id)  # AgentNotFoundError -> a clean Error event
         return await self.agents.resolve_for_session(session)
+
+    async def _parse_invocation(self, session: Session, text: str):
+        """Parse typed input against the agents that actually exist.
+
+        The agent names are fetched once and handed to the parser as a
+        set, rather than the parser being given the registry: the
+        ambiguity rule ("an exact agent name wins, otherwise it is a
+        path") has to be decidable without I/O, or it becomes a rule
+        that behaves differently under load.
+
+        Matching mirrors `AgentRegistry.resolve()` -- id first, then a
+        case-insensitive name -- so `@research` routes identically
+        whether it arrives here or through the picker.
+        """
+        configs = await self.agents.list()
+        ids = {c.id for c in configs}
+        names = {c.name.lower() for c in configs}
+
+        def is_agent(token: str) -> bool:
+            return token in ids or token.lower() in names
+
+        return parse_invocation(text, is_agent=is_agent)
+
+    def _check_turn_queue(self, session_id: str) -> None:
+        """One conversational turn in flight per session, plus
+        `chat.queue_depth` waiting. Beyond that, `queue_full`.
+
+        A rejection rather than a silent drop, and rather than a third
+        reply streaming into the same transcript: a rejected send leaves
+        the user holding text they can resend, while a dropped one
+        leaves them believing they asked something they did not. The UI
+        locks its input on the `queue_full` code and shows the reason.
+        """
+        lane = turn_lane(session_id)
+        depth = turn_queue_depth()
+        occupancy = self.tasks.scheduler.occupancy(lane)
+        ceiling = 1 + depth
+        if occupancy >= ceiling:
+            raise QueueFullError(
+                f"This session already has {occupancy} turn(s) in flight or "
+                f"queued (limit {ceiling}: one streaming plus chat.queue_depth "
+                f"= {depth} waiting). Wait for one to finish, or cancel it.",
+                depth=depth, in_flight=occupancy,
+            )
 
     async def _build_reference_index(self, session: Session, agent: AgentConfig) -> Optional[str]:
         """Research's memory-first behaviour (B11), the half that needs
@@ -729,17 +870,259 @@ class Runtime:
         ))
 
     async def _handle_list_tasks(self, event: IncomingEvent) -> None:
-        tasks = self.tasks.list_all()
+        """`tasks.list(scope)` -- running + queued + recent, **across all
+        sessions** (B12).
+
+        Across all sessions is not a convenience: the frontend root owns
+        this list globally, so a per-session answer would force it to fan
+        out one request per session and stitch the results, and the
+        stitched view would be inconsistent by construction.
+
+        Live objects first, durable rows second. `TaskManager._tasks` is
+        the source of truth for anything running or queued -- the `tasks`
+        table is a mirror written a moment behind it -- so a live task
+        wins over its own row wherever both exist. `recent` is the only
+        thing the table answers alone, because a finished task's object
+        is eventually swept while its row is not.
+
+        scope: `all` (default) | `active` (running + queued only).
+        """
+        scope = event.payload.get("scope", "all")
+        if scope not in ("all", "active"):
+            raise InvalidEventError(
+                f"ListTasks scope must be 'all' or 'active', got {scope!r}"
+            )
+        limit = int(event.payload.get("limit", 50))
+
+        live = self.tasks.list_all()
+        entries = [
+            {
+                "id": t.id,
+                "kind": t.kind,
+                "state": t.state.value,
+                "session": t.session_id,
+                "agent": t.agent_id,
+                "created_at": t.created_at,
+                "started_at": t.started_at,
+                "finished_at": t.finished_at,
+                "error_code": t.result.code if t.result else None,
+                "live": True,
+            }
+            for t in live
+            if scope == "all" or t.is_active()
+        ]
+
+        if scope == "all":
+            seen = {entry["id"] for entry in entries}
+            for row in await self.task_repo.list_recent(limit=limit):
+                if row["id"] in seen:
+                    continue
+                entries.append({
+                    "id": row["id"],
+                    "kind": row["kind"],
+                    "state": row["status"],
+                    "session": row["session_id"],
+                    "agent": row["agent_id"],
+                    "created_at": row["created_at"],
+                    "started_at": row["started_at"],
+                    "finished_at": row["finished_at"],
+                    "error_code": row["error_code"],
+                    "live": False,
+                })
+
+        entries.sort(key=lambda e: e["created_at"] or 0.0, reverse=True)
         await self._emit(OutgoingEvent(
             type=OutgoingEventType.TASK_LIST,
             request_id=event.request_id,
+            payload={"scope": scope, "tasks": entries[:limit]},
+        ))
+
+    # -- attachment handlers (B12) -----------------------------------------
+
+    async def _handle_attach_context(self, event: IncomingEvent) -> None:
+        p = event.payload
+        session_id, session = await self._require_session(p)
+        path = p.get("path")
+        if not path:
+            raise InvalidEventError("AttachContext requires 'path'")
+        project, allow_outside = await self._attachment_scope(session_id)
+        if project is None:
+            project = await self._adopt_project_for(session, path)
+        mode = p.get("mode") or await self._default_attach_mode(session)
+        attachment, resolution = await self.attachments.attach(
+            session_id, path,
+            project=project,
+            mode=mode,
+            allow_outside_project=allow_outside,
+            model=session.model,
+        )
+        await self._emit(OutgoingEvent(
+            type=OutgoingEventType.ATTACHMENT,
+            request_id=event.request_id,
+            session_id=session_id,
             payload={
-                "tasks": [
-                    {"id": t.id, "kind": t.kind, "state": t.state.value, "session": t.session_id}
-                    for t in tasks
-                ]
+                "attachment": attachment.to_dict(),
+                "resolution": resolution.to_dict(),
             },
         ))
+
+    async def _handle_resolve_attachment(self, event: IncomingEvent) -> None:
+        """Guard and price a path WITHOUT attaching it.
+
+        This is what lets a picker show the cost before the user
+        commits -- "attach it and see" is not an acceptable way to find
+        out that a file is 40MB.
+        """
+        p = event.payload
+        session_id, session = await self._require_session(p)
+        path = p.get("path")
+        if not path:
+            raise InvalidEventError("ResolveAttachment requires 'path'")
+        project, allow_outside = await self._attachment_scope(session_id)
+        resolution = self.attachments.resolve(
+            path,
+            project=project,
+            allow_outside_project=allow_outside,
+            mode=p.get("mode") or await self._default_attach_mode(session),
+            model=session.model,
+        )
+        await self._emit(OutgoingEvent(
+            type=OutgoingEventType.ATTACHMENT_RESOLUTION,
+            request_id=event.request_id,
+            session_id=session_id,
+            payload=resolution.to_dict(),
+        ))
+
+    async def _handle_detach_context(self, event: IncomingEvent) -> None:
+        p = event.payload
+        session_id, _session = await self._require_session(p)
+        attachment_id = p.get("attachment")
+        if not attachment_id:
+            raise InvalidEventError("DetachContext requires 'attachment'")
+        attachment = await self.attachments.detach(session_id, attachment_id)
+        await self._emit(OutgoingEvent(
+            type=OutgoingEventType.ATTACHMENT_DETACHED,
+            request_id=event.request_id,
+            session_id=session_id,
+            # `file_deleted: false` is stated rather than implied.
+            # Detach removing a binding and never a file is the
+            # guarantee this command lives or dies on, and a client
+            # should not have to take it on trust from a docstring it
+            # cannot read.
+            payload={"attachment": attachment.to_dict(), "file_deleted": False},
+        ))
+
+    async def _handle_set_attachment_mode(self, event: IncomingEvent) -> None:
+        p = event.payload
+        session_id, _session = await self._require_session(p)
+        attachment_id = p.get("attachment")
+        mode = p.get("mode")
+        if not attachment_id or not mode:
+            raise InvalidEventError("SetAttachmentMode requires 'attachment' and 'mode'")
+        attachment = await self.attachments.set_mode(session_id, attachment_id, mode)
+        await self._emit(OutgoingEvent(
+            type=OutgoingEventType.ATTACHMENT,
+            request_id=event.request_id,
+            session_id=session_id,
+            payload={"attachment": attachment.to_dict()},
+        ))
+
+    async def _handle_list_attachments(self, event: IncomingEvent) -> None:
+        session_id, _session = await self._require_session(event.payload)
+        attachments = await self.attachments.list(session_id)
+        await self._emit(OutgoingEvent(
+            type=OutgoingEventType.ATTACHMENT_LIST,
+            request_id=event.request_id,
+            session_id=session_id,
+            payload={"attachments": [a.to_dict() for a in attachments]},
+        ))
+
+    async def _adopt_project_for(self, session: Session, path: str) -> Optional[Project]:
+        r"""Bind an unbound session to the project the attached file
+        lives in, and return it.
+
+        Without this, `attach` was unusable in the only workflow anyone
+        actually has: `project init`, then `session new`, then `attach` --
+        which refused with "no project is open" even though the project
+        existed and the file was inside it. The project was real; the
+        SESSION had never been told about it, and nothing but
+        `session new --project <uuid>` could tell it.
+
+        Resolving from the FILE rather than from the process's cwd is
+        the important part. `_attachment_scope` exists so the attach-time
+        guard and the send-time guard ask the same question, and the
+        builder asks `session.project_id`. A cwd-resolved project would
+        guard against something the builder will never look at -- which
+        is exactly the bug that made `attach` quote ~718 tokens for a
+        file that then contributed zero.
+
+        Only ever fills a NULL. A session already bound to a project is
+        never re-pointed at another one by attaching a file: that would
+        silently change the root every later tool call is guarded
+        against, which is a security boundary, not a convenience.
+        """
+        if session.project_id:
+            return await self.memory.project(session.id)
+        try:
+            project = await self.projects.resolve(path)
+        except (ProjectNotFoundError, OSError):
+            return None
+        if project is None:
+            # The file is not inside any project. Left unbound on
+            # purpose -- the path guard refuses it a moment later, with
+            # a message naming the real reason.
+            return None
+        await self.sessions.set_project(session.id, project.id)
+        _log.info(
+            "Session %s adopted project %s (%s) from its first attachment",
+            session.id, project.id, project.root_path,
+        )
+        return project
+
+    async def _attachment_scope(self, session_id: str) -> tuple[Optional[Project], bool]:
+        """The project and the outside-project permission an attachment
+        will be resolved under **when the context builder resolves it**.
+
+        Not the caller's choice, and deliberately not a per-request flag.
+        `managers\\context.py` resolves every attachment against the
+        SESSION's project (`SessionMemoryService.project()`) and the
+        config key `project.allow_outside_project` -- so a guard that
+        used anything else here would be answering a different question
+        from the one the builder later asks.
+
+        That mattered in practice, and this is what it looked like:
+        attaching an absolute path with a caller-supplied
+        `allow_outside_project` reported a confident "~718 tokens" and
+        then contributed **zero**, because at send time the same path was
+        refused by the guard with the session's real (empty) scope. The
+        user was shown a cost for something that never entered the
+        request. Now the refusal happens at attach time, where it names
+        the reason and the user can still do something about it.
+        """
+        project = await self.memory.project(session_id)
+        allow_outside = bool(appconfig.config_value("project.allow_outside_project", False))
+        return project, allow_outside
+
+    async def _require_session(self, payload: dict[str, Any]) -> tuple[str, Session]:
+        session_id = payload.get("session")
+        if not session_id:
+            raise InvalidEventError("This event requires 'session'")
+        return session_id, await self.sessions.get(session_id)
+
+    async def _default_attach_mode(self, session: Session) -> str:
+        """The agent's `default_attach_mode`, per B12 -- overridable per
+        invocation by passing `mode` explicitly.
+
+        B9 put the field on AgentConfig and nothing has ever read it;
+        this is the reader. Falls back to `full` when the session's
+        agent cannot be resolved, which is the same answer B8's
+        ContextPolicy already defaults to.
+        """
+        try:
+            agent = await self.agents.resolve_for_session(session)
+        except RuntimeException:
+            return MODE_FULL
+        return agent.default_attach_mode or MODE_FULL
 
     async def _handle_shutdown(self, event: IncomingEvent) -> None:
         self.state.status = RuntimeStatus.STOPPING
@@ -813,14 +1196,22 @@ class Runtime:
                 return
 
             # Terminal states: done / failed / cancelled
+            outcome = _outcome_for(kind, chunk.get("code"), chunk.get("bound"))
+            invocation = self.streams.invocation_for(task.id)
             if self.streams.has_stream(task.id):
                 accumulator = self.streams.get_accumulator(task.id)
                 if kind == "done":
-                    msg = accumulator.finalize()
+                    msg = accumulator.finalize(invocation=invocation)
                 elif kind == "failed":
-                    msg = accumulator.finalize_interrupted("failed", error=chunk.get("error"))
+                    msg = accumulator.finalize_interrupted(
+                        "failed", error=chunk.get("error"),
+                        outcome=outcome, error_code=chunk.get("code"),
+                        invocation=invocation,
+                    )
                 elif kind == "cancelled":
-                    msg = accumulator.finalize_interrupted("cancelled")
+                    msg = accumulator.finalize_interrupted(
+                        "cancelled", outcome=outcome, invocation=invocation,
+                    )
                 else:
                     msg = None
                 if msg is not None:
@@ -833,7 +1224,16 @@ class Runtime:
             else:
                 if kind == "done" and echo_collected:
                     full_reply = "".join(echo_collected)
-                    msg = AssistantMessage(session_id, full_reply, task_id=task.id, message_id=message_id)
+                    # The echo/refusal path persists a reply without ever
+                    # registering a stream, so it needs its provenance
+                    # and its outcome attached here rather than in the
+                    # accumulator. Same row shape either way -- a
+                    # reloaded transcript must not be able to tell which
+                    # code path wrote a message.
+                    msg = AssistantMessage(
+                        session_id, full_reply, task_id=task.id, message_id=message_id,
+                        invocation=invocation, outcome=Outcome.DONE,
+                    )
                     msg = await self.agent_executor.apply_response_middleware(msg)
                     await self.sessions.append_message(msg)
                 # The echo path never registers a stream, but it does draw
@@ -854,7 +1254,15 @@ class Runtime:
             # kept its partial answer -- from a genuine failure, without
             # parsing the message.
             payload = (
-                {"error": chunk.get("error", "unknown error"), "code": chunk.get("code")}
+                {
+                    "error": chunk.get("error", "unknown error"),
+                    "code": chunk.get("code"),
+                    # B12: the same value that was just persisted as the
+                    # message's `outcome`, so a live client and a
+                    # reloaded one render the identical footer without
+                    # either of them deriving it independently.
+                    "outcome": outcome.value,
+                }
                 if kind == "failed" else {}
             )
             await self._emit(OutgoingEvent(

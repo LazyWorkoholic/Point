@@ -65,7 +65,7 @@ and every ordering question becomes exact and cheap.
 
 ## Build
 
-### 1. Migration v5 — `seq` column + composite index
+### 1. Migration v6 — `seq` column + composite index
 
 - New column `messages.seq INTEGER NOT NULL DEFAULT 0`, monotonic **per
   session**.
@@ -77,7 +77,7 @@ and every ordering question becomes exact and cheap.
 - New index: `CREATE INDEX idx_messages_session_seq ON messages(session_id,
   seq)`. **This index is the point of the episode** — without it the keyset
   query degrades to a scan and buys nothing.
-- `SCHEMA_VERSION` → 5.
+- `SCHEMA_VERSION` → 6.
 
 ### 2. Assign `seq` on every new message
 
@@ -149,7 +149,7 @@ and every ordering question becomes exact and cheap.
 
 ## Done when
 
-1. `uv run python cli.py migrate` brings a v4 database to v5, backfilling `seq`
+1. `uv run python cli.py migrate` brings a v5 database to v6, backfilling `seq`
    per session in `created_at` order, with a backup taken first.
 2. `seed-session --messages 10000` produces rows with strictly increasing `seq`
    within the session.
@@ -164,7 +164,7 @@ and every ordering question becomes exact and cheap.
    and mid-history.
 6. `EXPLAIN QUERY PLAN` on the keyset query shows it using
    `idx_messages_session_seq`, not a scan.
-7. `SCHEMA_VERSION == 5`; a fresh database and a migrated one end identical.
+7. `SCHEMA_VERSION == 6`; a fresh database and a migrated one end identical.
 
 ---
 
@@ -181,7 +181,7 @@ New-Item -ItemType Directory -Force "$scratch\roaming","$scratch\local" | Out-Nu
 $env:APPDATA = "$scratch\roaming"; $env:LOCALAPPDATA = "$scratch\local"
 
 cd D:\Projects\Point\backend
-uv run python cli.py migrate           # 1 -> 5, backup taken
+uv run python cli.py migrate           # 1 -> 6, backup taken
 uv run python cli.py seed-session --messages 10000
 
 # seq is strictly increasing, no gaps that break ordering

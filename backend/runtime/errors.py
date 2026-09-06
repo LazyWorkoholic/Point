@@ -165,3 +165,76 @@ class BoundsExceededError(ToolError):
         self.bound = bound
         self.limit = limit
         super().__init__(message)
+
+
+# ---------------------------------------------------------------------------
+# B12 -- routing, attachments, admission.
+#
+# Each of these carries a `code` for the same reason B10's ToolError
+# subclasses do: the UI has to branch on WHY it was refused (lock the
+# input box with a reason vs. show an inline refusal vs. offer a
+# fallback), and branching on the wording of a sentence is how a UI ends
+# up coupled to a sentence. `Runtime._emit`'s Error payload carries the
+# code alongside the human string.
+# ---------------------------------------------------------------------------
+
+class AdvancedUnavailableError(RuntimeException):
+    """`--advanced` was parsed and refused (B12).
+
+    Parsed, not ignored: a flag that silently does nothing is worse than
+    one that says it does nothing, because the user has no way to tell
+    which of the two they are looking at. The Invocation records
+    `advanced=True` and this is raised at the boundary -- so the day the
+    capability exists, the parser does not change at all.
+    """
+
+    code = "advanced_unavailable"
+
+    def __init__(self, message: str = "advanced capabilities are not available yet") -> None:
+        super().__init__(message)
+
+
+class QueueFullError(RuntimeException):
+    """The session's conversational turn queue is at `chat.queue_depth`
+    (B12).
+
+    A rejection, not a silent drop, and not a fourth turn quietly
+    running concurrently: the UI locks its input box on this code and
+    shows the reason. `depth` and `in_flight` ride as attributes so the
+    reason can name real numbers.
+    """
+
+    code = "queue_full"
+
+    def __init__(self, message: str, *, depth: int = 0, in_flight: int = 0) -> None:
+        self.depth = depth
+        self.in_flight = in_flight
+        super().__init__(message)
+
+
+class AttachmentRefusedError(RuntimeException):
+    """An attachment failed one of B12's guards -- too large, binary, a
+    directory, or outside the project.
+
+    `reason` is a slug (`too_large`, `binary`, `is_directory`,
+    `path_denied`) and `offer` is the fallback the refusal came with
+    ("first 200 lines", "a file listing") when there is one. The episode's
+    rule is that every guard returns a reason, not a traceback; this is
+    the shape that promise takes.
+    """
+
+    code = "attachment_refused"
+
+    def __init__(
+        self, message: str, *, reason: str = "", offer: str = "",
+    ) -> None:
+        self.reason = reason
+        self.offer = offer
+        super().__init__(message)
+
+
+class AttachmentNotFoundError(RuntimeException):
+    """Raised when detach/set_mode names an attachment id with no row,
+    or one belonging to a different session."""
+
+    code = "attachment_not_found"
