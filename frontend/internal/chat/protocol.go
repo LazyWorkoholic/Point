@@ -26,6 +26,10 @@ const (
 	queryListSessions queryKind = iota
 	queryGetSession
 	queryCreateSession
+	// queryListTasks is S11b's: the durable task rows a reloaded
+	// transcript joins against to rebuild the footer of a reply that was
+	// never persisted. See reload.go's onTaskList.
+	queryListTasks
 )
 
 // localID mints a request id. protocol.newID does the equivalent job inside
@@ -122,6 +126,15 @@ func (w *Workspace) handleEnvelope(env protocol.Envelope) tea.Cmd {
 			Error string `json:"error"`
 		}
 		_ = env.UnmarshalPayload(&p)
+		if kind == queryListTasks {
+			// NOT w.loadErr. A refused ListTasks costs a footer on a
+			// reply that produced no text; the transcript already on
+			// screen is correct without it. Replacing a loaded session
+			// with an error banner over that would be a far bigger
+			// failure than the one being reported.
+			w.log.Warn("chat: ListTasks refused, reloaded footers not rebuilt", "err", p.Error)
+			return nil
+		}
 		w.loading = false
 		w.loadErr = p.Error
 		if w.loadErr == "" {
@@ -137,6 +150,8 @@ func (w *Workspace) handleEnvelope(env protocol.Envelope) tea.Cmd {
 		w.onSessionCreated(env)
 	case queryGetSession:
 		w.onSession(env)
+	case queryListTasks:
+		w.onTaskList(env)
 	}
 	return nil
 }
@@ -190,10 +205,17 @@ func (w *Workspace) setSession(s wireSession) {
 	w.loadErr = ""
 	w.sessionID = s.ID
 	w.sessionTitle = s.Title
-	// Rendered exactly as the database returned it, in its order, with
-	// nothing merged or relabelled. See chat.go's `all` field for why the
-	// retry-fold that briefly lived here was removed.
-	w.all = s.Messages
+	// Every row the database returned, rendered verbatim — nothing merged,
+	// relabelled or dropped. See chat.go's `all` field for why the
+	// retry-fold that briefly lived here was removed, and stays removed.
+	//
+	// What S11b adds is a REORDER and a decoration, both keyed on B12's
+	// persisted task_id: an answer moves under the question it answered,
+	// and a row that live rendered as a slot or with a footer gets the
+	// entry that renders it that way again. Neither invents a row and
+	// neither reads position, adjacency or time. See reload.go.
+	w.all = pairReloaded(s.Messages)
+	w.decorateReloaded()
 	// F5: live entries and the queue belong to the session that made them.
 	// Nothing switches sessions yet (F6 owns that), but leaving them
 	// attached across a setSession would render one session's stream into
@@ -210,6 +232,9 @@ func (w *Workspace) setSession(s wireSession) {
 	// everything else session-shaped, so a draft never bleeds across
 	// sessions.
 	w.restoreDraft()
+	// Last, and deliberately after the transcript is complete: the tasks
+	// join only decorates, so nothing waits on it. See requestTaskRows.
+	w.requestTaskRows()
 }
 
 // Update is the Workspace interface's entry point. Root's Update forwards

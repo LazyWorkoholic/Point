@@ -559,15 +559,30 @@ land on here.
 ```
 Read CLAUDE.md and design/tasks/frontend/S11b-b12-verify-f5-pairing.md.
 
-B12 must be complete and its gate passed first. Pair on task_id only --
-never adjacency, ordering, or timing. Frontend only; every backend field
-this needs is B12's and must already exist.
+B12 is complete and its gate passed. Pair on task_id only -- never
+adjacency, ordering, or timing. Frontend only; every backend field this
+needs is B12's and already exists.
+
+Note one accepted B12 limitation the spec predates: a task cancelled or
+failed BEFORE its first token persists no assistant message row at all
+(finalize_interrupted returns None for empty text -- an empty message
+fails B3's validation). Its outcome lives on the tasks row only. Rebuild
+that footer by joining the user message's task_id to the tasks row
+(status, error_code, agent_id). Read B12's completed doc for the full
+account before you start.
+
+More generally: this spec was written before B12 was built, so that
+empty-row case is one known place where it and reality diverge. The
+other fields it assumes -- task_id on user messages, invocation.agent,
+terminal outcome -- B12 delivered and I verified by hand. If you find
+anything else the spec assumes that is not true of this repo, stop and
+tell me before writing code rather than working around it. B12's own
+session caught three such assumptions that way (QUEUED not being an
+existing state, the concurrency gate being unrunnable as three separate
+processes, and the gate's SQL not matching the schema), and each one
+changed what got built.
 
 Stop at the verification gate with PowerShell checks.
-
-If anything in this episode's Build section is ambiguous or seems to
-assume something not true of this repo, stop and tell me before writing
-code.
 ```
 
 **You do:** run all four send patterns and restart after each — sequential, queued,
@@ -609,14 +624,20 @@ render as separate questions and name the episode that would add it.
 ```
 Read CLAUDE.md and design/tasks/backend/B18-message-pagination.md.
 
-seq is migration v5, keyset only, GetSession stays unbounded when
-message_limit is omitted. Backend only — do not touch the frontend.
+seq is migration v6 (B12 took v5), keyset only, and GetSession stays
+unbounded when message_limit is omitted -- F3 relies on that path and
+must keep working until F18 replaces it. Backend only; do not touch
+the frontend.
+
+The (session_id, seq) index is the point of the episode -- verify it
+is actually used with EXPLAIN QUERY PLAN rather than by eye.
 
 Stop at the verification gate with PowerShell checks.
 
 If anything in this episode's Build section is ambiguous or seems to
-assume something not true of this repo, stop and tell me before writing
-code.
+assume something not true of this repo, stop and tell me before
+writing code. B12's session caught three such assumptions that way and
+S11b caught two, and every one of them changed what got built.
 ```
 
 **Record:**

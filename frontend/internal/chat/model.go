@@ -18,7 +18,31 @@ type wireMessage struct {
 	Metadata   map[string]any  `json:"metadata"`
 	Invocation *wireInvocation `json:"invocation"`
 	Usage      wireUsage       `json:"usage"`
+
+	// B12's three terminal-outcome columns (migration v5). They are real
+	// columns, not metadata keys, precisely so a reloaded transcript can
+	// re-render the footer a live one showed — see reload.go.
+	//
+	// Outcome is "" ONLY on rows written before v5. That is not the same
+	// claim as "done": SessionRepository._row_to_message leaves it None
+	// rather than defaulting, and reload.go treats the empty string as
+	// "this predates the marker" and renders no footer, rather than
+	// asserting an ending it does not know.
+	Outcome     string `json:"outcome"`
+	Interrupted bool   `json:"interrupted"`
+	ErrorCode   string `json:"error_code"`
 }
+
+// The Outcome vocabulary, transcribed from managers\message.py's Outcome.
+// Plain strings for the same reason the role names below are: an outcome
+// this build does not recognise must render as *something*.
+const (
+	outcomeDone           = "done"
+	outcomeCancelled      = "cancelled"
+	outcomeFailed         = "failed"
+	outcomeTimedOut       = "timed_out"
+	outcomeBoundsExceeded = "bounds_exceeded"
+)
 
 // wireContent mirrors MessageContent.to_dict(). Data is left as a generic map
 // — F3 only reads Text; a structured/tool_result reader is a later episode's

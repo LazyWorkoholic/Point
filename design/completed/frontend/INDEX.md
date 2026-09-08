@@ -17,9 +17,16 @@ it passed.
 | F3 | Chat Viewport | ✅ built + manually verified | `F03-chat-viewport.md` |
 | F4 | Query Input | ✅ built + manually verified | `F04-query-input.md` |
 | F5 | Streaming, Queue, Cancel | ✅ built + manually verified | `F05-streaming-queue.md` |
+| S11b | B12 Verification + F5 Reload Pairing | ✅ built + manually verified | `S11b-b12-verify-f5-pairing.md` |
 | F6–F18 | — | not started | — |
 
 **F1 and F2 were built and verified in one session** (`batchable: yes`).
+
+**S11b is a verification-and-repair session, not a numbered episode.** It ran
+immediately after B12 closed and spent the data B12 added, closing the three
+gaps F5 deferred for lack of it. It is listed here because it changed
+behaviour and carries contracts of its own — it does not consume an F number
+and F6 is still the next episode.
 
 The two contracts the rest of the frontend is built on:
 
@@ -59,6 +66,22 @@ The two contracts the rest of the frontend is built on:
   and the `TextDelta`/`TaskToken` pair for tokens. **F6's task card and
   F9's result card must use these names exactly.** Full table in
   `F05-streaming-queue.md`'s "The two contracts F6 and F9 must use EXACTLY".
+- **The question→answer pairing key** (`chat\reload.go`) — a reloaded
+  transcript groups a user message with the assistant message carrying the
+  **same `task_id`**, and adjacency, arrival order and elapsed time are
+  never used for anything. **F6's task panel and F9's result cards both
+  group messages and must use this same key** — anything keyed on position
+  is wrong the moment two things run at once, which is the premise of this
+  runtime. F5 already tried an adjacency heuristic and deleted it for
+  corrupting correct transcripts. Full account in
+  `S11b-b12-verify-f5-pairing.md`'s "The pairing contract".
+- **The reload-renders-through-live-renderers rule** (`chat\entries.go`'s
+  `histAt`/`liveAt`) — a persisted row that needs a task slot or a terminal
+  footer is decorated with a `liveEntry` and drawn by F5's own
+  `renderTaskEntry`/`liveFooter`, never by a reload-specific renderer. That
+  is what makes "reload looks identical to live" true by construction
+  rather than by discipline. Full account in
+  `S11b-b12-verify-f5-pairing.md`.
 - **`app.StreamAware` / `app.QueueAware`** (`app\stream.go`) — the same
   narrow-interface pattern as `FocusAware` and `DraftFlusher`, for "is
   anything running" (the header animation, which must freeze when idle or
@@ -71,6 +94,16 @@ gap boundary was observed miscounting, traced with no cause found, then
 stopped reproducing on its own. Not blocking, but any episode touching
 `app\paste.go`'s burst timing or the delete path should re-run its exact
 repro.
+
+**F4 carries a second open item, from S11b:** the mode chip recognises
+`@research` only. `agentTokenState` resolves all three built-ins, but
+`currentMode` (`chat\input_render.go:148`) tests `id == "research"`, because
+F4 defined exactly two chips. So `@filler-explainer` routes correctly and
+records its agent while showing no chip at all. Investigated and
+deliberately not fixed in S11b — the fix is a fourth `editorMode`, a
+`modeChipPrefix` entry and a `queryBorderRole` case, all inside F4's query
+input, and it wants F4's own gate rather than a reload session's. Full
+account in `S11b-b12-verify-f5-pairing.md`'s Bug 6.
 
 ## How to add an entry
 

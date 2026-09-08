@@ -24,7 +24,7 @@ const (
 	modeResearch
 )
 
-// knownAgentIDs is a stopgap, not a real registry lookup: the exact three
+// knownAgents is a stopgap, not a real registry lookup: the exact three
 // built-in agent ids backend\agents\builtins.py seeds
 // (GENERAL_AGENT_ID/FILLER_EXPLAINER_AGENT_ID/RESEARCH_AGENT_ID), hardcoded
 // here because there is no protocol command yet to fetch them
@@ -39,11 +39,39 @@ const (
 // `_strip_agent_prefix` already avoids by requiring an EXACT registered
 // agent match. matchedAgentID mirrors that rule as closely as a static map
 // allows.
-var knownAgentIDs = map[string]bool{
-	"general":          true,
-	"filler-explainer": true,
-	"research":         true,
+//
+// S11b widened the VALUE from a bool to a lane, because reload has to decide
+// the lane with no TaskStarted to reconcile against.
+//
+// THE LANE HERE IS A SECOND HARDCODED BACKEND FACT, and a deliberate one.
+// The backend's real rule is `agent.max_steps > 1` (runtime.py's
+// `is_bounded_loop`), ridden out on TaskStarted.background, which F5's own
+// contract makes the sole authority on the lane. `max_steps` is not on the
+// wire and there is no ListAgents to fetch it from, so the one agent that
+// satisfies it — research, at max_steps=8; general and filler-explainer are
+// both max_steps=1 — is written down here instead. The correct long-term
+// rule is "task lane iff the agent is a background agent (max_steps > 1)",
+// read from a real registry. This map stands in for a backend capability
+// that does not exist yet; it is not an oversight. See S11b's completed doc
+// and F8's handoff note.
+var knownAgents = map[string]lane{
+	"general":          laneTurn,
+	"filler-explainer": laneTurn,
+	"research":         laneTask,
 }
+
+// isKnownAgent is the membership half of knownAgents — the only question
+// every pre-S11b caller asked of the bool map this replaced.
+func isKnownAgent(id string) bool {
+	_, ok := knownAgents[id]
+	return ok
+}
+
+// agentLane is the lane an agent's replies belong in. An unknown agent falls
+// to laneTurn (the zero value, and the deliberate default): an inline reply
+// that should have been a slot only loses a fold, while a slot that should
+// have been inline hides a whole answer behind a collapsed one-liner.
+func agentLane(id string) lane { return knownAgents[id] }
 
 // agentTokenState reports how the leading @token relates to the registry:
 // the exact agent it names, or whether it is still a viable prefix of one.
@@ -63,7 +91,7 @@ func agentTokenState(runes []rune, cursor int) (id string, exact bool, viablePre
 	for end < len(runes) && !unicode.IsSpace(runes[end]) {
 		end++
 	}
-	if tok := strings.ToLower(string(runes[1:end])); knownAgentIDs[tok] {
+	if tok := strings.ToLower(string(runes[1:end])); isKnownAgent(tok) {
 		return tok, true, false
 	}
 
@@ -87,10 +115,10 @@ func agentTokenState(runes []rune, cursor int) (id string, exact bool, viablePre
 		}
 	}
 	tok := strings.ToLower(string(typed))
-	if knownAgentIDs[tok] {
+	if isKnownAgent(tok) {
 		return tok, true, false
 	}
-	for known := range knownAgentIDs {
+	for known := range knownAgents {
 		if strings.HasPrefix(known, tok) {
 			return "", false, true // the bare "@" case lands here too
 		}

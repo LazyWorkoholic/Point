@@ -138,7 +138,35 @@ type Workspace struct {
 	// to pair an answer to its question, let alone to tell a retry from a
 	// repeat. B12 is where that data can appear — see this episode's
 	// handoff.
+	//
+	// S11b: B12 supplied it. The rows are still rendered verbatim --
+	// nothing is merged, relabelled or dropped -- but they are now
+	// REORDERED so each answer sits directly under its own question, keyed
+	// on the persisted task_id and on nothing else. See reload.go.
 	all []wireMessage
+
+	// hist is a decoration parallel to `all`, one slot per row: non-nil
+	// where a persisted row renders through F5's LIVE renderers (a
+	// collapsed task slot, or a footer saying how the reply ended) instead
+	// of render.go's plain message path. That reuse is the point: "a
+	// reloaded @research answer is a collapsed slot, identical to live" is
+	// true by construction when both go through renderTaskEntry, and would
+	// be a claim needing its own tests if reload had a renderer of its own.
+	//
+	// Parallel rather than a field on wireMessage, because wireMessage is
+	// the wire's own shape (model.go: a diff against message.py stays a
+	// visual diff) and a liveEntry is UI state -- slotOpen, the render memo
+	// -- with no business round-tripping through a wire struct.
+	//
+	// It may be SHORTER than `all`, and histAt is bounds-safe for exactly
+	// that reason: every test that assigns w.all directly leaves this nil
+	// and gets F3's plain rendering, unchanged.
+	//
+	// Every entry in here is terminal, always. A non-terminal one would
+	// keep Streaming() true forever and re-arm the watchdog tick forever --
+	// the idle-CPU leak F5 records -- so reload.go builds one only from an
+	// ending it can actually name.
+	hist []*liveEntry
 
 	focus  int  // absolute entry index; -1 means "no explicit focus"
 	pinned bool // true: viewport tracks the live bottom

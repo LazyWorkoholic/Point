@@ -82,11 +82,19 @@ adjacency, ordering, or elapsed time.
 
 ### 2. Reconstruct slots from `invocation`
 
-- A reloaded assistant message whose `invocation.agent` names a non-default agent
-  renders as the **collapsed slot** F5 already builds, not as an ordinary
-  message. `o` expands it, `n`/`p` focus it, exactly as in a live session.
-- A plain turn's `invocation.agent` (which B12 records as the session's current
-  agent, never null) must **not** produce a slot — only a non-default agent does.
+- A reloaded assistant message whose `invocation.agent` names a **background
+  agent (`max_steps > 1`)** renders as the **collapsed slot** F5 already builds,
+  not as an ordinary message. `o` expands it, `n`/`p` focus it, exactly as in a
+  live session.
+- Any other agent must **not** produce a slot. This says *background*, not
+  *non-default*: F5's contract makes `TaskStarted.background` — which the
+  backend computes as `agent.max_steps > 1` (`runtime.py`'s `is_bounded_loop`)
+  — the sole authority on the lane, and it overrides the optimistic `@agent`
+  reserve in both directions. Of the three built-ins only `research` qualifies;
+  `general` and `filler-explainer` are both `max_steps=1`, so a
+  `@filler-explainer` reply is an **inline turn** live and must reload as one.
+  A session whose `settings.agent_id` names a background agent conversely runs
+  its *plain* sends in the task lane, and those must reload as slots.
 
 ### 3. Re-attach terminal state from `outcome`
 
@@ -132,7 +140,8 @@ adjacency, ordering, or elapsed time.
    expands it, identical to live.
 3. A reloaded failed / timed-out / bounds-stopped answer carries its correct
    footer, with any partial text preserved.
-4. A reloaded plain answer is **not** a slot, despite carrying an `invocation`.
+4. A reloaded answer from a non-background agent is **not** a slot, despite
+   carrying an `invocation` — `general` and `filler-explainer` both included.
 5. A question whose task produced nothing reloads as a question with no reply —
    present, and not attached to another answer.
 6. No "retried" label appears unless B12 persisted a real retry link.
@@ -170,9 +179,14 @@ Then:
 ```powershell
 # slots and outcomes survive reload
 sqlite3 "$env:LOCALAPPDATA\Point\runtime.db" `
-  "select role, json_extract(content,'$.invocation.agent'), outcome, task_id
+  "select role, json_extract(metadata,'$.invocation.agent'), outcome, task_id
    from messages order by rowid desc limit 8;"
 ```
+`invocation` is read out of the **`metadata`** column, not `content` —
+`session_repository.py` writes it there, and `outcome`/`interrupted`/`error_code`
+are real v5 columns beside it. (This doc originally read `content`; B12's own
+session caught and corrected the identical mistake in its gate.)
+
 **Expect:** user rows carry a `task_id`; assistant rows carry both `task_id` and
 a non-null `invocation.agent`; any non-clean ending carries its `outcome`.
 **Fails if:** any is null — the frontend cannot pair or rebuild from a null, and

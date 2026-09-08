@@ -17,10 +17,12 @@ import (
 // questions, orphaned one answer under the survivor, and labelled a send
 // that was never retried as "retried". It corrupted a correct transcript.
 //
-// Adjacency does not identify a retry, and nothing in the database does:
-// a question carries no task_id (agents\executor.py builds it before one
-// exists), so an answer cannot even be paired to its question. Until that
-// link exists, reload must be a faithful rendering of the rows.
+// Adjacency does not identify a retry, and it never will. B12 has since
+// supplied the one key that CAN pair a question to its answer -- task_id on
+// both sides -- and S11b pairs on that and on nothing else. What this test
+// now locks in is the other half of the same rule: rows carrying NO task_id
+// (every row written before B12's migration) are still rendered exactly as
+// the database returned them, in order, with no fold and no invented label.
 func TestReloadRendersEveryRowVerbatim(t *testing.T) {
 	msg := func(id, role, text string) wireMessage {
 		return wireMessage{ID: id, Role: role, Content: wireContent{Text: text}}

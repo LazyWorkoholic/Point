@@ -271,9 +271,10 @@ const lockReason = "queue full — esc to discard pending"
 
 // splitAgent pulls a leading @agent token off the composed text.
 //
-// It reuses F4's static agent map (input_render.go's knownAgentIDs) — the same
+// It reuses F4's static agent map (input_render.go's knownAgents) — the same
 // stopgap, at a second call site now. Whichever episode adds a real
-// ListAgents query has to replace BOTH; see this episode's handoff.
+// ListAgents query has to replace ALL THREE readers: this one, F4's own
+// agentTokenState, and S11b's reloadLane (reload.go). See F8's handoff note.
 func splitAgent(text string) (agentID, body string) {
 	trimmed := strings.TrimLeft(text, " \t")
 	if !strings.HasPrefix(trimmed, "@") {
@@ -285,7 +286,7 @@ func splitAgent(text string) (agentID, body string) {
 	if cut >= 0 {
 		name = rest[:cut]
 	}
-	if !knownAgentIDs[name] {
+	if !isKnownAgent(name) {
 		return "", text
 	}
 	if cut < 0 {
@@ -732,6 +733,21 @@ func (w *Workspace) retryTarget() *liveEntry {
 	}
 	for i := len(w.live) - 1; i >= 0; i-- {
 		if e := w.live[i]; e.kind == liveReply && e.retryable() {
+			return e
+		}
+	}
+	// S11b: then a reloaded one. AFTER w.live, never before — a live entry
+	// is always the newer of the two, and "the most recent retryable" has
+	// to keep meaning that. This only ever fires in a transcript with no
+	// live sends at all, so it cannot change what ^R picks in a session
+	// that has sent anything.
+	//
+	// It is here because the footer is: a reloaded failure renders
+	// `[Retry ^R]` through liveFooter, and an affordance with no key
+	// behind it is worse than none — F5's own words, and the reason live
+	// has this fallback in the first place.
+	for i := len(w.hist) - 1; i >= 0; i-- {
+		if e := w.hist[i]; e != nil && e.retryable() {
 			return e
 		}
 	}
