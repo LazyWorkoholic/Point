@@ -73,6 +73,25 @@ _CORRELATION_LIMIT = 1000
 HEARTBEAT_INTERVAL_S = 5.0
 
 
+def _parse_optional_int(value: Any, event_name: str, field_name: str) -> Optional[int]:
+    """None passes through untouched -- that is the "not given" case
+    every B18 payload field uses. Anything else must be a real int, or
+    the request is malformed rather than silently coerced."""
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        raise InvalidEventError(f"{event_name} '{field_name}' must be an integer")
+
+
+def _parse_optional_positive_int(value: Any, event_name: str, field_name: str) -> Optional[int]:
+    parsed = _parse_optional_int(value, event_name, field_name)
+    if parsed is not None and parsed <= 0:
+        raise InvalidEventError(f"{event_name} '{field_name}' must be a positive integer")
+    return parsed
+
+
 def _outcome_for(kind: str, code: Optional[str], bound: Optional[str]) -> Outcome:
     """Map a terminal chunk to the outcome that gets persisted (B12).
 
@@ -253,6 +272,7 @@ class Runtime:
         self.dispatcher.register(IncomingEventType.SHUTDOWN, self._handle_shutdown)
         self.dispatcher.register(IncomingEventType.CREATE_SESSION, self._handle_create_session)
         self.dispatcher.register(IncomingEventType.GET_SESSION, self._handle_get_session)
+        self.dispatcher.register(IncomingEventType.SESSION_MESSAGES, self._handle_session_messages)
         self.dispatcher.register(IncomingEventType.LIST_SESSIONS, self._handle_list_sessions)
         self.dispatcher.register(IncomingEventType.RENAME_SESSION, self._handle_rename_session)
         self.dispatcher.register(IncomingEventType.ARCHIVE_SESSION, self._handle_archive_session)
@@ -358,11 +378,53 @@ class Runtime:
         session_id = event.payload.get("session_id")
         if not session_id:
             raise InvalidEventError("GetSession requires 'session_id'")
-        session = await self.sessions.get(session_id, load_messages=True)
+        # B18: optional, additive. Omitted/null keeps today's unbounded
+        # fetch -- the exact path F3 depends on -- untouched.
+        message_limit = _parse_optional_positive_int(
+            event.payload.get("message_limit"), "GetSession", "message_limit",
+        )
+        session = await self.sessions.get(
+            session_id, load_messages=True, message_limit=message_limit,
+        )
         await self._emit(OutgoingEvent(
             type=OutgoingEventType.SESSION,
             request_id=event.request_id,
             payload={"session": self._session_to_dict(session, include_messages=True)},
+        ))
+
+    async def _handle_session_messages(self, event: IncomingEvent) -> None:
+        """B18: the keyset scrollback query. `before`/`after` are seq
+        cursors, not row indices or timestamps -- see managers/message.py
+        and database/session_repository.py for why."""
+        p = event.payload
+        session_id = p.get("session_id")
+        if not session_id:
+            raise InvalidEventError("SessionMessages requires 'session_id'")
+
+        before = _parse_optional_int(p.get("before"), "SessionMessages", "before")
+        after = _parse_optional_int(p.get("after"), "SessionMessages", "after")
+        if before is not None and after is not None:
+            raise InvalidEventError(
+                "SessionMessages: pass at most one of 'before'/'after' "
+                "(both null means 'the newest limit messages')"
+            )
+
+        limit = _parse_optional_positive_int(p.get("limit"), "SessionMessages", "limit")
+        if limit is None:
+            raise InvalidEventError("SessionMessages requires 'limit'")
+
+        messages, has_more_before, has_more_after = await self.sessions.get_messages_page(
+            session_id, before=before, after=after, limit=limit,
+        )
+        await self._emit(OutgoingEvent(
+            type=OutgoingEventType.SESSION_MESSAGE_LIST,
+            request_id=event.request_id,
+            payload={
+                "session_id": session_id,
+                "messages": [m.to_dict() for m in messages],
+                "has_more_before": has_more_before,
+                "has_more_after": has_more_after,
+            },
         ))
 
     async def _handle_list_sessions(self, event: IncomingEvent) -> None:
@@ -526,6 +588,11 @@ class Runtime:
         }
         if include_messages:
             d["messages"] = [m.to_dict() for m in session.messages]
+            # B18: only present alongside a bounded (message_limit) load.
+            # The unbounded path leaves session.total_message_count None,
+            # so this key is simply absent -- "exactly as before" for F3.
+            if session.total_message_count is not None:
+                d["total_message_count"] = session.total_message_count
         return d
 
     # -- project handlers ---------------------------------------------------

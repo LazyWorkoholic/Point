@@ -85,6 +85,7 @@ _EXPECTED_REPLY: dict[str, set[str]] = {
     "CreateSession": {"SessionCreated"},
     "ListSessions": {"SessionList"},
     "GetSession": {"Session"},
+    "SessionMessages": {"SessionMessageList"},
     "ListTasks": {"TaskList"},
     "CancelTask": {"task.cancel.accepted"},
     "SetSessionProvider": {"SessionProviderUpdated"},
@@ -399,6 +400,36 @@ async def cmd_session_list(runtime: Runtime, args: argparse.Namespace) -> int:
             f"{provider}/{model:<24}  {session['title']}"
         )
     print(f"\n{len(sessions)} session(s)")
+    return EXIT_OK
+
+
+async def cmd_session_messages(runtime: Runtime, args: argparse.Namespace) -> int:
+    """B18's keyset scrollback, exposed for verification with no Go
+    attached (design/tasks/backend/B18-message-pagination.md). `--before`
+    and `--after` are seq cursors, not row indices; neither given means
+    "the newest --limit messages"."""
+    if args.before is not None and args.after is not None:
+        print("error: pass at most one of --before/--after", file=sys.stderr)
+        return EXIT_FAILED
+
+    envelopes = await call(
+        runtime, "SessionMessages", verbose=args.verbose,
+        session_id=args.session_id, before=args.before, after=args.after, limit=args.limit,
+    )
+    _print_errors(envelopes)
+    if _failed(envelopes) or not envelopes:
+        return EXIT_FAILED
+
+    payload = envelopes[-1]["payload"]
+    rows = payload["messages"]
+    for m in rows:
+        preview = (m.get("content") or {}).get("text") or ""
+        preview = preview.replace("\n", " ")[:60]
+        print(f"seq={m['seq']:<8}{m['role']:<10}{preview}")
+    print(
+        f"\n{len(rows)} message(s)  "
+        f"has_more_before={payload['has_more_before']}  has_more_after={payload['has_more_after']}"
+    )
     return EXIT_OK
 
 
@@ -1287,6 +1318,23 @@ def build_parser() -> argparse.ArgumentParser:
     listing = session.add_parser("list", help="list sessions", parents=[common])
     listing.add_argument("--all", action="store_true", help="include archived")
 
+    msgs = session.add_parser(
+        "messages", help="paginate a session's messages by seq (B18)", parents=[common]
+    )
+    msgs.add_argument("session_id")
+    msgs.add_argument(
+        "--before", type=int, default=None, metavar="SEQ",
+        help="messages with seq < SEQ, oldest-first",
+    )
+    msgs.add_argument(
+        "--after", type=int, default=None, metavar="SEQ",
+        help="messages with seq > SEQ, oldest-first",
+    )
+    msgs.add_argument(
+        "--limit", type=int, default=50,
+        help="page size; neither --before nor --after given means the newest --limit (default: 50)",
+    )
+
     seed = sub.add_parser(
         "seed-session", help="generate a synthetic session for scrollback/render testing",
         parents=[common],
@@ -1500,6 +1548,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     handlers = {
         ("session", "new"): cmd_session_new,
         ("session", "list"): cmd_session_list,
+        ("session", "messages"): cmd_session_messages,
         ("seed-session", None): cmd_seed_session,
         ("send", None): cmd_send,
         ("context", "report"): cmd_context_report,

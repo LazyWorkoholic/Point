@@ -57,6 +57,9 @@ class IncomingEventType(str, Enum):
     SHUTDOWN = "Shutdown"
     CREATE_SESSION = "CreateSession"
     GET_SESSION = "GetSession"
+    # B18: keyset scrollback. Consumed by F18; independently verifiable
+    # through cli.py's `session messages` without it.
+    SESSION_MESSAGES = "SessionMessages"
     LIST_SESSIONS = "ListSessions"
     RENAME_SESSION = "RenameSession"
     ARCHIVE_SESSION = "ArchiveSession"
@@ -151,6 +154,8 @@ class OutgoingEventType(str, Enum):
     ERROR = "Error"
     SESSION_CREATED = "SessionCreated"
     SESSION = "Session"
+    # B18: reply to SessionMessages.
+    SESSION_MESSAGE_LIST = "SessionMessageList"
     SESSION_LIST = "SessionList"
     SESSION_RENAMED = "SessionRenamed"
     SESSION_ARCHIVED = "SessionArchived"

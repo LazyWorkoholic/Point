@@ -29,7 +29,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional, Union
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 # Applied to every connection, here and in database/connection.py.
 #   WAL          -- 12 makes shared-WAL the basis of SSH topology B, and
@@ -367,6 +367,45 @@ ALTER TABLE messages ADD COLUMN error_code  TEXT;
 """
 
 
+# ---------------------------------------------------------------------------
+# v6 -- B18's keyset pagination cursor.
+#
+# `created_at` (a float epoch) is not unique or monotonic per session --
+# two messages in one turn can share a timestamp, and seed-session's tight
+# insert loop hits that immediately. `seq` is a real column expressing
+# insertion order instead of a timestamp doing double duty as one.
+#
+# Backfill assigns `seq` per session in `created_at, rowid` order --
+# `rowid` only breaks a `created_at` tie, and only here; every row
+# inserted after this migration gets its `seq` from
+# SessionRepository.insert_message's own MAX(seq)+1, not from this
+# one-time pass. The correlated subquery is fine for a local, single-user
+# database backfilled once; it is not the hot path this episode optimizes.
+#
+# The composite index is the point of the episode -- see B18's doc. It
+# must come after the backfill, not before: building it against
+# default-0 `seq` values would just be discarded work.
+# ---------------------------------------------------------------------------
+
+_V6 = """
+ALTER TABLE messages ADD COLUMN seq INTEGER NOT NULL DEFAULT 0;
+
+UPDATE messages
+SET seq = (
+    SELECT ranked.rn
+    FROM (
+        SELECT id, ROW_NUMBER() OVER (
+            PARTITION BY session_id ORDER BY created_at ASC, rowid ASC
+        ) AS rn
+        FROM messages
+    ) AS ranked
+    WHERE ranked.id = messages.id
+);
+
+CREATE INDEX IF NOT EXISTS idx_messages_session_seq ON messages(session_id, seq);
+"""
+
+
 @dataclass(frozen=True)
 class Migration:
     version: int
@@ -380,6 +419,7 @@ MIGRATIONS: tuple[Migration, ...] = (
     Migration(3, "tool_calls ledger", _V3),
     Migration(4, "agent_proposals (B11 stopgap, not memory_records)", _V4),
     Migration(5, "message terminal outcome: interrupted, outcome, error_code", _V5),
+    Migration(6, "message seq (keyset pagination cursor) + (session_id, seq) index", _V6),
 )
 
 

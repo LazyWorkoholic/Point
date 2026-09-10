@@ -44,6 +44,14 @@ settings        -> Per-session overrides (e.g. temperature, system
 messages        -> Populated on demand (see SessionManager.get). Left
                    empty by default so listing 50 sessions doesn't
                    pull their entire histories into memory.
+total_message_count
+                -> B18. Populated only alongside a bounded `messages`
+                   load (SessionManager.get(message_limit=...)) -- None
+                   otherwise, including the unbounded `load_messages`
+                   path F3 uses, which must stay byte-for-byte what it
+                   was before this episode. F18 needs a real count for
+                   an honest scrollbar; len(messages) would only be the
+                   size of the page it happens to hold.
 
 project_id      -> Which Project this session belongs to. Nullable
                    because the Project system doesn't exist yet —
@@ -105,6 +113,7 @@ class Session:
     effort: Optional[str] = None
     created_by: Optional[str] = None
     archived_at: Optional[float] = None
+    total_message_count: Optional[int] = None
 
     @staticmethod
     def new(

@@ -44,12 +44,28 @@ class SessionManager:
         await self._repo.insert(session)
         return session
 
-    async def get(self, session_id: str, load_messages: bool = False) -> Session:
+    async def get(
+        self,
+        session_id: str,
+        load_messages: bool = False,
+        message_limit: Optional[int] = None,
+    ) -> Session:
+        """B18: `message_limit` is additive. Omitted or None -> today's
+        unbounded `fetch_messages` path, byte-for-byte, because F3 relies
+        on it until F18 replaces it. Given -> the newest `message_limit`
+        messages plus a real total count, both off the new keyset query."""
         session = await self._repo.fetch_one(session_id)
         if session is None:
             raise SessionNotFoundError(f"No session with id {session_id!r}")
         if load_messages:
-            session.messages = await self._repo.fetch_messages(session_id)
+            if message_limit is not None:
+                messages, _, _ = await self._repo.fetch_messages_keyset(
+                    session_id, before=None, after=None, limit=message_limit,
+                )
+                session.messages = messages
+                session.total_message_count = await self._repo.fetch_message_count(session_id)
+            else:
+                session.messages = await self._repo.fetch_messages(session_id)
         return session
 
     async def list_all(self, include_archived: bool = False) -> list[Session]:
@@ -131,6 +147,16 @@ class SessionManager:
     async def get_messages(self, session_id: str) -> list[Message]:
         await self._ensure_exists(session_id)
         return await self._repo.fetch_messages(session_id)
+
+    async def get_messages_page(
+        self, session_id: str, *, before: Optional[int], after: Optional[int], limit: int,
+    ) -> tuple[list[Message], bool, bool]:
+        """B18: the SessionMessages keyset query. See
+        SessionRepository.fetch_messages_keyset for the contract."""
+        await self._ensure_exists(session_id)
+        return await self._repo.fetch_messages_keyset(
+            session_id, before=before, after=after, limit=limit,
+        )
 
     async def get_history(self, session_id: str) -> MessageHistory:
         """Returns a MessageHistory wrapper for the session. Not yet

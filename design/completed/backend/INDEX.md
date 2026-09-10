@@ -25,6 +25,7 @@ it passed.
 | B11 | The Three Agents | ✅ built + manually verified | `B11-three-agents.md` |
 | B12 | Routing, Attachments, Concurrency Caps | ✅ built + manually verified | `B12-routing-attachments.md` |
 | B13–B17 | — | not started | — |
+| B18 | Message Pagination (keyset scrollback) | ✅ built + manually verified | `B18-message-pagination.md` |
 
 ## Verified file structure — end of Episode 11
 
@@ -433,6 +434,43 @@ backend\
 `session new --path/--no-project` (which resolves and binds the project, so no
 uuid is threaded by hand). `_strip_agent_prefix` was **deleted** — the backend
 parses now.
+
+## Delta — Episode 18
+
+No new top-level package. Full reasoning in `B18-message-pagination.md`.
+
+```
+backend\
+├── database\
+│   ├── migrations.py          SCHEMA_VERSION 5 -> 6: messages.seq +
+│   │                          idx_messages_session_seq                   [B18]
+│   └── session_repository.py  insert_message: atomic seq assignment
+│                              (MAX(seq)+1 inline in the INSERT, not a
+│                              separate SELECT); + fetch_message_count,
+│                              fetch_messages_keyset, _seq_exists;
+│                              fetch_messages (F3's unbounded path) UNCHANGED[B18]
+├── managers\
+│   ├── message.py             + Message.seq (DB-assigned; not a new()
+│   │                          param)                                     [B18]
+│   ├── session.py             + Session.total_message_count (only set
+│   │                          alongside a bounded message_limit load)    [B18]
+│   └── session_manager.py     get(message_limit=...) additive, None keeps
+│                              the old unbounded path byte-for-byte;
+│                              + get_messages_page()                      [B18]
+├── runtime\
+│   ├── events.py              + SessionMessages / SessionMessageList     [B18]
+│   └── runtime.py             + _handle_session_messages;
+│                              _handle_get_session reads optional
+│                              message_limit; _session_to_dict adds
+│                              total_message_count only when present      [B18]
+└── cli.py                     + session messages <id> [--before N]
+                              [--after N] [--limit N]                    [B18]
+```
+
+`GetSession(message_limit)` has no CLI command — only `session messages` was
+in this episode's Build section, so that is the only new CLI surface.
+`fetch_messages`/`fetch_messages_for_task` (both keyed on `created_at`) are
+untouched; every B18 addition keys on `seq`.
 
 ## ⚠ One inaccuracy inherited from the original log
 

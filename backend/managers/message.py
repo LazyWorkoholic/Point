@@ -58,6 +58,14 @@ error_code  -> The slug from TaskResult.code, mirrored beside the
                outcome so a reader never has to join `tasks` to learn
                why a reply ended the way it did.
 
+seq         -> Monotonic per-session insertion order (B18, migration
+               v6). None on a Message that has not been persisted yet --
+               SessionRepository.insert_message assigns it atomically at
+               insert (MAX(seq)+1 for the session, computed in the same
+               statement as the INSERT). This, not `timestamp`, is the
+               keyset pagination cursor: `created_at` is a float that can
+               tie within one turn, `seq` cannot.
+
 invocation  -> InvocationMetadata. Kept as its own typed field rather
                than stuffed into the generic `metadata` dict, because
                "which workspace/capability/agent/provider/model
@@ -280,6 +288,9 @@ class Message:
     outcome: Optional[Outcome] = None
     interrupted: bool = False
     error_code: Optional[str] = None
+    # B18. Not a `new()` parameter -- the DB assigns it at insert, never
+    # the caller.
+    seq: Optional[int] = None
 
     @staticmethod
     def new(
@@ -349,6 +360,7 @@ class Message:
             "outcome": self.outcome.value if self.outcome else None,
             "interrupted": self.interrupted,
             "error_code": self.error_code,
+            "seq": self.seq,
         }
 
     @staticmethod
@@ -366,6 +378,7 @@ class Message:
             outcome=Outcome(d["outcome"]) if d.get("outcome") else None,
             interrupted=bool(d.get("interrupted", False)),
             error_code=d.get("error_code"),
+            seq=d.get("seq"),
         )
         message.validate()
         return message
