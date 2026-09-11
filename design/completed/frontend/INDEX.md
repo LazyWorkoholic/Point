@@ -18,9 +18,23 @@ it passed.
 | F4 | Query Input | ✅ built + manually verified | `F04-query-input.md` |
 | F5 | Streaming, Queue, Cancel | ✅ built + manually verified | `F05-streaming-queue.md` |
 | S11b | B12 Verification + F5 Reload Pairing | ✅ built + manually verified | `S11b-b12-verify-f5-pairing.md` |
-| F6–F18 | — | not started | — |
+| F7 | Popup Framework (Popup + Confirm) | ✅ built + manually verified | `F07-popup-framework.md` |
+| S12b | F7 Verification Repairs (chat/ render + startup) | ✅ built + manually verified | `S12b-f7-verification-repairs.md` |
+| F6, F8–F18 | — | not started | — |
 
 **F1 and F2 were built and verified in one session** (`batchable: yes`).
+
+**S12b is the same shape as S11b, and it is where three `chat/` defects
+live.** They were found while verifying F7 but none of them is F7's code —
+F7 is `app/` and `array/`. Rather than bury them in an episode doc about
+popups, they are recorded on their own: the frame-scoped render memo (a
+height-instability race across the two render passes in every frame), the
+`renderList` bug that silently dropped fenced and indented code inside list
+items (**live since F3**), and provider-aware session selection at startup
+(a stale session row pinned to a missing provider could strand the app with
+no way out from inside it). Commits `4d8aef6` and `d3133ba`. **Anyone
+working in `chat/` should read it** — particularly before touching
+`renderLive`, `renderList`, or `onSessionList`.
 
 **S11b is a verification-and-repair session, not a numbered episode.** It ran
 immediately after B12 closed and spent the data B12 added, closing the three
