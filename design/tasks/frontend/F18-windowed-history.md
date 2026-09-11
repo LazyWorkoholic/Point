@@ -237,3 +237,12 @@ stop, not a nit.
 - **Not built here:** archival/summarization of old messages (B13), semantic
   retrieval (B13). F18 only makes existing history cheap to hold and read in
   slices.
+
+### Forward note — check before starting this episode
+
+F8 is scheduled before this episode and is expected to replace the
+hardcoded agent lane map (knownAgentIDs / agentTokenState / splitAgent
+/ reloadLane -- see S11b's completed doc for the full list) with a real
+ListAgents call. Before building the slot-reconstruction logic here,
+check F8's completed doc for the actual mechanism and use it -- do not
+assume the hardcoded map still exists by the time this episode starts.

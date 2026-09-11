@@ -797,6 +797,47 @@ re-implement.
 
 ---
 
+# SESSION 15b — B19 Silence-Based Agent Timeout
+
+**Goal:** the backend's timeout stops killing healthy generations, without reopening the runaway-spiral risk B11 built the check to catch.
+
+**Paste:**
+```
+Read CLAUDE.md and design/tasks/backend/B19-silence-based-timeout.md,
+plus F5's and F7's completed docs for the exact trace and line numbers
+that found this bug.
+
+Silence-based, resetting on every activity signal, with a first-token
+grace. Do NOT remove the per-chunk check outright, and do NOT touch the
+frontend -- chat/stream.go's watchdog is already correct.
+
+Explicitly verify B11's original runaway-spiral test (--max-seconds 8)
+still terminates after your change. State in the completed doc which
+mechanism still catches a runaway spiral if the pure silence reset
+alone would not.
+
+Stop at the verification gate with PowerShell checks.
+
+If anything in this episode's Build section is ambiguous or seems to
+assume something not true of this repo, stop and tell me before
+writing code.
+```
+
+**Record:**
+```
+Write design/completed/backend/B19-silence-based-timeout.md following
+the format in design/completed/backend/INDEX.md. Include the bugs we
+hit and how they were fixed, and what the next episode inherits. Add a
+row to design/completed/backend/INDEX.md's status table.
+
+Explicitly confirm and record whether B11's runaway-spiral defense
+still holds, and through which mechanism.
+```
+
+**Then:** commit · `/clear`
+
+---
+
 # SESSION 16 — F10 Settings, Providers, First Run
 
 **Paste:**
@@ -830,8 +871,6 @@ true.
 ```
 
 **Then:** commit · `/clear`
-
----
 
 ---
 
