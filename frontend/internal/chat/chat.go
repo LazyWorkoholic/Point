@@ -185,6 +185,24 @@ type Workspace struct {
 	viewRows  int
 	viewWidth int
 
+	// frame counts renders. It exists so an entry is rendered at most ONCE
+	// per frame, whatever the render memo's clock-based staleness rules
+	// would otherwise decide -- see renderLive (stream_render.go).
+	//
+	// One frame renders each visible entry more than once: bottomAnchored
+	// walks backward measuring heights, then visibleWindow walks forward
+	// composing, and clampScroll and moveFocus measure too. Before this
+	// counter, renderLive could answer those calls differently within a
+	// single frame -- a stale cached render for the measuring pass, a real
+	// one for the composing pass, if the frame happened to straddle the
+	// 50ms throttle boundary. The pair (topAbs, topRow) is then an address
+	// computed against one height and applied to another, and rows go
+	// missing. Most visibly at the moment a code fence closes, which is
+	// the one point an entry's height JUMPS (a raw tail becomes a boxed
+	// block), and most durably at the end of a stream, where the tick
+	// stops and nothing repaints the bad frame.
+	frame int
+
 	copyNote string // last y-copy result, shown briefly at the foot of the viewport
 
 	// F5 — see stream.go. live holds one entry per send made this session,

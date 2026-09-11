@@ -25,6 +25,44 @@ func (w *Workspace) renderLive(e *liveEntry, width int, focused bool) []string {
 	// hung task looks like. So a non-terminal entry is also stale once the
 	// second it was drawn in has passed; the stream tick (at most 500ms)
 	// guarantees a frame lands to notice.
+	// BEFORE any clock-based rule: within one frame an entry renders once,
+	// full stop. Both staleness gates below are time-based, and a frame
+	// renders each entry several times (bottomAnchored measures, then
+	// visibleWindow composes; clampScroll and moveFocus measure too) with
+	// real time passing in between. A frame that straddled the throttle
+	// boundary therefore got a stale, SHORTER render for the measuring
+	// pass and a real, taller one for the composing pass -- so (topAbs,
+	// topRow), an address computed against the first height, was applied
+	// to the second, and rows fell off the bottom of the window. The
+	// window this opened is widest exactly where an entry's height jumps:
+	// the moment a code fence closes and a raw tail becomes a boxed block.
+	//
+	// The throttle and the per-second staleness still do their jobs
+	// BETWEEN frames, which is what they were for; this only stops them
+	// from disagreeing with themselves inside one.
+	// The guard is on what this frame already SERVED, not on what is
+	// cached: a throttled call answers with lines rendered at an older
+	// version, and every later call in that frame has to be given those
+	// same lines or the heights disagree again. `servedVersion` is
+	// therefore the version the answer was FOR; `renderedVersion` stays
+	// the version the lines were BUILT at, and the two differ exactly
+	// while the throttle is holding an update back.
+	//
+	// State still wins over the frame: a token, an opened slot or a
+	// toggled thinking block bumps `version`, which lands here as a
+	// mismatch and re-decides. Only the CLOCK is prevented from
+	// re-deciding mid-frame. In the running app state cannot change
+	// mid-frame at all (Update runs, then View), so this costs nothing
+	// there and keeps the guard honest everywhere else.
+	sameFrame := e.rendered != nil &&
+		e.renderedFrame == w.frame &&
+		e.servedVersion == e.version &&
+		e.renderedWidth == width &&
+		e.renderedFocused == focused
+	if sameFrame {
+		return e.rendered
+	}
+
 	second := int(time.Since(e.startedAt).Seconds())
 	fresh := e.rendered != nil &&
 		e.renderedVersion == e.version &&
@@ -32,6 +70,12 @@ func (w *Workspace) renderLive(e *liveEntry, width int, focused bool) []string {
 		e.renderedFocused == focused &&
 		(e.status.terminal() || e.renderedSecond == second)
 	if fresh {
+		// Stamped so the REST of this frame is bound to this same answer,
+		// not just a real render would be. Whatever lines an entry gives
+		// first in a frame are its lines for that whole frame -- if only
+		// the real-render path stamped, a measuring pass served from cache
+		// would leave the composing pass free to re-decide.
+		e.renderedFrame, e.servedVersion = w.frame, e.version
 		return e.rendered
 	}
 	throttled := e.rendered != nil &&
@@ -40,6 +84,7 @@ func (w *Workspace) renderLive(e *liveEntry, width int, focused bool) []string {
 		!e.status.terminal() &&
 		time.Since(e.renderedAt) < streamThrottle
 	if throttled {
+		e.renderedFrame, e.servedVersion = w.frame, e.version
 		return e.rendered
 	}
 
@@ -50,6 +95,7 @@ func (w *Workspace) renderLive(e *liveEntry, width int, focused bool) []string {
 	e.renderedFocused = focused
 	e.renderedAt = time.Now()
 	e.renderedSecond = second
+	e.renderedFrame, e.servedVersion = w.frame, e.version
 	return lines
 }
 

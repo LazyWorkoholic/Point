@@ -190,6 +190,13 @@ type liveEntry struct {
 	renderedAt      time.Time
 	renderedSecond  int
 	rendered        []string
+
+	// renderedFrame/servedVersion describe what this entry ANSWERED WITH
+	// in a given frame, which is not the same thing as what is cached:
+	// a throttled call serves lines rendered at an older version, and the
+	// rest of that frame has to be given those same lines. See renderLive.
+	renderedFrame int
+	servedVersion int
 }
 
 func (e *liveEntry) touch() {

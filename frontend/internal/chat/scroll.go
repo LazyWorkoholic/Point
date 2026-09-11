@@ -56,6 +56,18 @@ func (w *Workspace) entryBlock(i, width int) []string {
 // visibleWindow returns the absolute index of the first rendered entry and
 // exactly `rows` lines for the current scroll position.
 func (w *Workspace) visibleWindow(rows, width int) (topAbs int, lines []string) {
+	// One composed window is one FRAME, and this is where it begins. Every
+	// height measured from here until the next window -- bottomAnchored's
+	// backward walk, the compose loop below, clampScroll, and whatever a
+	// key handler measures against the window now on screen -- is the same
+	// height. See chat.go's `frame` field for what went missing when it
+	// was not.
+	//
+	// Here rather than in View(): View composes the query area too, and a
+	// key handler measuring between frames should see the heights the user
+	// is actually looking at, not re-decide them.
+	w.frame++
+
 	n := w.entryCount()
 	if n == 0 || rows <= 0 {
 		return 0, nil

@@ -75,8 +75,15 @@ func renderBlock(th theme.Theme, n ast.Node, source []byte, width int) []string 
 		return renderList(th, v, source, width, 0)
 
 	case *ast.FencedCodeBlock:
+		// Lines().Value(), not Text(): a block node's content lives in its
+		// line segments, and Text() walks INLINE children -- which a fenced
+		// block has none of. The two agree in goldmark 1.8.5, which is why
+		// this read correctly, but Text() is deprecated and its behaviour
+		// for block nodes has already changed once across versions. The
+		// very next case has always used Lines().Value(); this is the same
+		// block content read the same way.
 		lang := string(v.Language(source))
-		return renderCodeBlock(th, lang, string(v.Text(source)), width)
+		return renderCodeBlock(th, lang, string(v.Lines().Value(source)), width)
 
 	case *ast.CodeBlock:
 		return renderCodeBlock(th, "", string(v.Lines().Value(source)), width)
@@ -132,29 +139,66 @@ func renderList(th theme.Theme, list *ast.List, source []byte, width, indent int
 			contentWidth = 4
 		}
 
-		var words []word
-		var nested []string
-		for c := item.FirstChild(); c != nil; c = c.NextSibling() {
-			if list2, ok := c.(*ast.List); ok {
-				nested = append(nested, renderList(th, list2, source, width, indent+bw+2)...)
-				continue
+		// A list item's children are BLOCK nodes, and each one is rendered
+		// as the block it is, at the item's content width, in document
+		// order.
+		//
+		// This loop used to handle exactly two cases: a nested list, and
+		// "assume it is inline-bearing" -> collectInlineWords. A fenced
+		// code block has no inline children at all -- its content lives in
+		// Lines() segments -- so it contributed zero words and VANISHED,
+		// silently, taking the code with it and leaving the surrounding
+		// prose looking intact. Indented code blocks went the same way.
+		// Since a model formats almost every multi-step answer as a
+		// numbered list with code inside the steps, that was most of the
+		// code blocks in a code-heavy reply.
+		//
+		// It was invisible while streaming, which is what made it look
+		// like a render race rather than a parse gap: until the closing
+		// fence arrives, splitOpenFence routes the block into the raw tail
+		// and it renders as plain visible text. It disappeared at the
+		// exact moment the fence closed and the text first went through
+		// this walker.
+		lead := strings.Repeat(" ", indent)
+		placed := false // has this item's bullet been emitted yet
+		wrote := false  // has any content block been emitted yet
+
+		add := func(lines []string) {
+			for _, l := range lines {
+				prefix := lead + strings.Repeat(" ", bw)
+				if !placed {
+					prefix = lead + padCells(bullet, bw)
+					placed = true
+				}
+				out = append(out, prefix+l)
 			}
-			words = append(words, collectInlineWords(th, c, source)...)
 		}
 
-		lines := wrapWords(words, contentWidth)
-		if len(lines) == 0 {
-			lines = []string{""}
-		}
-		lead := strings.Repeat(" ", indent)
-		for j, l := range lines {
-			prefix := lead + strings.Repeat(" ", bw)
-			if j == 0 {
-				prefix = lead + padCells(bullet, bw)
+		for c := item.FirstChild(); c != nil; c = c.NextSibling() {
+			// A nested list positions its own lines absolutely (it is
+			// handed the deeper indent), so it is appended verbatim rather
+			// than through add().
+			if list2, ok := c.(*ast.List); ok {
+				out = append(out, renderList(th, list2, source, width, indent+bw+2)...)
+				continue
 			}
-			out = append(out, prefix+l)
+			lines := renderBlock(th, c, source, contentWidth)
+			if len(lines) == 0 {
+				continue
+			}
+			// One blank row between sibling blocks, the same rule
+			// renderChildrenBlocks applies at the top level -- it is what
+			// separates an item's prose from the code box under it.
+			if wrote {
+				add([]string{""})
+			}
+			add(lines)
+			wrote = true
 		}
-		out = append(out, nested...)
+		// An item with nothing renderable in it still gets its bullet.
+		if !placed {
+			add([]string{""})
+		}
 	}
 	return out
 }
