@@ -19,8 +19,8 @@ import (
 // which is why Help stayed one fixed colour while its border repainted.
 func TestOverlayContentIsThemed(t *testing.T) {
 	overlays := map[string]func(*Root) Overlay{
-		"help":    func(r *Root) Overlay { return helpOverlay{root: r} },
-		"pending": func(*Root) Overlay { return pendingOverlay{title: "X", w: 40, h: 10, body: "body text"} },
+		"help":    func(r *Root) Overlay { return newHelpOverlay(r) },
+		"palette": func(r *Root) Overlay { return newPaletteOverlay(r) },
 	}
 
 	for name, build := range overlays {
@@ -53,7 +53,7 @@ func TestOverlayContentIsThemed(t *testing.T) {
 // The help screen's text must actually CHANGE colour between palettes.
 func TestHelpRepaintsWithThePalette(t *testing.T) {
 	r := newRoot(t)
-	o := helpOverlay{root: r}
+	o := newHelpOverlay(r)
 
 	a := o.View(theme.New("turquoise", theme.BackgroundTransparent), 80, 20)
 	b := o.View(theme.New("gold", theme.BackgroundTransparent), 80, 20)
@@ -70,7 +70,7 @@ func TestHelpRepaintsWithThePalette(t *testing.T) {
 // towards a column width.
 func TestHelpColumnsLineUp(t *testing.T) {
 	r := newRoot(t)
-	out := helpOverlay{root: r}.View(r.theme, 80, 40)
+	out := newHelpOverlay(r).View(r.theme, 80, 40)
 
 	var widths []int
 	for _, line := range strings.Split(stripANSI(out), "\n") {
@@ -93,7 +93,7 @@ func TestHelpColumnsLineUp(t *testing.T) {
 func TestOverlayCompositingKeepsRowsIntact(t *testing.T) {
 	r := newRoot(t)
 	size(t, r, 140, 40)
-	r.OpenOverlay(helpOverlay{root: r})
+	r.OpenOverlay(newHelpOverlay(r))
 	if r.overlay == nil {
 		t.Fatal("overlay did not open")
 	}
@@ -123,13 +123,13 @@ func TestOverlayKeepsTheContentBesideIt(t *testing.T) {
 
 	before := padRows(strings.Split(stripANSI(r.View()), "\n"), 140)
 
-	r.OpenOverlay(helpOverlay{root: r})
+	r.OpenOverlay(newHelpOverlay(r))
 	after := padRows(strings.Split(stripANSI(r.View()), "\n"), 140)
 
 	// Work out the panel's actual column span, then assert that every column
 	// OUTSIDE it is unchanged. Compare by display cell, not by byte: the frame
 	// is full of box-drawing runes.
-	w, h := helpOverlay{root: r}.MinSize()
+	w, h := newHelpOverlay(r).MinSize()
 	left := (140 - w) / 2
 	right := left + w
 	top := (40 - h) / 2

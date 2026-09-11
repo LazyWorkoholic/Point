@@ -201,17 +201,55 @@ func TestLeaderHintComesFromTheRegistry(t *testing.T) {
 // An overlay that does not fit is refused, with the ACTUAL numbers.
 func TestOverlayRefusalNamesTheNumbers(t *testing.T) {
 	r := newRoot(t)
-	size(t, r, 75, 13) // wide enough for overlays, too short for a 60x14 one
+	size(t, r, 75, 13) // wide enough for overlays, too short for a 70x16 one
 
-	r.OpenOverlay(helpOverlay{root: r})
+	r.OpenOverlay(newHelpOverlay(r))
 
 	if r.overlay != nil {
 		t.Fatal("an overlay that does not fit was opened")
 	}
-	for _, want := range []string{"60×14", "75×13"} {
+	for _, want := range []string{"70×16", "75×13"} {
 		if !strings.Contains(r.status, want) {
 			t.Errorf("status %q does not name %s", r.status, want)
 		}
+	}
+}
+
+// DESIGN CHANGE (F7 verification): an overlay already open holds its own
+// MinSize exactly as the terminal shrinks, and closes — naming the same
+// numbers OpenOverlay would have refused with — the moment the terminal can
+// no longer fit it, rather than continuing to shrink through its own floor.
+func TestOverlayClosesWhenAResizeOutgrowsIt(t *testing.T) {
+	r := newRoot(t)
+	size(t, r, 120, 30)
+	r.OpenOverlay(newHelpOverlay(r))
+	if r.overlay == nil {
+		t.Fatal("help did not open")
+	}
+
+	m, _ := r.Update(tea.WindowSizeMsg{Width: 75, Height: 13})
+	root := m.(*Root)
+	if root.overlay != nil {
+		t.Fatal("the overlay should have closed once the resize could no longer fit it")
+	}
+	for _, want := range []string{"70×16", "75×13"} {
+		if !strings.Contains(root.status, want) {
+			t.Errorf("status %q does not name %s", root.status, want)
+		}
+	}
+}
+
+// Shrinking down but staying above the floor leaves the overlay open, at
+// its own MinSize — the "additive, not a replacement" half of the change.
+func TestOverlayStaysOpenAboveItsFloor(t *testing.T) {
+	r := newRoot(t)
+	size(t, r, 120, 30)
+	r.OpenOverlay(newHelpOverlay(r))
+
+	m, _ := r.Update(tea.WindowSizeMsg{Width: 80, Height: 20})
+	root := m.(*Root)
+	if root.overlay == nil {
+		t.Fatal("80x20 comfortably fits help's 70x16 floor; it should have stayed open")
 	}
 }
 
@@ -220,7 +258,7 @@ func TestOverlaysRefuseInSingleColumn(t *testing.T) {
 	r := newRoot(t)
 	size(t, r, 60, 30)
 
-	r.OpenOverlay(helpOverlay{root: r})
+	r.OpenOverlay(newHelpOverlay(r))
 	if r.overlay != nil {
 		t.Fatal("an overlay opened below the single-column floor")
 	}
@@ -234,7 +272,7 @@ func TestOverlayTrapsFocus(t *testing.T) {
 	r := newRoot(t)
 	size(t, r, 120, 30)
 
-	r.OpenOverlay(helpOverlay{root: r})
+	r.OpenOverlay(newHelpOverlay(r))
 	if r.overlay == nil {
 		t.Fatal("the overlay did not open at 120x30")
 	}
@@ -261,7 +299,7 @@ func TestOverlayTrapsFocus(t *testing.T) {
 // touching the help screen.
 func TestHelpListsEveryAction(t *testing.T) {
 	r := newRoot(t)
-	out := helpOverlay{root: r}.View(r.theme, 80, 20)
+	out := newHelpOverlay(r).View(r.theme, 80, 20)
 
 	for _, a := range r.actions.All() {
 		if !strings.Contains(out, a.Name) {

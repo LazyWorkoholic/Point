@@ -250,23 +250,8 @@ func (r *Root) tooSmall(message string) string {
 // rather than by compositing a translucent layer, which a terminal cannot do.
 func (r *Root) withOverlay(screen string) string {
 	o := r.overlay
-	minW, minH := o.MinSize()
-
-	w := minW
-	if max := r.w - 8; w > max && max > 10 {
-		w = max
-	}
-	h := minH
-	if max := r.h - 4; h > max && max > 4 {
-		h = max
-	}
-
-	rect := layout.Rect{
-		X: (r.w - w) / 2,
-		Y: (r.h - h) / 2,
-		W: w, H: h,
-	}
-	panel := box(r.theme, rect, o.Title(), o.View(r.theme, w-2, h-2), true)
+	rect := r.overlayRect() // root.go: the SAME rect dispatchMouse hit-tests against
+	panel := box(r.theme, rect, o.Title(), o.View(r.theme, rect.W-2, rect.H-2), true)
 
 	// The scrim flattens the whole frame to one dim colour, so everything
 	// behind the panel can be composited as PLAIN TEXT and re-styled once per

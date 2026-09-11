@@ -230,10 +230,14 @@ func (r *Root) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		r.w, r.h = m.Width, m.Height
 		r.recompute()
+		r.closeOverlayIfTooSmall()
 		return r, nil
 
 	case tea.KeyMsg:
 		return r.handleKey(m)
+
+	case tea.MouseMsg:
+		return r.dispatchMouse(m)
 
 	case animTickMsg:
 		if m.gen != r.anim.gen {
@@ -478,12 +482,13 @@ func (r *Root) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 func (r *Root) dispatchKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 	key := k.String()
 
-	// An overlay traps focus while it is open.
+	// An overlay traps focus while it is open. Every key — esc included —
+	// goes to the overlay itself now, not just handled generically here: F7's
+	// Popup needs a FIRST esc to clear its filter and only a SECOND to
+	// close, which an unconditional "esc always closes" (the old behaviour)
+	// never gives it a chance to do. An overlay asks to close by returning a
+	// nil Overlay from Update, exactly like any other state change.
 	if r.overlay != nil {
-		if key == "esc" {
-			r.overlay = nil
-			return r, nil
-		}
 		o, cmd := r.overlay.Update(k)
 		r.overlay = o
 		return r, cmd
@@ -577,22 +582,111 @@ func (r *Root) recompute() {
 	})
 }
 
-// OpenOverlay refuses one that does not fit and shows the ACTUAL numbers.
-func (r *Root) OpenOverlay(o Overlay) {
+// overlayFits is the ONE fit check for an overlay against the current
+// terminal — used both to refuse opening one (OpenOverlay) and to close one
+// already open that a subsequent resize has outgrown
+// (closeOverlayIfTooSmall). Before F7's verification, only the first of
+// those existed: an overlay that fit when it opened kept shrinking as the
+// terminal shrank, with no floor, because nothing ever checked again.
+func (r *Root) overlayFits(o Overlay) (fits bool, refusal string) {
 	w, h := o.MinSize()
-
 	if !r.layout.OverlaysAllowed {
-		r.status = fmt.Sprintf("%s needs %d columns — overlays are off below %d",
+		return false, fmt.Sprintf("%s needs %d columns — overlays are off below %d",
 			o.Title(), w, layout.OverlayFloor)
-		return
 	}
 	if r.w < w || r.h < h {
-		r.status = fmt.Sprintf("%s needs %d×%d — terminal is %d×%d",
+		return false, fmt.Sprintf("%s needs %d×%d — terminal is %d×%d",
 			o.Title(), w, h, r.w, r.h)
+	}
+	return true, ""
+}
+
+// OpenOverlay refuses one that does not fit and shows the ACTUAL numbers.
+func (r *Root) OpenOverlay(o Overlay) {
+	if ok, msg := r.overlayFits(o); !ok {
+		r.status = msg
 		return
 	}
 	r.overlay = o
 	r.recompute()
+}
+
+// closeOverlayIfTooSmall re-runs the SAME fit check on an overlay that is
+// already open. Called after every resize: an overlay holds its own
+// MinSize exactly for as long as the terminal has room for it, and closes —
+// naming the same numbers OpenOverlay would have refused with — the moment
+// it does not, rather than continuing to shrink through its own floor.
+// overlayRect's own clamping (render.go's withOverlay) never actually needs
+// to produce a rect smaller than MinSize once this runs first; it is kept
+// as the defence for any caller that resizes without going through this
+// path.
+func (r *Root) closeOverlayIfTooSmall() {
+	if r.overlay == nil {
+		return
+	}
+	if ok, msg := r.overlayFits(r.overlay); !ok {
+		r.status = msg
+		r.overlay = nil
+	}
+}
+
+// overlayRect is the on-screen rect the open overlay is drawn into — the
+// SAME formula withOverlay (render.go) uses to composite it, so a mouse
+// click and the panel it looks like it hit are never computed two different
+// ways. Only valid while r.overlay != nil.
+func (r *Root) overlayRect() layout.Rect {
+	minW, minH := r.overlay.MinSize()
+
+	w := minW
+	if max := r.w - 8; w > max && max > 10 {
+		w = max
+	}
+	h := minH
+	if max := r.h - 4; h > max && max > 4 {
+		h = max
+	}
+	return layout.Rect{X: (r.w - w) / 2, Y: (r.h - h) / 2, W: w, H: h}
+}
+
+// dispatchMouse routes a mouse event to the open overlay, or to the active
+// workspace when nothing is open.
+//
+// Coordinates handed to the overlay are translated to its own content
+// origin — one cell in from each border edge, matching box()'s own layout —
+// so an overlay never has to know where on the real screen it was drawn. A
+// LEFT CLICK outside the panel closes it: LAYOUT.md's "close on esc or a
+// click outside", which nothing implemented before F7 gave the overlay
+// contract anything to click on at all.
+//
+// Only a left click qualifies — bubbletea reports a wheel tick as
+// Action == MouseActionPress too (mouse.go's decode never sets any other
+// Action for a wheel event), and the mouse cursor is not required to be
+// hovering the panel to scroll it. Closing on ANY outside press meant the
+// popup closed itself out from under a scroll the instant the pointer
+// happened to be elsewhere on screen — indistinguishable, from the user's
+// seat, from "the popup ignored my click": it was already gone.
+func (r *Root) dispatchMouse(m tea.MouseMsg) (tea.Model, tea.Cmd) {
+	if r.overlay == nil {
+		ws, cmd := r.current().Update(m)
+		r.workspaces[r.active] = ws
+		return r, cmd
+	}
+
+	rect := r.overlayRect()
+	inside := m.X >= rect.X && m.X < rect.X+rect.W && m.Y >= rect.Y && m.Y < rect.Y+rect.H
+
+	if !inside {
+		if m.Button == tea.MouseButtonLeft && m.Action == tea.MouseActionPress {
+			r.overlay = nil
+		}
+		return r, nil
+	}
+
+	m.X -= rect.X + 1
+	m.Y -= rect.Y + 1
+	o, cmd := r.overlay.Update(m)
+	r.overlay = o
+	return r, cmd
 }
 
 func (r *Root) retryHint() string {

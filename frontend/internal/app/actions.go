@@ -1,6 +1,8 @@
 package app
 
 import (
+	"fmt"
+
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/lazyworkoholic/point/frontend/internal/actions"
@@ -31,16 +33,26 @@ func registerActions() *actions.Registry[*Root] {
 		Chord:  "ctrl+q",
 		Leader: "q",
 		Run: func(root *Root) tea.Cmd {
-			// Bug 17: flush the active workspace's own debounced state
-			// (chat's draft save) BEFORE returning tea.Quit — once bubbletea
-			// has that, a still-pending tea.Tick never gets delivered, so
-			// this is the only chance a debounced write gets to catch up
-			// with whatever was typed since its last successful save. See
-			// app\draft.go's DraftFlusher doc for the full trace.
-			if f, ok := root.current().(DraftFlusher); ok {
-				f.FlushDraft()
+			// F7: quit with a backend task running is a destructive action
+			// — it abandons work in progress — and routes through Confirm
+			// before anything else happens. r.conn.inFlight is the
+			// backend's own count, not the active workspace's Streaming():
+			// a background task keeps running whether or not its
+			// workspace is the one on screen, which is the point of the
+			// background lane (F5's contract). Discarding a queued draft
+			// (chat's esc-at-capacity) stays unconfirmed on purpose — a
+			// draft persists to disk and is trivially recoverable, so it
+			// is not the losable-work case Confirm exists for.
+			if n := len(root.conn.inFlight); n > 0 {
+				root.OpenOverlay(NewConfirm(
+					"Quit With Tasks Running",
+					fmt.Sprintf("%d task(s) still running. Quitting now abandons their progress.", n),
+					"Quit", "Cancel",
+					quitCmd(root),
+				))
+				return nil
 			}
-			root.quitting = true
+			doQuit(root)
 			return tea.Quit
 		},
 	})
@@ -52,14 +64,7 @@ func registerActions() *actions.Registry[*Root] {
 		Category:    "Application",
 		Chord:       "ctrl+p",
 		Run: func(root *Root) tea.Cmd {
-			// F7 builds the real palette on the shared Popup. What exists now
-			// is the overlay contract it will be an instance of: a min size,
-			// a fit check that names the actual numbers, and focus trapping.
-			root.OpenOverlay(pendingOverlay{
-				title: "Command Palette",
-				w:     40, h: 10,
-				body: "The palette is F7.\n\nWhat this proves today is the\noverlay contract: it refuses to\nopen when it does not fit, and\nnames the numbers when it does.",
-			})
+			root.OpenOverlay(newPaletteOverlay(root))
 			return nil
 		},
 	})
@@ -71,7 +76,7 @@ func registerActions() *actions.Registry[*Root] {
 		Category:    "Interface",
 		Leader:      "?",
 		Run: func(root *Root) tea.Cmd {
-			root.OpenOverlay(helpOverlay{root: root})
+			root.OpenOverlay(newHelpOverlay(root))
 			return nil
 		},
 	})
@@ -210,4 +215,30 @@ func registerActions() *actions.Registry[*Root] {
 
 func status(s string) tea.Cmd {
 	return func() tea.Msg { return statusMsg(s) }
+}
+
+// doQuit is app.quit's synchronous side effect: flush, then mark quitting.
+//
+// Bug 17: flush the active workspace's own debounced state (chat's draft
+// save) BEFORE tea.Quit — once bubbletea has that, a still-pending tea.Tick
+// never gets delivered, so this is the only chance a debounced write gets to
+// catch up with whatever was typed since its last successful save. See
+// app\draft.go's DraftFlusher doc for the full trace.
+func doQuit(root *Root) {
+	if f, ok := root.current().(DraftFlusher); ok {
+		f.FlushDraft()
+	}
+	root.quitting = true
+}
+
+// quitCmd is app.quit's effect wrapped as a tea.Cmd, for the ONE case that
+// cannot run it synchronously: Confirm's OnConfirm fires only if and when
+// the user actually confirms, so doQuit here must wait for that — unlike
+// the direct call in app.quit's own Run above, which runs immediately
+// because there is nothing to wait for.
+func quitCmd(root *Root) tea.Cmd {
+	return func() tea.Msg {
+		doQuit(root)
+		return tea.QuitMsg{}
+	}
 }
