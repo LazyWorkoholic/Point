@@ -26,6 +26,7 @@ it passed.
 | B12 | Routing, Attachments, Concurrency Caps | ✅ built + manually verified | `B12-routing-attachments.md` |
 | B13–B17 | — | not started | — |
 | B18 | Message Pagination (keyset scrollback) | ✅ built + manually verified | `B18-message-pagination.md` |
+| B19 | Silence-Based Agent Timeout | ✅ built + manually verified | `B19-silence-based-timeout.md` |
 
 ## Verified file structure — end of Episode 11
 

@@ -1,0 +1,11 @@
+{
+  "model": "mock-silent-gap",
+  "_comment": "B19: partial output, then dead air. Three quick chunks so the accumulator holds real text, then a 6s gap no silence budget under ~6s can survive. The task must end as timed_out WITH that partial text persisted -- the exact shape the episode's own gate (Test 2) checks, and the one a termination-path refactor is easiest to break.",
+  "chunks": [
+    {"type": "text", "text": "partial ", "delay": 0.05},
+    {"type": "text", "text": "answer ", "delay": 0.05},
+    {"type": "text", "text": "before-the-gap", "delay": 0.05},
+    {"type": "text", "text": "never-arrives", "delay": 6.0},
+    {"type": "done"}
+  ]
+}

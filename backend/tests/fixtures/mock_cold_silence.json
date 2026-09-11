@@ -1,0 +1,8 @@
+{
+  "model": "mock-cold-silence",
+  "_comment": "B19: dead air from the very first moment -- the cold-model-load case. Nothing is ever accumulated, so B12's empty-content policy means NO assistant row is written and the `tasks` row is the only carrier of how it ended (S11b's orphanReply join reads exactly that). A gate querying `messages ORDER BY rowid DESC LIMIT 1` without a role filter lands on the USER row here and reads its NULL outcome/error_code as a bug.",
+  "chunks": [
+    {"type": "text", "text": "arrives-far-too-late", "delay": 8.0},
+    {"type": "done"}
+  ]
+}

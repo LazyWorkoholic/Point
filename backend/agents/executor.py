@@ -127,6 +127,34 @@ SinkFactory = Callable[[str], EventSink]
 # begins rather than as it ends, large enough not to spin.
 _TOOL_EVENT_POLL_S = 0.05
 
+# B19: `timeout_s` is a SILENCE budget, not a wall-clock one -- mirrors
+# chat/stream.go's own firstTokenGraceFactor concept on the frontend, which
+# this constant is named to match. Waiting on a cold local model being
+# loaded from disk is the one silence that is expected, so the budget is
+# doubled until the first real provider chunk arrives; after that, ordinary
+# `timeout_s` silence applies.
+_FIRST_TOKEN_GRACE_FACTOR = 2
+
+# B19's backstop: a PURE silence reset does not, by itself, bound a
+# degenerate model that keeps emitting tokens in a tight, meaningless loop
+# with no real gap between them -- the exact failure B11 built the original
+# per-chunk check to catch (self-tested against qwen2.5:1.5b spiralling into
+# an unrelated multi-hundred-line ramble). Neither `max_steps` (bounds the
+# number of separate provider.stream() calls, not the length of any one of
+# them) nor `max_tool_calls` (unrelated to raw text volume) catches this.
+# This ceiling is a TOTAL-duration cap from task start, independent of
+# activity -- generous enough that no healthy generation should ever reach
+# it (a real research run was observed completing at 3:24 against a 180s
+# `timeout_s`, comfortably under research's own 1080s/18min ceiling here),
+# but present so a stream that never goes silent also never runs forever.
+#
+# 6, not something larger: `tests\manual_b11_deadline_check.ps1` exercises
+# this exact backstop with `--max-seconds 8` and its own CLI `--timeout 60`
+# wait budget. 6x keeps that scenario resolving at 48s — still comfortably
+# under 60s, so that existing script keeps working unmodified — while
+# staying generous for the real 60s/180s agent configs.
+_HARD_CEILING_FACTOR = 6
+
 
 @dataclass(frozen=True)
 class ProviderOverride:
@@ -677,7 +705,23 @@ class AgentExecutor:
 
         messages: list[Message] = list(agent_context.built.messages)
         tool_calls_used = 0
-        deadline = time.monotonic() + limits.timeout_s
+
+        # B19: `last_activity` replaces the old fixed `deadline`. It is
+        # RESET by `touch()` below at every point this loop already treats
+        # as "the task is alive" -- a provider chunk, a tool event, a
+        # rate-limit retry notice -- so `_check_deadline` only ever fires on
+        # genuine silence. `hard_deadline` is the one thing that is NOT
+        # reset; see `_HARD_CEILING_FACTOR`'s own doc for why it still has
+        # to exist.
+        last_activity = time.monotonic()
+        first_token_seen = False
+        hard_deadline = last_activity + limits.timeout_s * _HARD_CEILING_FACTOR
+
+        def touch(first_token: bool = False) -> None:
+            nonlocal last_activity, first_token_seen
+            last_activity = time.monotonic()
+            if first_token:
+                first_token_seen = True
 
         def emit_stream(event_type: StreamEventType, data: dict[str, Any]) -> dict[str, Any]:
             event = StreamEvent(
@@ -689,7 +733,7 @@ class AgentExecutor:
             return {"stream_event": event.to_dict()}
 
         for step in range(1, limits.max_steps + 1):
-            _check_deadline(deadline, limits)
+            _check_deadline(last_activity, first_token_seen, hard_deadline, limits)
 
             # `task.progress` in B10's prose -- the existing
             # PROGRESS_UPDATED stream event, so the UI can show
@@ -720,6 +764,12 @@ class AgentExecutor:
             def drain_notices():
                 while rate_limit_notices:
                     attempt, delay, _error = rate_limit_notices.popleft()
+                    # A rate-limited retry is time passing without a
+                    # provider chunk, but the task is actively managing a
+                    # known, bounded wait -- not dead air. Same reasoning as
+                    # a tool call in flight (below): evidence of life, even
+                    # though no content arrived.
+                    touch()
                     yield emit_stream(StreamEventType.PROGRESS_UPDATED, {
                         "step": step,
                         "max_steps": limits.max_steps,
@@ -732,21 +782,37 @@ class AgentExecutor:
             stream = retry.stream_with_retry(
                 lambda: provider.stream(request), on_retry=notice,
             )
-            async for provider_chunk in stream:
-                # B11: `timeout_s` used to be checked only between steps
-                # (the top of this `for`), never while one was actively
-                # streaming -- so a single generation that degenerates
-                # into a very long or repetitive response (a real local-
-                # model failure mode, not hypothetical: self-tested
-                # against qwen2.5:1.5b, which spiralled into an
-                # unrelated multi-hundred-line ramble after a confused
-                # tool attempt) ran with no cap at all until the
-                # provider's own stream happened to end. `timeout_s` is
-                # the agent's configured wall-clock budget for the
-                # WHOLE task; checking it here, once per chunk, is what
-                # makes that true instead of true-only-between-steps.
-                # Cheap: one monotonic-clock comparison per chunk.
-                _check_deadline(deadline, limits)
+            # B19: iterated by hand rather than with `async for`, because
+            # the silence budget has to be able to fire WHILE WAITING for
+            # the next chunk -- which `async for` cannot do. It blocks in
+            # `__anext__` until the provider speaks, so the only moment a
+            # per-chunk check can run is the moment the silence ENDS, and a
+            # check that fires then kills a task at the instant it proved
+            # itself alive. That is not a hypothetical: it is exactly how a
+            # cold Ollama load died at its first token, with nothing yet in
+            # the accumulator -- so `finalize_interrupted` returned None
+            # (its documented empty-text policy), no assistant row was
+            # written at all, and the outcome/error_code columns the whole
+            # three-way split depends on were never reached. Timing out
+            # from the WAIT instead means whatever arrived BEFORE the gap
+            # is already accumulated and persists with its outcome intact.
+            chunks = stream.__aiter__()
+            while True:
+                try:
+                    provider_chunk = await asyncio.wait_for(
+                        chunks.__anext__(), timeout=_silence_budget(first_token_seen, limits),
+                    )
+                except StopAsyncIteration:
+                    break
+                except asyncio.TimeoutError:
+                    raise _silence_exceeded(first_token_seen, limits) from None
+
+                # A chunk in hand IS the sign of life, so it touches before
+                # anything else. The check that remains here is the hard
+                # ceiling (B11's runaway-spiral defense, which a silence
+                # reset alone cannot provide) -- see `_check_deadline`.
+                touch(first_token=True)
+                _check_deadline(last_activity, first_token_seen, hard_deadline, limits)
                 for event in drain_notices():
                     yield event
 
@@ -779,7 +845,7 @@ class AgentExecutor:
                 return  # the model answered instead of asking for a tool
 
             for call in requested:
-                _check_deadline(deadline, limits)
+                _check_deadline(last_activity, first_token_seen, hard_deadline, limits)
                 if tool_calls_used >= limits.max_tool_calls:
                     raise BoundsExceededError(
                         f"stopped after {tool_calls_used} tool call(s): this agent's "
@@ -801,10 +867,20 @@ class AgentExecutor:
                     while True:
                         while pending_events:
                             name, payload = pending_events.popleft()
+                            touch()  # a tool.started/tool.completed IS the task, working
                             yield emit_stream(_TOOL_EVENT_TYPES[name], payload)
                         if running.done():
                             break
                         await asyncio.wait({running}, timeout=_TOOL_EVENT_POLL_S)
+                        # B19: a tool call in flight is known, bounded work
+                        # (ToolExecutor has its own internal timeout — B10's
+                        # "validate, run, time out, emit") even when it
+                        # emits no intermediate event of its own. Touching
+                        # every poll tick is what keeps a single slow tool
+                        # call (a web search, say) from tripping the OUTER
+                        # silence budget while the tool's own timeout is the
+                        # thing actually governing it.
+                        touch()
                 finally:
                     # A cancelled task must not leave a tool call running
                     # against the filesystem or the network.
@@ -812,6 +888,7 @@ class AgentExecutor:
                         running.cancel()
                 while pending_events:
                     name, payload = pending_events.popleft()
+                    touch()
                     yield emit_stream(_TOOL_EVENT_TYPES[name], payload)
 
                 result = running.result()   # re-raises ToolExecutionError / ToolTimeoutError
@@ -928,9 +1005,52 @@ def _try_json(text: str) -> Any:
         return None
 
 
-def _check_deadline(deadline: float, limits: Bounds) -> None:
-    if time.monotonic() >= deadline:
+def _check_deadline(
+    last_activity: float, first_token_seen: bool, hard_deadline: float, limits: Bounds,
+) -> None:
+    """B19: silence-based, not wall-clock. Two independent checks:
+
+    - The hard ceiling (`_HARD_CEILING_FACTOR × timeout_s` from task start,
+      never reset) is the runaway-spiral backstop -- see that constant's own
+      doc for why it is still needed even though the ordinary check below no
+      longer fires on elapsed time alone.
+    - The silence budget (`timeout_s`, doubled until the first provider
+      chunk arrives) is the real fix: it only fires on genuine dead air, so
+      a task that keeps producing output -- however long that takes -- is
+      never interrupted by this check.
+
+    Both raise the SAME `bound="timeout_s"` `BoundsExceededError` runtime.py's
+    `_outcome_for` already maps to `Outcome.TIMED_OUT` -- this episode changes
+    WHEN the check fires, not what happens once it does (F7's own scope note).
+    """
+    now = time.monotonic()
+    if now >= hard_deadline:
         raise BoundsExceededError(
-            f"stopped after {limits.timeout_s}s: this agent's time limit",
+            f"stopped after {limits.timeout_s * _HARD_CEILING_FACTOR}s total: "
+            "this agent never finished, and never went quiet enough to time "
+            "out on its own",
             bound="timeout_s", limit=limits.timeout_s,
         )
+    if now - last_activity >= _silence_budget(first_token_seen, limits):
+        raise _silence_exceeded(first_token_seen, limits)
+
+
+def _silence_budget(first_token_seen: bool, limits: Bounds) -> int:
+    """How long dead air may last before the task is ended. Doubled until
+    the first provider chunk arrives -- a cold local model being loaded
+    from disk is the one silence that is expected."""
+    return limits.timeout_s * (1 if first_token_seen else _FIRST_TOKEN_GRACE_FACTOR)
+
+
+def _silence_exceeded(first_token_seen: bool, limits: Bounds) -> BoundsExceededError:
+    """ONE wording and ONE `bound` for a silence timeout, whether it was
+    noticed by a check between steps or by the stream wait itself timing
+    out. Two constructions would be two chances for the `bound="timeout_s"`
+    that runtime.py's `_outcome_for` keys `Outcome.TIMED_OUT` on to drift
+    apart -- and the outcome columns going missing is precisely the failure
+    this episode's own verification caught."""
+    return BoundsExceededError(
+        f"stopped after {_silence_budget(first_token_seen, limits)}s of silence: "
+        "this agent's time limit",
+        bound="timeout_s", limit=limits.timeout_s,
+    )
