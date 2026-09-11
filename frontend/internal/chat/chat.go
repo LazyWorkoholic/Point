@@ -94,8 +94,14 @@ type Workspace struct {
 	sessionID    string
 	sessionTitle string
 	bootstrapped bool
-	loading      bool
-	loadErr      string
+
+	// providers is the set of provider names this backend registered, or
+	// nil when it could not be established. Read only by knownProvider
+	// (providers.go), which explains why nil has to mean "accept
+	// anything" rather than "accept nothing".
+	providers map[string]bool
+	loading   bool
+	loadErr   string
 
 	pending map[string]queryKind
 	// sendFn defaults to doSend; a test substitutes a recorder so it can

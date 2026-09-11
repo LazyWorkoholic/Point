@@ -82,8 +82,13 @@ const (
 // wireSession mirrors Runtime._session_to_dict's output, trimmed to the
 // fields this workspace reads.
 type wireSession struct {
-	ID        string        `json:"id"`
-	Title     string        `json:"title"`
+	ID    string `json:"id"`
+	Title string `json:"title"`
+	// Provider is the session's pinned provider name, empty when the
+	// session inherits the global config. The backend has always sent it
+	// (runtime.py's _session_to_dict); nothing decoded it until the
+	// startup check in providers.go needed it.
+	Provider  string        `json:"provider"`
 	UpdatedAt float64       `json:"updated_at"`
 	Messages  []wireMessage `json:"messages"`
 }

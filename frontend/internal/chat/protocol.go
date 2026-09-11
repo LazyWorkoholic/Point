@@ -30,6 +30,10 @@ const (
 	// transcript joins against to rebuild the footer of a reply that was
 	// never persisted. See reload.go's onTaskList.
 	queryListTasks
+	// queryListProviders runs BEFORE the session list, and only so that
+	// onSessionList can skip a session pinned to a provider this backend
+	// does not have. See beginBootstrap.
+	queryListProviders
 )
 
 // localID mints a request id. protocol.newID does the equivalent job inside
@@ -97,6 +101,20 @@ func (w *Workspace) beginBootstrap() {
 	w.bootstrapped = true
 	w.loading = true
 	w.loadErr = ""
+	// Providers first, sessions second. The frontend cannot otherwise tell
+	// that the session it is about to open names a provider this backend
+	// never registered -- and since CreateSession is only reachable from an
+	// EMPTY session list, opening such a session leaves no way back out of
+	// it from inside the app: every send fails, forever, against whichever
+	// session happens to be newest. See onSessionList.
+	w.send(protocol.CmdListProviders, queryListProviders, map[string]any{})
+}
+
+// listSessions is the second half of the bootstrap, reached however the
+// provider list turned out — including when it failed. A provider list this
+// workspace could not get is a reason to fall back to the old "just open the
+// newest" behaviour, never a reason not to open a session at all.
+func (w *Workspace) listSessions() {
 	w.send(protocol.CmdListSessions, queryListSessions, map[string]any{"include_archived": false})
 }
 
@@ -126,6 +144,16 @@ func (w *Workspace) handleEnvelope(env protocol.Envelope) tea.Cmd {
 			Error string `json:"error"`
 		}
 		_ = env.UnmarshalPayload(&p)
+		if kind == queryListProviders {
+			// Soft: the session list still has to be asked for. Without
+			// the provider names onSessionList simply falls back to
+			// opening the newest session, which is what it did before
+			// this query existed.
+			w.log.Warn("chat: ListProviders refused, opening the newest session unchecked",
+				"err", p.Error)
+			w.listSessions()
+			return nil
+		}
 		if kind == queryListTasks {
 			// NOT w.loadErr. A refused ListTasks costs a footer on a
 			// reply that produced no text; the transcript already on
@@ -144,6 +172,8 @@ func (w *Workspace) handleEnvelope(env protocol.Envelope) tea.Cmd {
 	}
 
 	switch kind {
+	case queryListProviders:
+		w.onProviderList(env)
 	case queryListSessions:
 		w.onSessionList(env)
 	case queryCreateSession:
@@ -165,15 +195,26 @@ func (w *Workspace) onSessionList(env protocol.Envelope) {
 		w.loadErr = err.Error()
 		return
 	}
-	if len(p.Sessions) == 0 {
-		// SessionRepository.fetch_all orders by updated_at DESC — [0] is
-		// unused here on purpose: there is nothing to pick when the list is
-		// empty, which is exactly this branch.
-		w.send(protocol.CmdCreateSession, queryCreateSession, map[string]any{})
+	// Already sorted most-recently-updated first, so the newest session
+	// this backend can actually USE is the first one whose provider it
+	// registered. Skipping is what stops one stale row -- a session
+	// pinned to a provider that no longer exists -- from making every
+	// send fail on every launch with no way out from inside the app.
+	// See providers.go for the full mechanism and the real case.
+	for _, session := range p.Sessions {
+		if !w.knownProvider(session.Provider) {
+			w.log.Warn("chat: skipping a session pinned to an unavailable provider",
+				"session", session.ID, "provider", session.Provider)
+			continue
+		}
+		w.send(protocol.CmdGetSession, queryGetSession, map[string]any{"session_id": session.ID})
 		return
 	}
-	// Already sorted most-recently-updated first.
-	w.send(protocol.CmdGetSession, queryGetSession, map[string]any{"session_id": p.Sessions[0].ID})
+	// Nothing usable, including the empty-list case: start fresh. A new
+	// session inherits the global config, so it is resolvable by
+	// construction — which makes this the branch that guarantees the app
+	// always reaches a usable state.
+	w.send(protocol.CmdCreateSession, queryCreateSession, map[string]any{})
 }
 
 func (w *Workspace) onSessionCreated(env protocol.Envelope) {
