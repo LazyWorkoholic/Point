@@ -65,3 +65,31 @@ type Overlay interface {
 	View(th theme.Theme, w, h int) string
 	Update(tea.Msg) (Overlay, tea.Cmd)
 }
+
+// OverlayProvider is implemented by a workspace whose right-pane cards must
+// stay reachable when the pane auto-hides — LAYOUT.md's "Auto-hides below 90
+// columns; still openable as an overlay" (F06-right-pane.md). The same
+// narrow-interface pattern Cards() and FocusAware already use: the root asks
+// "can you give me an overlay for this", never reaches into the workspace's
+// own card state to build one itself.
+type OverlayProvider interface {
+	RightPaneOverlay() Overlay
+}
+
+// RightPaneFallback marks an Overlay as OverlayProvider's narrow-width
+// stand-in for the real pane. The root uses it for two things a plain
+// Overlay cannot express on its own:
+//
+//  1. Retiring itself the moment a resize widens back past the breakpoint
+//     and the real pane fits again — closeOverlayIfTooSmall only closes an
+//     overlay that no longer FITS, which is the opposite condition, so
+//     without this an overlay opened while narrow stayed open, side by
+//     side with the real pane, once the terminal grew back.
+//  2. Counting as "the pane is visible" for refreshTasks's gate — the
+//     whole reason this overlay exists is to show the same cards the real
+//     pane shows, so the data behind it needs the same live refresh, not a
+//     one-time snapshot taken at open time.
+type RightPaneFallback interface {
+	Overlay
+	IsRightPaneFallback() bool
+}

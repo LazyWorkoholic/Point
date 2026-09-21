@@ -20,7 +20,8 @@ it passed.
 | S11b | B12 Verification + F5 Reload Pairing | ✅ built + manually verified | `S11b-b12-verify-f5-pairing.md` |
 | F7 | Popup Framework (Popup + Confirm) | ✅ built + manually verified | `F07-popup-framework.md` |
 | S12b | F7 Verification Repairs (chat/ render + startup) | ✅ built + manually verified | `S12b-f7-verification-repairs.md` |
-| F6, F8–F18 | — | not started | — |
+| F6 | Right Pane (Status · Task · Sessions) | ✅ built + manually verified | `F06-right-pane.md` |
+| F8–F18 | — | not started | — |
 
 **F1 and F2 were built and verified in one session** (`batchable: yes`).
 
@@ -96,13 +97,69 @@ The two contracts the rest of the frontend is built on:
   is what makes "reload looks identical to live" true by construction
   rather than by discipline. Full account in
   `S11b-b12-verify-f5-pairing.md`.
+- **`app.TaskRow` and the five `TaskState` values** (`app\tasks.go`) — the
+  shape of one entry in the right pane's Task card list. **F9's result
+  cards append into this same list and must use these field names
+  exactly**, or the tray silently shows a mix of two shapes. Note that
+  `Kind` is always `"chat"` and the capability name lives in `Agent`. Full
+  struct and the four things a consumer must know in
+  `F06-right-pane.md`'s "The task-card entry shape".
+- **`app.OverlayProvider` / `app.RightPaneFallback`** (`app\workspace.go`)
+  — the same narrow-interface pattern as `FocusAware` and `DraftFlusher`,
+  for a workspace that can stand its right pane up as an overlay when the
+  terminal is too narrow, and for the root to recognise that overlay so it
+  can retire it on a resize and count it as "visible" for refresh
+  purposes. Full account in `F06-right-pane.md`.
+- **`app.DiagnosticsMsg.Seq`** (`app\placeholder.go`, `app\root.go`) — a
+  monotonic counter every consumer of `Diagnostics` must gate the WHOLE
+  message on. Bubble Tea runs each `tea.Cmd` in its own goroutine with no
+  ordering guarantee, so arrival order cannot be trusted. Full account in
+  `F06-right-pane.md`'s "The pattern this episode is really about".
 - **`app.StreamAware` / `app.QueueAware`** (`app\stream.go`) — the same
   narrow-interface pattern as `FocusAware` and `DraftFlusher`, for "is
   anything running" (the header animation, which must freeze when idle or
   it becomes a permanent idle-CPU drain) and "is a message queued" (which
   esc means). Full account in `F05-streaming-queue.md`'s "Bug 3".
 
-**F6 can start now.** It needs F5 (done) and F7. **F4 carries one open watch
+**F8 can start now.** F6 closed; F7's `Popup` is built and F8's `@` picker is
+its next consumer.
+
+**F6 carries two open items.** Neither blocks F8.
+
+1. **B20 is owed, and one Status card row is stubbed until it lands** — a
+   `GetContextReport` request and a `ContextReport` push event, calling
+   B8's existing `context.py` calculation rather than a second copy of the
+   arithmetic. The expanded context composition card (UI-09) is **not
+   built at all**, so F6's Done-when #2 is not satisfied — by direct
+   consequence of that decision, not by oversight.
+2. **B21 is owed, and it is the more urgent of the two.** F6's gate found a
+   backend correctness defect that has nothing to do with the right pane: a
+   task that fails before producing a token leaves its user message
+   persisted with no answer, and `context.py`'s history window hands that
+   unanswered question to the NEXT unrelated send — which the model then
+   answers instead. Reproduced deterministically with no concurrency.
+   Specced as `tasks/backend/B21-orphaned-message-context.md`; the full
+   diagnostic trace, including the four hypotheses eliminated before the
+   real one, is in `F06-right-pane.md`'s "Bug C".
+
+**Read `F06-right-pane.md`'s "The pattern this episode is really about"
+before adding any flag, sequence number or cached snapshot that more than
+one call site is responsible for keeping accurate.** It cost F6 two real
+bugs and four failed reproduction attempts, and it is the second time this
+exact pattern has bitten this codebase — `ensureAnimation()` is the
+original, correct answer to it. An invariant maintained by N call sites
+will eventually have one that forgets; decide it once, centrally, after the
+fact.
+
+**Known limitation, for an F7 follow-up or F16:** `Overlay.MinSize` doubles
+as both the refusal threshold and the actual rendered size —
+`overlayRect` only ever shrinks an overlay, never grows it — so the
+fallback right pane is permanently capped at its floor dimensions no matter
+how much terminal is available. Raising `MinSize` is not the fix; it would
+raise the refusal threshold with it. Needs a preferred-vs-minimum
+distinction in the `Overlay` contract, which is shared F7 machinery.
+
+**F4 carries one open watch
 item** — `F04-query-input.md`'s Bug 17b: a backspace round-trip at a wrap
 gap boundary was observed miscounting, traced with no cause found, then
 stopped reproducing on its own. Not blocking, but any episode touching
@@ -162,6 +219,20 @@ These recur in TUI work, and writing them down the first time saves the second:
 - **Breakpoint adjustments.** `LAYOUT.md` marks the numbers provisional; separate
   bordered boxes plus outer margins cost more rows and columns than the original
   estimate. **F1 and F16 should both record the values actually settled on.**
+- **A test timeout is a ceiling on how long a BROKEN run may hang, never an
+  assertion about how fast a correct one is.** F6 shipped three tests that
+  asserted wall-clock timing — a settle budget, a cmd-drain window, and an
+  exact `"1:30"` clock reading that legitimately rendered `"1:31"` — and all
+  three failed intermittently under `-race`. A suite that fails
+  intermittently trains you to ignore failures, which is worse than not
+  having the test. Assert bands and behaviour; make ceilings generous;
+  prove it with repeated `-count` sweeps under `-race`.
+- **A test harness that drives `tea.Cmd`s synchronously imposes an ordering
+  Bubble Tea never promises.** Three of F6's reproduction attempts passed
+  for this reason alone while the live bug was real.
+  `chat\overlay_concurrency_test.go` has a `fakeBackend` plus a
+  `concurrentDriver` that spawns every Cmd in its own goroutine; reach for
+  it before concluding a "works in tests, fails live" bug is unreproducible.
 - **A timing-dependent heuristic that misfires once and then stops is not
   proven fixed by it not misfiring again.** F2's paste-burst detector and
   F4's Bug 17b both hit this: a bug traced exhaustively with no cause found,

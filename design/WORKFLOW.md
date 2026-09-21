@@ -725,6 +725,116 @@ identical field names, or the tray silently shows a mix of two shapes.
 
 **Then:** commit · `/clear`
 
+**This session spawned two backend episodes — run 13b before 13c.** Its gate
+found a live correctness defect that has nothing to do with the right pane
+(B21), and it closed on seven of its eight "Done when" criteria because the
+eighth needs a wire event that does not exist yet (B20). Both are specced.
+
+---
+
+# SESSION 13b — B21 Orphaned Messages Must Not Enter the Next Prompt
+
+**Goal:** a task that failed without producing a token stops poisoning the
+next unrelated send in that session.
+
+**Do this one before B20.** It is a live correctness defect — the backend can
+answer a question you did not ask and persist that as the reply to one you
+did — where B20 only unblocks a stubbed display row.
+
+**Paste:**
+```
+Read CLAUDE.md and design/tasks/backend/B21-orphaned-message-context.md,
+plus S11b's completed doc for the task_id pairing join this reuses, and
+F06-right-pane.md's "Bug C" for the full diagnostic trace.
+
+Join on outcome: exclude a user message whose task_id maps to a task
+that failed with NO assistant row. Do NOT skip trailing unanswered
+messages generically -- a genuinely in-flight turn has no assistant row
+either. Do NOT invent a "was this a follow-up" heuristic; this project
+already deleted one adjacency heuristic for corrupting correct
+transcripts. Do NOT fabricate placeholder assistant text -- B12 decided
+that deliberately and this does not reopen it.
+
+Every exclusion must appear in ContextLog.evicted with its reason: a
+silent exclusion is the same class of defect as the silent inclusion
+being fixed.
+
+Stop at the verification gate with PowerShell checks.
+
+If anything in this episode's Build section is ambiguous or seems to
+assume something not true of this repo, stop and tell me before
+writing code.
+```
+
+**You do:** the exact reproduction — `@research <x> --max-seconds 1 --wait`
+(fails, zero output), then an unrelated send. The answer must be about the
+NEW question. Then confirm a normal multi-turn follow-up still sees its own
+history.
+
+**Record:**
+```
+Write design/completed/backend/B21-orphaned-message-context.md following
+the format in design/completed/backend/INDEX.md. Include the bugs we hit
+and how they were fixed, and what the next episode inherits. Add a row to
+design/completed/backend/INDEX.md's status table.
+
+Record explicitly what happens to a task that failed AFTER producing
+partial output -- that exchange must stay in history, and the test that
+proves it.
+```
+
+**Then:** commit · `/clear`
+
+---
+
+# SESSION 13c — B20 `context.report` on the Wire
+
+**Goal:** F6's Status card stub can become a real fill bar, and the expanded
+context card (UI-09) becomes buildable at all.
+
+**Paste:**
+```
+Read CLAUDE.md and design/tasks/backend/B20-context-report.md, plus
+B08-context-builder.md for the calculation this must reuse.
+
+Transport only. Call B8's existing context.report() -- never a second
+implementation of the token arithmetic, for any reason. Ship
+ContextReport.to_dict() verbatim, every field, no subset: it was written
+in B8 for exactly this consumer.
+
+Push at TURN boundaries, not per delta. The numbers only move when a
+turn completes.
+
+Stop at the verification gate with PowerShell checks.
+
+If anything in this episode's Build section is ambiguous or seems to
+assume something not true of this repo, stop and tell me before
+writing code.
+```
+
+**You do:** confirm the wire answer matches `cli.py context report --json`
+field for field for the same session, and that the numbers actually move
+between two turns.
+
+**Record:**
+```
+Write design/completed/backend/B20-context-report.md following the format
+in design/completed/backend/INDEX.md. Include the bugs we hit and how they
+were fixed, and what the next episode inherits. Add a row to
+design/completed/backend/INDEX.md's status table.
+
+Record whether ContextReport needed any new field. If it did, name which
+and why -- it means B8 guessed wrong about what the card needs.
+```
+
+**Then:** commit · `/clear`
+
+**Note:** F6's Status card stays a stub until a FRONTEND follow-up reads this
+event. B20 gives the data a way to travel; something still has to read it.
+That follow-up also owns UI-09, the expanded context composition card, which
+F6 left unbuilt — and is why F6 closed on seven of its eight "Done when"
+criteria rather than all eight.
+
 ---
 
 # SESSION 14 — F8 @ Picker and Attachments
@@ -1414,7 +1524,7 @@ my answer is weak.
 
 ---
 
-## Six rules that keep this from degrading
+## Seven rules that keep this from degrading
 
 1. Never let Claude Code mark something complete. Only you, after running checks.
 2. Never skip the verification gate, even when the change looks trivial.
@@ -1422,6 +1532,15 @@ my answer is weak.
 4. When code and docs disagree, stop. Neither side gets silently "fixed".
 5. `/clear` between episodes. Every time.
 6. Commit after each episode, with the episode id in the message.
+7. **When two reproductions of a bug both fail, stop theorising and add a log
+   line.** F6 spent four code-level reproduction attempts and three rounds of
+   instrumentation on one field report. Every hypothesis was traced carefully
+   and every one was wrong — the cause was in a third component neither of us
+   had looked at. What settled it was one debug line carrying the ids and the
+   head and tail of what a task actually accumulated; it eliminated every
+   remaining theory at once. A test that passes tells you where the bug is
+   NOT, which is progress, but it is slow progress. Prefer an instrument that
+   can see the real run.
 
 ---
 

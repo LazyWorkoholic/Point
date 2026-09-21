@@ -1,6 +1,9 @@
 package app
 
 import (
+	"crypto/rand"
+	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"time"
@@ -50,6 +53,31 @@ type Root struct {
 	leader leaderState
 	paste  pasteState
 	anim   animState
+
+	// rightPaneOpen is F6's toggle — the user's own preference, independent
+	// of the width breakpoint that auto-hides the pane below 90 columns
+	// (layout.Compute applies both: RightPaneOpen && width). Defaults open.
+	rightPaneOpen bool
+
+	// tasks is the global snapshot behind the Task card — see tasks.go's
+	// doc comment on why Root, not the workspace, owns it. tasksReqID is
+	// the correlation id of a ListTasks request this root issued itself,
+	// distinct from any workspace's own pending queries.
+	tasks              []TaskRow
+	tasksReqID         string
+	tasksDirty         bool
+	taskCardWasVisible bool
+
+	// diagnosticsSeq is pushDiagnostics's monotonic counter — see its own
+	// doc comment for why a sequence number, not arrival order, is what a
+	// DiagnosticsMsg's receiver has to trust.
+	diagnosticsSeq int
+	// ListTasksFn sends one ListTasks request, reporting whether it went
+	// out. Defaults to sendListTasks (the real r.client.Request call); a
+	// test substitutes a recorder — the same seam chat.Workspace's sendFn
+	// already uses, for the same reason: exercising refreshTasks's
+	// coalescing logic (tasksDirty) needs no live protocol.Client.
+	ListTasksFn func(protocol.Envelope) bool
 
 	// lastFrame is the most recently rendered screen, re-served while a
 	// paste burst is assembling — see View's doc comment for why that is a
@@ -139,15 +167,17 @@ func New(opts Options) (*Root, error) {
 	}
 
 	r := &Root{
-		active:     active,
-		workspaces: make(map[WorkspaceID]Workspace),
-		suspended:  make(map[WorkspaceID][]byte),
-		theme:      opts.Theme,
-		client:     opts.Client,
-		log:        opts.Log,
-		env:        opts.Env,
-		conn:       connection{state: protocol.StateStarting},
+		active:        active,
+		workspaces:    make(map[WorkspaceID]Workspace),
+		suspended:     make(map[WorkspaceID][]byte),
+		theme:         opts.Theme,
+		client:        opts.Client,
+		log:           opts.Log,
+		env:           opts.Env,
+		conn:          connection{state: protocol.StateStarting},
+		rightPaneOpen: true,
 	}
+	r.ListTasksFn = r.sendListTasks
 
 	r.actions = registerActions()
 	if err := r.actions.Validate(); err != nil {
@@ -199,6 +229,20 @@ func (r *Root) current() Workspace {
 // streams" from being a rule every new case has to remember.
 func (r *Root) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	model, cmd := r.update(msg)
+	// The same "ask once, afterwards" rule the animation uses below, and
+	// for the same reason. The right pane becomes visible or stops being
+	// visible from at least five different places — a resize crossing the
+	// breakpoint, the toggle action, OpenOverlay, esc or a click closing
+	// the overlay, closeOverlayIfTooSmall — and this used to be asked only
+	// from recompute(). Three of those five close paths do not call
+	// recompute, so taskCardWasVisible stayed true after the overlay
+	// closed, and REOPENING it then looked like no transition at all and
+	// refreshed nothing. Tasks that started while it was closed could not
+	// appear until some later lifecycle event happened to fire a refresh
+	// on its own — which, when every task started before the overlay was
+	// opened, is the first TaskDone. That is exactly the reported
+	// "the overlay shows nothing until the first task completes".
+	r.refreshTasksIfVisible()
 	if anim := r.ensureAnimation(); anim != nil {
 		return model, tea.Batch(cmd, anim)
 	}
@@ -231,6 +275,7 @@ func (r *Root) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		r.w, r.h = m.Width, m.Height
 		r.recompute()
 		r.closeOverlayIfTooSmall()
+		r.closeRightPaneFallbackIfObsolete()
 		return r, nil
 
 	case tea.KeyMsg:
@@ -316,6 +361,7 @@ func (r *Root) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// c.backend is nil.
 		ws, wsCmd := r.current().Update(m)
 		r.workspaces[r.active] = ws
+		r.refreshTasks()
 		return r, tea.Batch(r.afterBackend(), wsCmd)
 
 	case protocol.VersionMismatchMsg:
@@ -377,6 +423,7 @@ func (r *Root) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if r.client != nil {
 			r.conn.inFlight = r.client.InFlight()
 		}
+		r.handleTaskListEnvelope(m.Envelope)
 		ws, wsCmd := r.current().Update(m)
 		r.workspaces[r.active] = ws
 		return r, tea.Batch(r.afterBackend(), wsCmd)
@@ -405,10 +452,170 @@ func (r *Root) afterBackend() tea.Cmd {
 	return tea.Batch(cmds...)
 }
 
+// rootRequestID mints a correlation id for a query Root sends itself —
+// chat.localID's equivalent. Root cannot reuse that one without importing
+// chat, which would cycle (chat already imports app).
+func rootRequestID() string {
+	var b [16]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return fmt.Sprintf("root-%p", &b)
+	}
+	return hex.EncodeToString(b[:])
+}
+
+// refreshTasks asks the backend for the current global task snapshot — F6's
+// Task card, which Root owns (tasks.go's doc comment). Only fires while the
+// pane that shows it is actually on screen, and never while a request is
+// already outstanding: this is the honest replacement for a "queued" state
+// the wire has no push event for (B12's scheduler sets TaskState.QUEUED
+// in-process and emits nothing), called from real lifecycle moments — a
+// fresh connection, and any TaskStarted/terminal event this client saw
+// (handleTaskListEnvelope) — never from a timer, so Done-when #6 ("no
+// subscriptions while hidden") holds: a hidden pane issues zero requests.
+// rightPaneVisible is broader than r.layout.ShowRightPane: it is also true
+// while the narrow-width fallback overlay is open (RightPaneFallback), since
+// that overlay shows the SAME cards and needs the SAME live data — a gate
+// that only checked the real pane left the overlay's Task section frozen at
+// whatever r.tasks held the moment it was opened, never refreshing again
+// until it was closed and reopened.
+func (r *Root) rightPaneVisible() bool {
+	if r.layout.ShowRightPane {
+		return true
+	}
+	_, ok := r.overlay.(RightPaneFallback)
+	return ok
+}
+
+func (r *Root) refreshTasks() {
+	if r.client == nil || !r.rightPaneVisible() {
+		return
+	}
+	if r.tasksReqID != "" {
+		// A request is already in flight, so whatever answer it brings
+		// back was already decided on the backend before THIS trigger
+		// happened — it cannot reflect this event. Dropping the trigger
+		// outright (the original bug) is why three @research fired
+		// together showed one task at a time, swapping identity as each
+		// one finished: every lifecycle event that landed inside the
+		// first request's round trip was silently discarded, and nothing
+		// remembered that the snapshot it eventually got back was already
+		// stale. Setting the flag instead means handleTaskListEnvelope
+		// fires exactly one follow-up once this request resolves, so the
+		// snapshot converges within one extra round trip instead of only
+		// updating on whichever lifecycle event happens to land while
+		// nothing else is in flight.
+		r.tasksDirty = true
+		return
+	}
+	raw, err := json.Marshal(map[string]any{"scope": "all"})
+	if err != nil {
+		return
+	}
+	env := protocol.Envelope{ID: rootRequestID(), Type: protocol.CmdListTasks, Payload: raw}
+	if !r.ListTasksFn(env) {
+		return
+	}
+	r.tasksReqID = env.ID
+	r.log.Debug("root: requesting task snapshot", "corr_id", env.ID)
+}
+
+// sendListTasks is ListTasksFn's real implementation.
+func (r *Root) sendListTasks(env protocol.Envelope) bool {
+	_, err := r.client.Request(env, 0)
+	return err == nil
+}
+
+// refreshTasksIfVisible asks again when the pane just BECAME visible —
+// a resize crossing 90 columns, the toggle action, or the fallback overlay
+// being opened — and not while it merely stays visible, where
+// refreshTasks's own in-flight guard would make a repeat harmless but
+// pointless.
+//
+// Called from Root.Update, once, after every message: see the comment
+// there for why hanging this off recompute() instead was wrong. The
+// transition it detects is the ONLY chance to learn about work that
+// started while nothing was on screen to show it — refreshTasks
+// deliberately sends nothing while hidden, so a missed transition is not
+// a delayed update, it is a permanently missed one.
+func (r *Root) refreshTasksIfVisible() {
+	visible := r.rightPaneVisible()
+	if visible && !r.taskCardWasVisible {
+		r.refreshTasks()
+	}
+	r.taskCardWasVisible = visible
+}
+
+// closeRightPaneFallbackIfObsolete retires the narrow-width fallback overlay
+// the moment a resize widens the terminal back past the breakpoint where
+// the real pane fits — the real pane's own visibility is entirely
+// layout.Compute's decision and needs no help, but nothing previously
+// closed the OVERLAY once the reason it was opened (the real pane not
+// fitting) stopped being true, so widening back left both on screen at
+// once. closeOverlayIfTooSmall does not cover this: its condition is the
+// opposite one, a terminal that shrank BELOW an overlay's own MinSize.
+func (r *Root) closeRightPaneFallbackIfObsolete() {
+	if r.overlay == nil {
+		return
+	}
+	// Width alone, not r.layout.ShowRightPane: the overlay's whole reason to
+	// exist is "the terminal is too narrow for the real pane", which is a
+	// width fact independent of whether rightPaneOpen happens to be true —
+	// a user who manually closed the pane, then opened this overlay while
+	// narrow, still gets it retired on widening, because the narrowness
+	// that justified it is gone either way.
+	if _, ok := r.overlay.(RightPaneFallback); ok && r.w >= layout.MediumWidth {
+		r.overlay = nil
+		r.recompute()
+	}
+}
+
+// handleTaskListEnvelope is EnvelopeMsg's hook into the global task
+// snapshot: it claims Root's own ListTasks reply (matched by corr_id, same
+// pattern chat\protocol.go's pending map uses) and treats any TaskStarted or
+// terminal event — from ANY workspace's send, since routing does not filter
+// by origin — as a reason the snapshot might be stale.
+func (r *Root) handleTaskListEnvelope(env protocol.Envelope) {
+	if env.CorrID != "" && env.CorrID == r.tasksReqID {
+		r.tasksReqID = ""
+		if r.client != nil {
+			r.client.Release(env.CorrID)
+		}
+		var p struct {
+			Tasks []TaskRow `json:"tasks"`
+		}
+		if err := env.UnmarshalPayload(&p); err == nil {
+			r.tasks = p.Tasks
+			r.log.Debug("root: task snapshot applied", "corr_id", env.CorrID,
+				"count", len(p.Tasks), "right_pane_visible", r.rightPaneVisible())
+		}
+		if r.tasksDirty {
+			r.tasksDirty = false
+			r.refreshTasks()
+		}
+		return
+	}
+	if env.Type == protocol.EvTaskStarted || protocol.IsTerminal(env.Type) {
+		r.refreshTasks()
+	}
+}
+
 // pushDiagnostics hands the current workspace a fresh snapshot. The workspace
 // renders what it is given; it never reaches into the root.
 func (r *Root) pushDiagnostics() tea.Cmd {
+	// Seq is what makes this message safe under bubbletea's own concurrency:
+	// each returned tea.Cmd runs in its own goroutine, with no guarantee
+	// that an EARLIER push's goroutine finishes before a LATER push's does.
+	// Two pushDiagnostics calls close together (e.g. a TaskDone envelope
+	// immediately followed by the ListTasks reply it triggered) can have
+	// their DiagnosticsMsg values delivered to Update in either order —
+	// confirmed by a field report where the fallback overlay's Task
+	// section locked onto a stale snapshot and never let go until the
+	// overlay was closed and reopened. Seq lets the RECEIVER (chat.
+	// Workspace) discard a message that arrived late but was built early,
+	// rather than trusting arrival order.
+	r.diagnosticsSeq++
 	d := Diagnostics{
+		Seq:             r.diagnosticsSeq,
 		ConnState:       r.conn.state,
 		ProtocolVersion: r.conn.protocolVersion,
 		ClientVersion:   protocol.Version,
@@ -422,6 +629,7 @@ func (r *Root) pushDiagnostics() tea.Cmd {
 		InFlight:        r.conn.inFlight,
 		Unknown:         r.conn.unknown,
 		Interrupted:     r.conn.interrupted,
+		Tasks:           r.tasks,
 		ProtocolErrors:  r.conn.protocolErrors,
 		ThemeName:       r.theme.Name(),
 		Background:      string(r.theme.Background()),
@@ -435,7 +643,7 @@ func (r *Root) pushDiagnostics() tea.Cmd {
 		StateError:      r.env.StateError,
 		Notes:           r.env.Notes,
 	}
-	return func() tea.Msg { return diagnosticsMsg{d: d} }
+	return func() tea.Msg { return DiagnosticsMsg{D: d} }
 }
 
 // ---------------------------------------------------------------------------
@@ -574,7 +782,7 @@ func (r *Root) clearLeader() {
 func (r *Root) recompute() {
 	r.layout = layout.Compute(r.w, r.h, layout.State{
 		Active:        r.active,
-		RightPaneOpen: true,
+		RightPaneOpen: r.rightPaneOpen,
 		HeaderAllowed: true,
 		OverlayOpen:   r.overlay != nil,
 		TerminalMode:  layout.TermSmall,

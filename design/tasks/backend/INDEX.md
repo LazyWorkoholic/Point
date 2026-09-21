@@ -32,6 +32,8 @@ uv run python main.py
 | B16 | SSH Serving | P2 | no | B15, F12 | not started |
 | B17 | Hardening | P2 | no | all | not started |
 | B18 | Message Pagination | P2 | no | B6 | not started |
+| B20 | `context.report` on the Wire | P1 | no | B8, B6 | not started |
+| B21 | Orphaned Messages in Context | P1 | no | B8, B12, S11b | not started |
 
 **B1–B5 are frozen.** Additive changes only — new columns, new optional fields.
 Never refactors.

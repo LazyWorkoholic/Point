@@ -6,6 +6,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/lazyworkoholic/point/frontend/internal/actions"
+	"github.com/lazyworkoholic/point/frontend/internal/layout"
 )
 
 // registerActions is the ONE registration point. The command palette, the
@@ -192,6 +193,46 @@ func registerActions() *actions.Registry[*Root] {
 			// timed-out reply names this chord, so the affordance is not a
 			// label with no key behind it.
 			return retryCmd()
+		},
+	})
+
+	// ---- F6 ------------------------------------------------------------
+
+	r.Register(actions.Action[*Root]{
+		ID:          "pane.right.toggle",
+		Name:        "Toggle Right Pane",
+		Description: "Show or hide the status, task and session cards",
+		Category:    "Interface",
+		Leader:      "c",
+		When: func(root *Root) bool {
+			return len(root.current().Cards()) > 0
+		},
+		Run: func(root *Root) tea.Cmd {
+			// Above the 90-column breakpoint the pane is real screen real
+			// estate and the toggle just shows or hides it. Below it,
+			// layout.Compute never draws the pane at all regardless of
+			// this flag — LAYOUT.md's "auto-hides below 90 columns, still
+			// openable as an overlay" — so the same key falls back to the
+			// overlay instead of doing nothing.
+			//
+			// No status(...) text here on purpose: the pane's own
+			// presence or absence IS the feedback, and it is always live.
+			// A status string is not — nothing clears "right pane shown"
+			// when a later RESIZE auto-hides the pane through a path that
+			// never touches r.status, so it goes stale and sits in the
+			// status bar's left slot indefinitely, dimmed but still
+			// legible under a later overlay's scrim. That looked like a
+			// compositor bug in testing; it was a stale status string.
+			if root.w >= layout.MediumWidth {
+				root.rightPaneOpen = !root.rightPaneOpen
+				root.recompute()
+				return nil
+			}
+			if op, ok := root.current().(OverlayProvider); ok {
+				root.OpenOverlay(op.RightPaneOverlay())
+				return nil
+			}
+			return status(fmt.Sprintf("right pane needs %d columns or more", layout.MediumWidth))
 		},
 	})
 

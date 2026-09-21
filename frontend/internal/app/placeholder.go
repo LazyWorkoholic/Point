@@ -15,6 +15,12 @@ import (
 // reached for: the placeholder holds no reference to the root, the client, or
 // any global, which is the rule every later component has to follow too.
 type Diagnostics struct {
+	// Seq is root.go's pushDiagnostics doc comment: a monotonic counter a
+	// receiver compares against the last one it applied, because arrival
+	// order is not guaranteed once two pushes are in flight as separate
+	// tea.Cmd goroutines.
+	Seq int
+
 	ConnState       protocol.ConnState
 	ProtocolVersion int
 	ClientVersion   int
@@ -29,6 +35,11 @@ type Diagnostics struct {
 	InFlight    []string
 	Unknown     []string
 	Interrupted []string
+
+	// Tasks is F6's global snapshot — see tasks.go's doc comment on why Root
+	// fetches it rather than the workspace. Nil until the first ListTasks
+	// reply lands (the pane has to be visible to trigger one at all).
+	Tasks []TaskRow
 
 	ProtocolErrors []string
 
@@ -48,9 +59,12 @@ type Diagnostics struct {
 	Notes []string
 }
 
-// diagnosticsMsg is how the root hands the placeholder a new snapshot. The
-// root emits it; the workspace consumes it. Neither reads the other's fields.
-type diagnosticsMsg struct{ d Diagnostics }
+// DiagnosticsMsg is how the root hands a workspace a fresh snapshot. The
+// root emits it; a workspace consumes what it needs and ignores the rest.
+// Exported (F6): chat.Workspace reads Tasks and ConnState off it too, which
+// means it has to be nameable outside package app — Placeholder no longer
+// has the only case for it.
+type DiagnosticsMsg struct{ D Diagnostics }
 
 // Placeholder is F1's stub workspace.
 //
@@ -74,8 +88,11 @@ func (p *Placeholder) ID() WorkspaceID { return p.id }
 func (p *Placeholder) Init() tea.Cmd   { return nil }
 
 func (p *Placeholder) Update(msg tea.Msg) (Workspace, tea.Cmd) {
-	if m, ok := msg.(diagnosticsMsg); ok {
-		p.d = m.d
+	// Seq guard: see chat/protocol.go's DiagnosticsMsg case for why arrival
+	// order cannot be trusted — the same race applies here, since this is
+	// the other consumer of the same message.
+	if m, ok := msg.(DiagnosticsMsg); ok && m.D.Seq > p.d.Seq {
+		p.d = m.D
 	}
 	return p, nil
 }

@@ -163,6 +163,11 @@ type liveEntry struct {
 	step, maxSteps int
 	progressNote   string // a rate-limit notice or other non-step progress
 
+	// usage is F6's: the latest TokenUsage this entry's stream has reported,
+	// mirrored onto the Workspace (below) so the Status card reads real
+	// numbers instead of a second implementation of the accumulator's math.
+	usage wireUsage
+
 	errText string
 	// errCode is TaskFailed's `code`. B10 puts `bounds_exceeded` there
 	// specifically so a client can tell a loop that stopped AT ITS OWN
@@ -531,11 +536,28 @@ func (w *Workspace) handleStreamEvent(env protocol.Envelope) (tea.Cmd, bool) {
 		e.progressNote = p.Data.Message
 		e.touch()
 
-	case protocol.EvToolStarted, protocol.EvToolCompleted, protocol.EvStatusChanged, protocol.EvUsageUpdated:
+	case protocol.EvToolStarted, protocol.EvToolCompleted, protocol.EvStatusChanged:
 		// Not rendered by this episode (tool cards are F9), but they ARE
 		// evidence the task is alive, which is exactly what the watchdog
 		// measures. Silently ignoring them would let a long, tool-heavy
 		// run trip a timeout it is nowhere near.
+		e.touch()
+
+	case protocol.EvUsageUpdated:
+		// F6's Status card "tokens / cost" line. The context-fill bar above
+		// it is a separate, unwired number (this episode's stub — B8's
+		// context.report, not this) — this is real per-turn TokenUsage,
+		// straight off the provider, and it is evidence of life too.
+		var p struct {
+			Data struct {
+				Usage wireUsage `json:"usage"`
+			} `json:"data"`
+		}
+		_ = env.UnmarshalPayload(&p)
+		if p.Data.Usage.TotalTokens > 0 {
+			e.usage = p.Data.Usage
+			w.usage = p.Data.Usage
+		}
 		e.touch()
 
 	case protocol.EvTaskDone:
@@ -610,6 +632,29 @@ func (w *Workspace) finish(e *liveEntry, status liveStatus) {
 	e.status = status
 	e.finishedAt = time.Now()
 	e.touch()
+
+	// One line per finished reply, with the ids it was routed by and the
+	// head and tail of what it actually accumulated.
+	//
+	// This exists to settle a field report of one task's slot showing two
+	// tasks' answers run together. Both candidate causes are disprovable
+	// from this line alone and need opposite fixes: if ONE corr_id/task_id
+	// accumulated both topics, the merge happened before the wire and is
+	// the backend's; if two entries each carry their own ids but the text
+	// is crossed, it is this package's routing. Head and tail rather than
+	// the whole body because a reply is thousands of tokens and a log is
+	// not a transcript.
+	if w.log != nil {
+		head, tail := e.text, ""
+		if len(head) > 60 {
+			tail = head[len(head)-60:]
+			head = head[:60]
+		}
+		w.log.Debug("chat: reply finished",
+			"corr_id", e.requestID, "task_id", e.taskID,
+			"agent", e.agentID, "lane", int(e.lane), "status", int(status),
+			"bytes", len(e.text), "head", head, "tail", tail)
+	}
 }
 
 // fireQueued sends the pending message once the turn lane is free. F5:

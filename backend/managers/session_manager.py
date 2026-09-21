@@ -3,6 +3,7 @@ SessionRepository. Does NOT know Claude, OpenAI, or any provider."""
 
 from __future__ import annotations
 
+import re
 import time
 from typing import Any, Optional
 
@@ -17,6 +18,28 @@ from runtime.errors import RuntimeException
 
 class SessionNotFoundError(RuntimeException):
     pass
+
+
+_CONTROL_CHARS = re.compile(r"[\x00-\x1f\x7f]")
+
+
+def _sanitize_title(title: str) -> str:
+    """Collapse a title to one line and strip control characters.
+
+    Confirmed from two real rows: a title containing a raw embedded "\n"
+    ("# heading\n**bold** and `inline` and ...") measures and stores fine
+    -- nothing here validates line count -- but broke the Go frontend's
+    Sessions card border, because that renderer measures a title's DISPLAY
+    WIDTH assuming one line and the terminal drew the second half on the
+    row below, outside the box it had already closed. Applied here rather
+    than at each caller: create() and rename() are the only two places a
+    title is ever written, so this is the one choke point that protects
+    CreateSession, RenameSession, a manually-typed CLI title, and whatever
+    calls either method next -- none of which should have to remember this
+    on their own. _generate_title's own splitlines()[0][:60] guard stays;
+    this is defense in depth, not a replacement for it.
+    """
+    return " ".join(_CONTROL_CHARS.sub(" ", title).split())
 
 
 class SessionManager:
@@ -38,7 +61,7 @@ class SessionManager:
     ) -> Session:
         """provider/model are Optional as of B6: NULL means "inherit from
         global config". This manager stores that; it does not resolve it."""
-        session = Session.new(title=title, provider=provider, model=model,
+        session = Session.new(title=_sanitize_title(title), provider=provider, model=model,
                                workspace=workspace, project_id=project_id,
                                settings=settings, effort=effort, created_by=created_by)
         await self._repo.insert(session)
@@ -73,7 +96,7 @@ class SessionManager:
 
     async def rename(self, session_id: str, new_title: str) -> None:
         await self._ensure_exists(session_id)
-        await self._repo.update_fields(session_id, {"title": new_title})
+        await self._repo.update_fields(session_id, {"title": _sanitize_title(new_title)})
 
     async def archive(self, session_id: str) -> None:
         await self._ensure_exists(session_id)

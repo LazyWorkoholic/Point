@@ -91,9 +91,11 @@ type Workspace struct {
 
 	scrollback int
 
-	sessionID    string
-	sessionTitle string
-	bootstrapped bool
+	sessionID       string
+	sessionTitle    string
+	sessionProvider string
+	sessionModel    string
+	bootstrapped    bool
 
 	// providers is the set of provider names this backend registered, or
 	// nil when it could not be established. Read only by knownProvider
@@ -223,6 +225,36 @@ type Workspace struct {
 	cacheWidth int
 	cache      map[string][]string
 	cacheOrder []string
+
+	// sessions is F6's Sessions card: the last ListSessions reply, kept
+	// around rather than discarded once bootstrap has picked one. Refreshed
+	// at bootstrap and after a switch (onSessionList/onSessionCreated) —
+	// nothing else mutates a session's title or existence yet, so there is
+	// no third moment that would leave this stale.
+	sessions []wireSession
+
+	// tasks and backendDown are F6's: the root-owned global task snapshot
+	// and connection state, arriving via app.DiagnosticsMsg exactly the way
+	// Restarts/InFlight already do for the Placeholder — see chat.go's
+	// Update case and cards.go's renderers. Neither is fetched by this
+	// package; Root decides when to ask (root.go's refreshTasks) and this
+	// workspace only renders what it is handed.
+	tasks       []app.TaskRow
+	backendDown bool
+	// diagnosticsSeq is the last app.DiagnosticsMsg.Seq this workspace has
+	// applied — see protocol.go's DiagnosticsMsg case for why arrival
+	// order alone cannot be trusted.
+	diagnosticsSeq int
+
+	// usage is F6's Status card "tokens / cost" line: the most recent
+	// TokenUsage this session has seen, real numbers from UsageUpdated as a
+	// reply streams (stream.go) or from the last persisted message's own
+	// Usage field once reloaded (reload.go's setSession). Cost is never
+	// set: the backend has no pricing table anywhere yet (managers/
+	// message.py's TokenUsage doc says billing is a later episode's job),
+	// so the card omits it, per spec, rather than inventing a number
+	// nothing computed.
+	usage wireUsage
 }
 
 // New builds a Chat workspace. It does nothing over the wire yet — Init and
@@ -262,10 +294,16 @@ func New(opts Options) *Workspace {
 
 func (w *Workspace) ID() layout.WorkspaceID { return layout.WorkspaceChat }
 
-// Cards is empty: F3 does not build the right pane. An open right pane needs
-// BOTH RightPaneOpen and a non-empty RightCards (layout.Compute's rule), so
-// returning nil here is what keeps it hidden until F6.
-func (w *Workspace) Cards() []layout.CardSlot { return nil }
+// Cards is F6's right pane: Status short, Task medium, Sessions taking the
+// remainder — LAYOUT.md's own heights, unchanged since F1 chose them for the
+// Placeholder stub this replaces.
+func (w *Workspace) Cards() []layout.CardSlot {
+	return []layout.CardSlot{
+		{MinHeight: 5},
+		{MinHeight: 8},
+		{MinHeight: 6, Flex: true},
+	}
+}
 
 // Init has nothing to do at Bubble Tea's Init time: Update watches for
 // protocol.ConnectedMsg and starts the ListSessions/GetSession/CreateSession

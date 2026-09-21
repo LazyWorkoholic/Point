@@ -88,7 +88,11 @@ type wireSession struct {
 	// session inherits the global config. The backend has always sent it
 	// (runtime.py's _session_to_dict); nothing decoded it until the
 	// startup check in providers.go needed it.
-	Provider  string        `json:"provider"`
+	Provider string `json:"provider"`
+	// Model is F6's: the Status card's "provider · model" line. The wire has
+	// always sent it (runtime.py's _session_to_dict); nothing decoded it
+	// until now.
+	Model     string        `json:"model"`
 	UpdatedAt float64       `json:"updated_at"`
 	Messages  []wireMessage `json:"messages"`
 }

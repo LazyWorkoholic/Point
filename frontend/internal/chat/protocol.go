@@ -195,6 +195,9 @@ func (w *Workspace) onSessionList(env protocol.Envelope) {
 		w.loadErr = err.Error()
 		return
 	}
+	// F6's Sessions card: kept beyond the bootstrap decision below, which
+	// only reads it to pick one to open.
+	w.sessions = p.Sessions
 	// Already sorted most-recently-updated first, so the newest session
 	// this backend can actually USE is the first one whose provider it
 	// registered. Skipping is what stops one stale row -- a session
@@ -226,6 +229,8 @@ func (w *Workspace) onSessionCreated(env protocol.Envelope) {
 		w.loadErr = err.Error()
 		return
 	}
+	// Not in w.sessions yet — ListSessions ran before this one existed.
+	w.sessions = append(w.sessions, p.Session)
 	w.setSession(p.Session)
 }
 
@@ -246,6 +251,8 @@ func (w *Workspace) setSession(s wireSession) {
 	w.loadErr = ""
 	w.sessionID = s.ID
 	w.sessionTitle = s.Title
+	w.sessionProvider = s.Provider
+	w.sessionModel = s.Model
 	// Every row the database returned, rendered verbatim — nothing merged,
 	// relabelled or dropped. See chat.go's `all` field for why the
 	// retry-fold that briefly lived here was removed, and stays removed.
@@ -257,6 +264,18 @@ func (w *Workspace) setSession(s wireSession) {
 	// neither reads position, adjacency or time. See reload.go.
 	w.all = pairReloaded(s.Messages)
 	w.decorateReloaded()
+	// F6's Status card "tokens / cost" line: the last turn this session
+	// actually ran, not this session's total — the newest message that
+	// carries a non-zero usage, scanning backward since a live entry (below)
+	// takes over once one streams. Zero value (nothing yet) renders as
+	// nothing, not a fabricated 0.
+	w.usage = wireUsage{}
+	for i := len(w.all) - 1; i >= 0; i-- {
+		if w.all[i].Usage.TotalTokens > 0 {
+			w.usage = w.all[i].Usage
+			break
+		}
+	}
 	// F5: live entries and the queue belong to the session that made them.
 	// Nothing switches sessions yet (F6 owns that), but leaving them
 	// attached across a setSession would render one session's stream into
@@ -297,6 +316,32 @@ func (w *Workspace) Update(msg tea.Msg) (app.Workspace, tea.Cmd) {
 	switch m := msg.(type) {
 	case protocol.ConnectedMsg:
 		w.beginBootstrap()
+	case app.DiagnosticsMsg:
+		// F6: the root-owned Task card snapshot and connection state — see
+		// chat.go's doc comment on why this workspace does not fetch either
+		// itself. ConnState drives the "backend down -> dim placeholders"
+		// rule (F06-right-pane.md's Done-when #7): a card must never keep
+		// showing its last real numbers once the connection Placeholder
+		// itself would call StateFailed.
+		//
+		// Seq guards against a real race, not a hypothetical one: each
+		// DiagnosticsMsg is delivered by its own tea.Cmd goroutine
+		// (root.go's pushDiagnostics), and bubbletea gives no guarantee
+		// that an earlier push's goroutine finishes before a later one
+		// does. Two pushes close together — a TaskDone envelope
+		// immediately followed by the ListTasks reply it triggered — can
+		// therefore arrive out of order. Without this guard, an OLDER
+		// snapshot landing AFTER a newer one silently overwrites it, and
+		// nothing corrects it until some later event pushes again — this
+		// is what a field report described as the Task card "locking onto
+		// the first snapshot's identity and never letting go" until the
+		// overlay was closed and reopened. Seq lets this handler trust
+		// build order over arrival order.
+		if m.D.Seq > w.diagnosticsSeq {
+			w.diagnosticsSeq = m.D.Seq
+			w.tasks = m.D.Tasks
+			w.backendDown = m.D.ConnState == protocol.StateFailed
+		}
 	case protocol.EnvelopeMsg:
 		return w, w.handleEnvelope(m.Envelope)
 

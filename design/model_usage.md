@@ -18,8 +18,15 @@ SESSION  EPISODE                          MODEL         WHY
 11c      B18 message pagination           Sonnet high
 12       F7  popup framework              Sonnet high   one widget, clear spec
 13       F6  right pane                   Sonnet medium mostly wiring events to cards
+                                                        -- ESTIMATE WAS WRONG, see below
+13b      B21 orphaned message context     Sonnet high   one filter, but in the
+                                                        highest-blast-radius function
+                                                        in the backend
+13c      B20 context.report on the wire   Sonnet high   transport over a calculation
+                                                        that already exists
 14       F8  @ picker                     Sonnet high   modes + guards, well defined
 15       F9  tray, cards, diff            Opus medium   diff computation + apply paths
+15b      B19 Silence-Based Agent Timeout
 16       F10 settings, first run          Sonnet high   forms and flows
 16b      F18 windowed history             Opus high
 17       F12 workspace lifecycle          Opus high     Suspend/Resume + timers;
@@ -37,11 +44,31 @@ SESSION  EPISODE                          MODEL         WHY
 26       F17 web preview                  Sonnet high   small, well specced
 27       B17 hardening                    Sonnet high   tests are mechanical
 
-Three rules that matter more than the table:
+F6 is the cautionary entry. "Mostly wiring events to cards" was a fair reading
+of the spec and wrong about the work: the build was a day, the verification gate
+was seven rounds. What ran long was not complexity in the cards but three defects
+whose causes were each in a different component than the symptom -- a Bubble Tea
+cmd-ordering race, a visibility flag that three of five call sites forgot to
+update, and a backend context bug that F6 only surfaced. None was predictable
+from the spec.
+
+The lesson is not "estimate F6-like episodes higher". It is that **an episode
+that touches a shared contract -- the message bus, the layout engine, the
+context builder -- carries risk its own Build section cannot show you**, because
+the risk lives in what else already depends on that contract. Wiring is cheap;
+wiring into something six episodes already rely on is not.
+
+Four rules that matter more than the table:
 
 Fix-up rounds go a level up, not down. If a verification check fails, debugging is reasoning, not typing. A Sonnet episode that fails twice should be re-run on Opus rather than poked at repeatedly — three failed Sonnet rounds costs more than one Opus round.
 
 Never drop below medium effort. Low effort on a spec'd episode produces code that looks right and skips the awkward cases — the guards, the empty states, the error paths. Those are exactly what your verification checks test, so you pay the saving back with interest.
+
+A bug that survives two failed reproductions is a model decision, not just a
+debugging one. Two carefully-traced wrong hypotheses means the fault is probably
+not where either of you is looking, and more Sonnet rounds in the same place
+compound the error. Escalate, or stop theorising and instrument -- see
+WORKFLOW.md's rule 7.
 
 Doc-only work is always Sonnet. Writing completed/ files, parking-lot entries, updating an INDEX — Sonnet high is more than enough, and those are frequent.
 

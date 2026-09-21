@@ -27,10 +27,37 @@ func (w *Workspace) View(l layout.Layout) string {
 	mainEdge := th.Style(mainBorderRole(w.input.focused))
 	secEdge := th.Style(queryBorderRole(w.input.currentMode(), w.input.focused))
 
-	return stackBlocks(
+	left := stackBlocks(
 		paneBox(mainEdge, label, mainRect, "View Port", w.viewportLines(mainRect), paneHorizontalPadding),
 		paneBox(secEdge, label, secRect, "Query Area", w.queryLines(secRect), genericBoxPadding),
 	)
+
+	if !l.ShowRightPane || len(l.RightPane) == 0 {
+		return left
+	}
+	return sideBySide(left, l.Main.W, w.rightPane(l), l.RightPaneWidth, layout.PaneGapX)
+}
+
+// rightPane is F6's Status/Task/Sessions column — one independently
+// bordered box per CardSlot, LAYOUT.md's "different heights, not an even
+// split", stacked with no gap.
+func (w *Workspace) rightPane(l layout.Layout) string {
+	th := w.theme
+	idleEdge := th.Style(theme.BorderIdle)
+	label := th.Style(theme.TextSecondary)
+
+	titles := []string{"Status", "Task", "Sessions"}
+	bodies := []func(int, int) []string{w.statusCardLines, w.taskCardLines, w.sessionsCardLines}
+
+	var cards []string
+	for i, r := range l.RightPane {
+		if r.IsZero() || i >= len(titles) {
+			continue
+		}
+		lines := bodies[i](r.W-2*genericBoxPadding-2, r.H-2)
+		cards = append(cards, paneBox(idleEdge, label, r, titles[i], lines, genericBoxPadding))
+	}
+	return stackBlocks(cards...)
 }
 
 // mainBorderRole is queryBorderRole's mirror image (input_render.go): the
