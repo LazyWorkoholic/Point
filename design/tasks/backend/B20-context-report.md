@@ -160,7 +160,12 @@ than the UI.
 ## Handoff
 
 - **F6's Status card row stays a stub until a FRONTEND follow-up lands**, not
-  when this episode closes. This gives the data a way to travel; something
+  when this episode closes. That follow-up is **WORKFLOW.md's SESSION 13d**
+  (`S13d-wire-context-card`), and **its task doc is deliberately unwritten
+  until this episode closes** — its whole content is "read this event", so it
+  cannot be specced until this doc's Record step has said what the event
+  actually looks like. Writing it in advance would spec it against a shape
+  that may not survive. This gives the data a way to travel; something
   still has to read it. That follow-up also owns the expanded context
   composition card (UI-09), which F6 left unbuilt — and which is the reason
   F6 closed on seven of its eight "Done when" criteria rather than all eight.

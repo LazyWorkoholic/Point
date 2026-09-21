@@ -831,9 +831,72 @@ and why -- it means B8 guessed wrong about what the card needs.
 
 **Note:** F6's Status card stays a stub until a FRONTEND follow-up reads this
 event. B20 gives the data a way to travel; something still has to read it.
-That follow-up also owns UI-09, the expanded context composition card, which
-F6 left unbuilt — and is why F6 closed on seven of its eight "Done when"
-criteria rather than all eight.
+That follow-up is SESSION 13d below.
+
+---
+
+# SESSION 13d — S13d Wire the Context Card
+
+**Goal:** F6's Status card row 1 stops saying "context: not wired yet" and
+starts showing real numbers, and the expanded context composition card
+(UI-09) exists at all.
+
+**This is a repair/wiring session, the same shape as S11b and S12b — not a
+full F-episode.** It does not consume an F number.
+
+**⚠ The task doc does not exist yet, and writing it is step one of this
+session — not something to do in advance.** Its entire content is "read
+B20's event and render it", so it cannot be specced accurately until B20's
+completed doc says what that event actually looks like. B20's own Record
+step asks whether `ContextReport` needed any new field; if it did, a doc
+written beforehand would be specced against a shape that no longer exists.
+F6 shipped a stub for exactly this reason rather than guessing at B8's
+numbers, and its handoff warns that a near-match which compiles but differs
+on one field name is worse than an obvious break.
+
+**Paste:**
+```
+Read CLAUDE.md, design/completed/backend/B20-context-report.md, and
+design/completed/frontend/F06-right-pane.md.
+
+FIRST, before any code: write design/tasks/frontend/S13d-wire-context-card.md,
+in the same shape as S11b/S12b's task docs. Scope, and nothing beyond it:
+
+  1. Replace the Status card's row-1 stub ("context: not wired yet (B20)")
+     with a real read of B20's context.report event.
+  2. Build the "expand via enter/click" gesture on the Status card that F6
+     deferred because there was nothing real to expand into -- UI-09, the
+     context composition card: per-section token counts that sum to the
+     total, and a named eviction prediction.
+
+Reuse F6's existing card-rendering conventions -- statusCardLines, the
+paneBox/overlay machinery, the theme roles. Do NOT redesign the card's
+layout, and do NOT reimplement B8's token arithmetic: the numbers arrive
+computed, and a second implementation of the same arithmetic disagrees
+eventually.
+
+Note that the right pane is NOT in FocusAware's rotation, so a card row
+cannot currently be focused -- decide deliberately how the expand gesture
+is reached, and record that decision.
+
+Then show me the task doc and stop before writing code.
+```
+
+**You do:** confirm the section counts sum to the total and that the eviction
+prediction names real messages — F6's Done-when #2, which it could not
+satisfy.
+
+**Record:**
+```
+Write design/completed/frontend/S13d-wire-context-card.md following the
+format in design/completed/frontend/INDEX.md. Add a row to that INDEX's
+status table.
+
+Record explicitly that F6's Done-when #2 is now satisfied, and update
+F06-right-pane.md's handoff note that said it was owed.
+```
+
+**Then:** commit · `/clear`
 
 ---
 
