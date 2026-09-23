@@ -87,6 +87,10 @@ class IncomingEventType(str, Enum):
     SET_ATTACHMENT_MODE = "SetAttachmentMode"
     LIST_ATTACHMENTS = "ListAttachments"
     RESOLVE_ATTACHMENT = "ResolveAttachment"
+    # B20: the on-demand pull for what B8's context.report() already
+    # computes. Payload mirrors `cli.py context report`: an optional
+    # `session_id`, absent meaning the most recently updated session.
+    GET_CONTEXT_REPORT = "GetContextReport"
 
 
 @dataclass(frozen=True)
@@ -190,6 +194,11 @@ class OutgoingEventType(str, Enum):
     ATTACHMENT_LIST = "AttachmentList"
     ATTACHMENT_DETACHED = "AttachmentDetached"
     ATTACHMENT_RESOLUTION = "AttachmentResolution"
+    # B20: ContextReport.to_dict() verbatim, both as the reply to
+    # GetContextReport (corr_id set) and as the push after a turn's
+    # assistant message is persisted (corr_id null) -- one shape, one
+    # decoder, not two.
+    CONTEXT_REPORT = "ContextReport"
     # Connection-level, caused by no request: corr_id is null on both.
     HELLO = "hello"
     PING = "ping"

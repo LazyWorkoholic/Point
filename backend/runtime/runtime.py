@@ -23,6 +23,7 @@ from logging_setup import get_logger
 from managers.agent import AgentConfig
 from managers.attachment import MODE_FULL
 from managers.attachment_manager import AttachmentManager
+from managers import context
 from managers.context import SessionMemoryService
 from managers.invocation import parse_invocation
 from managers.editor_context import EditorContext
@@ -30,7 +31,7 @@ from managers.message import MessageRole, Outcome
 from managers.project import Project
 from managers.project_manager import ProjectManager
 from managers.session import Session
-from managers.session_manager import SessionManager
+from managers.session_manager import SessionManager, SessionNotFoundError
 from runtime.dispatcher import Dispatcher
 from runtime.errors import (
     AdvancedUnavailableError,
@@ -289,6 +290,7 @@ class Runtime:
         self.dispatcher.register(IncomingEventType.SET_ATTACHMENT_MODE, self._handle_set_attachment_mode)
         self.dispatcher.register(IncomingEventType.LIST_ATTACHMENTS, self._handle_list_attachments)
         self.dispatcher.register(IncomingEventType.RESOLVE_ATTACHMENT, self._handle_resolve_attachment)
+        self.dispatcher.register(IncomingEventType.GET_CONTEXT_REPORT, self._handle_get_context_report)
         self.dispatcher.register(IncomingEventType.PROJECT_INIT, self._handle_project_init)
         self.dispatcher.register(IncomingEventType.PROJECT_RESOLVE, self._handle_project_resolve)
         self.dispatcher.register(IncomingEventType.LIST_PROJECT_FILES, self._handle_list_project_files)
@@ -1033,6 +1035,69 @@ class Runtime:
             },
         ))
 
+    async def _handle_get_context_report(self, event: IncomingEvent) -> None:
+        """B20: the on-demand pull. Session resolution mirrors
+        `cli.py context report` exactly -- `memory.session()` /
+        `memory.latest_session()`, not `self.sessions.get()` -- so the
+        wire answer and the CLI's own numbers are the same lookup, not
+        two that happen to usually agree.
+        """
+        session_id = event.payload.get("session_id")
+        if session_id:
+            session = await self.memory.session(session_id)
+            if session is None:
+                raise SessionNotFoundError(f"No session with id {session_id!r}")
+        else:
+            session = await self.memory.latest_session()
+            if session is None:
+                raise InvalidEventError("GetContextReport: no sessions exist")
+            session_id = session.id
+
+        # B9: the report is shaped by the session's own agent, exactly
+        # like cmd_context_report -- not a fixed policy.
+        agent = await self.agents.resolve_for_session(session)
+        report = await context.report(session_id, self.memory, policy=agent.to_context_policy())
+        await self._emit(OutgoingEvent(
+            type=OutgoingEventType.CONTEXT_REPORT,
+            request_id=event.request_id,
+            session_id=session_id,
+            payload=report.to_dict(),
+        ))
+
+    async def _push_context_report(self, session_id: str) -> None:
+        """B20: pushed once a turn's assistant message is persisted --
+        the only point the report's numbers can have moved. Calls the
+        same `context.report()` `GetContextReport` calls; never a second
+        implementation of the arithmetic.
+
+        Best-effort and swallows `RuntimeException`: this runs from
+        inside the stream sink, on the same `await` chain `task.py`
+        wraps to convert an exception into a `failed` terminal event
+        (`runtime/task.py` `_run()`). A report that fails to build here
+        must not retroactively turn an already-persisted, already
+        `TaskDone`-announced turn into a second, contradictory terminal
+        event.
+        """
+        try:
+            session = await self.memory.session(session_id)
+            if session is None:
+                return
+            agent = await self.agents.resolve_for_session(session)
+            report = await context.report(session_id, self.memory, policy=agent.to_context_policy())
+        except RuntimeException as exc:
+            _log.warning("B20: could not build context report for session %s: %s", session_id, exc)
+            return
+        _log.debug(
+            "B20: pushing context report for session %s (used=%d free=%d)",
+            session_id, report.used_tokens, report.free_tokens,
+        )
+        await self._emit(OutgoingEvent(
+            type=OutgoingEventType.CONTEXT_REPORT,
+            request_id=None,
+            session_id=session_id,
+            payload=report.to_dict(),
+        ))
+
     async def _handle_resolve_attachment(self, event: IncomingEvent) -> None:
         """Guard and price a path WITHOUT attaching it.
 
@@ -1265,6 +1330,13 @@ class Runtime:
             # Terminal states: done / failed / cancelled
             outcome = _outcome_for(kind, chunk.get("code"), chunk.get("bound"))
             invocation = self.streams.invocation_for(task.id)
+            # B20: whether this chunk persisted a message -- and so
+            # whether the context actually changed and a report push is
+            # warranted. Set at every `append_message` below, never
+            # inferred from `kind` alone: a `failed`/`cancelled` turn
+            # still enters history when the accumulator salvaged partial
+            # text, and the report must reflect that turn too.
+            persisted = False
             if self.streams.has_stream(task.id):
                 accumulator = self.streams.get_accumulator(task.id)
                 if kind == "done":
@@ -1287,6 +1359,7 @@ class Runtime:
                     # passes through here before it reaches the session.
                     msg = await self.agent_executor.apply_response_middleware(msg)
                     await self.sessions.append_message(msg)
+                    persisted = True
                 self.streams.close_stream(task.id)
             else:
                 if kind == "done" and echo_collected:
@@ -1303,6 +1376,7 @@ class Runtime:
                     )
                     msg = await self.agent_executor.apply_response_middleware(msg)
                     await self.sessions.append_message(msg)
+                    persisted = True
                 # The echo path never registers a stream, but it does draw
                 # sequence numbers for its envelopes. Drop the counter or
                 # it outlives the task it belonged to.
@@ -1336,6 +1410,11 @@ class Runtime:
                 type=out_type, request_id=request_id, task_id=task.id,
                 session_id=session_id, payload=payload,
             ))
+
+            # B20: pushed at the turn boundary, not per delta -- the
+            # numbers only move once history actually gained a message.
+            if persisted:
+                await self._push_context_report(session_id)
 
         return sink
 

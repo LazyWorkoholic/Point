@@ -137,10 +137,29 @@ mode, because none of it touches a provider.
 
 ## Manual verification (PowerShell)
 
+**Per CLAUDE.md: never rename or delete the real `%APPDATA%\Point` /
+`%LOCALAPPDATA%\Point` by name.** Point and the Go frontend both read their
+config/state directories from the `APPDATA`/`LOCALAPPDATA` env vars alone
+(`backend\appconfig.py`, `frontend\internal\config\config.go`) — pointing
+those at a scratch directory for one PowerShell session moves both sides of
+the app at once, with nothing to rename back and nothing that can delete the
+live profile even if a step fails. This whole gate is one PowerShell session
+(env vars set once, `go run` launched interactively inside it, checks run
+against the same scratch path throughout, cleanup at the end) — do not split
+it across separate terminals or tool calls, or the override is gone before
+the next step runs.
+
 ```powershell
-# 1-2. fresh machine simulation
-Rename-Item "$env:APPDATA\Point" "Point.bak" -ErrorAction SilentlyContinue
-Rename-Item "$env:LOCALAPPDATA\Point" "Point.bak" -ErrorAction SilentlyContinue
+# One session for the whole gate.
+$ErrorActionPreference = "Stop"
+$scratch = Join-Path $env:TEMP "point-scratch-f10"
+New-Item -ItemType Directory -Force $scratch | Out-Null
+$realAppData = $env:APPDATA
+$realLocalAppData = $env:LOCALAPPDATA
+$env:APPDATA      = $scratch
+$env:LOCALAPPDATA = $scratch
+
+# 1-2. fresh machine simulation -- $scratch has no config.toml or state yet
 cd D:\Projects\Point
 go run .\frontend\cmd\point
 ```
@@ -151,10 +170,10 @@ Press `esc` at the key prompt. **Expect:** the disabled-input explanation, and
 the palette/help/editor all still reachable.
 
 ```powershell
-# 6. config.toml must be untouched
-Copy-Item "$env:APPDATA\Point\config.toml" "$env:TEMP\before.toml"
+# 6. config.toml must be untouched (still inside the same session/$scratch)
+Copy-Item "$scratch\Point\config.toml" "$env:TEMP\before.toml"
 # change theme, queue depth, and mouse in the UI, then quit
-Compare-Object (Get-Content "$env:TEMP\before.toml") (Get-Content "$env:APPDATA\Point\config.toml")
+Compare-Object (Get-Content "$env:TEMP\before.toml") (Get-Content "$scratch\Point\config.toml")
 ```
 **Expect:** no output — the files are identical.
 **Fails if:** anything differs. Point rewrote the user's file.
@@ -168,11 +187,10 @@ Then paste a valid key copied with a trailing newline.
 **Expect:** `✓ valid — N models available`.
 
 ```powershell
-# restore your profile
-Remove-Item "$env:APPDATA\Point" -Recurse -Force -ErrorAction SilentlyContinue
-Remove-Item "$env:LOCALAPPDATA\Point" -Recurse -Force -ErrorAction SilentlyContinue
-Rename-Item "$env:APPDATA\Point.bak" "Point" -ErrorAction SilentlyContinue
-Rename-Item "$env:LOCALAPPDATA\Point.bak" "Point" -ErrorAction SilentlyContinue
+# cleanup -- $scratch only; the real profile was never touched
+Remove-Item -LiteralPath $scratch -Recurse -Force
+$env:APPDATA      = $realAppData
+$env:LOCALAPPDATA = $realLocalAppData
 ```
 
 ## Handoff

@@ -125,30 +125,46 @@ handler.
 
 ## Verification gate (PowerShell, scratch profile)
 
-Per CLAUDE.md: one combined script against a renamed-aside profile, never the
-live one — `$env:POINT_DB` set once inside the same script, because separate
-tool calls do not share shell state.
+Per CLAUDE.md: one combined script, and Point's process never sees the real
+`%APPDATA%\Point` / `%LOCALAPPDATA%\Point` path at all -- `$env:APPDATA` and
+`$env:LOCALAPPDATA` are pointed at a scratch directory for the one script's
+duration, restored at the end. `$env:POINT_DB` alone is not enough: it moves
+the database but config.toml/state.json/logs still resolve under the real
+profile unless APPDATA/LOCALAPPDATA are overridden too. (The old
+rename-aside-and-restore pattern is retired -- see CLAUDE.md's hard rules.)
 
 ```powershell
-cd D:\Projects\Point\backend
+$ErrorActionPreference = "Stop"
+$scratch = Join-Path $env:TEMP "point-scratch-b20"
+New-Item -ItemType Directory -Force $scratch | Out-Null
+$realAppData = $env:APPDATA
+$realLocalAppData = $env:LOCALAPPDATA
+try {
+    $env:APPDATA      = $scratch
+    $env:LOCALAPPDATA = $scratch
+    cd D:\Projects\Point\backend
 
-$env:POINT_DB = "$env:TEMP\point-b20\runtime.db"
-New-Item -ItemType Directory -Force (Split-Path $env:POINT_DB) | Out-Null
-uv run python cli.py migrate
-uv run python cli.py session new --title "b20"
+    uv run python cli.py migrate
+    $sid = (uv run python cli.py session new "b20").Split(" ")[0]
 
-# 1. the CLI's own numbers, as the baseline the wire must match
-uv run python cli.py send "first question" --wait
-uv run python cli.py context report --last --json
+    # 1. the CLI's own numbers, as the baseline the wire must match
+    uv run python cli.py send "first question" --session $sid
+    uv run python cli.py context report --session $sid --json
 
-# 2. the wire answer for the same session must agree field for field
-#    (drive GetContextReport over stdin, or add a --via-wire flag to the
-#    CLI command if that is cleaner -- record which you chose and why)
+    # 2. the wire answer for the same session must agree field for field
+    #    (drive GetContextReport over stdin, or add a --via-wire flag to the
+    #    CLI command if that is cleaner -- record which you chose and why)
 
-# 3. the numbers must MOVE
-uv run python cli.py send "second, much longer question ..." --wait
-uv run python cli.py context report --last --json
-# EXPECT: used_tokens up, free_tokens down, history count up
+    # 3. the numbers must MOVE
+    uv run python cli.py send "second, much longer question ..." --session $sid
+    uv run python cli.py context report --session $sid --json
+    # EXPECT: used_tokens up, free_tokens down, history count up
+}
+finally {
+    $env:APPDATA      = $realAppData
+    $env:LOCALAPPDATA = $realLocalAppData
+    Remove-Item -LiteralPath $scratch -Recurse -Force -ErrorAction SilentlyContinue
+}
 ```
 
 Eyes-on: with the frontend follow-up not yet built, confirm the push arrives

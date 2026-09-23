@@ -103,6 +103,7 @@ _EXPECTED_REPLY: dict[str, set[str]] = {
     "DetachContext": {"AttachmentDetached"},
     "SetAttachmentMode": {"Attachment"},
     "ListAttachments": {"AttachmentList"},
+    "GetContextReport": {"ContextReport"},
 }
 
 _TASK_TERMINAL = {"TaskDone", "TaskFailed", "TaskCancelled"}
@@ -626,7 +627,24 @@ async def cmd_context_report(runtime: Runtime, args: argparse.Namespace) -> int:
     read-only projection with no task, no stream, and no terminal event
     to wait for, so wrapping it in the request/response machinery would
     buy nothing but latency.
+
+    `--via-wire` (B20) takes the other path on purpose -- GetContextReport,
+    drained through the same `call()` every other event-backed command
+    uses -- so this command can also serve as the check that the wire
+    reply and this command's own direct numbers agree field for field.
     """
+    if args.via_wire:
+        payload: dict[str, Any] = {}
+        if args.session:
+            payload["session_id"] = args.session
+        envelopes = await call(runtime, "GetContextReport", **payload)
+        _print_errors(envelopes)
+        if _failed(envelopes):
+            return EXIT_FAILED
+        report_envelope = next(e for e in envelopes if e["type"] == "ContextReport")
+        print(json.dumps(report_envelope["payload"], indent=2))
+        return EXIT_OK
+
     try:
         editor_context = _build_editor_context(args)
     except ValueError as exc:
@@ -1386,6 +1404,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="the most recently updated session (default when --session is omitted)",
     )
     ctx_report.add_argument("--json", action="store_true", help="machine-readable output")
+    ctx_report.add_argument(
+        "--via-wire", action="store_true",
+        help="drive GetContextReport over the event pipe instead of calling "
+             "context.report() directly (B20 verification: proves the wire "
+             "reply matches this command's own numbers). Always prints JSON; "
+             "editor context flags are ignored on this path, since "
+             "GetContextReport's payload is session_id only.",
+    )
     _add_editor_flags(ctx_report)
 
     tasks = sub.add_parser("tasks", help="task operations", parents=[common]).add_subparsers(
