@@ -37,6 +37,15 @@ ERROR_BACKEND_DIED = "backend_died"
 # pending work forever.
 LIVE_STATUSES = ("pending", "queued", "running")
 
+# The two terminal statuses that mean "ended without succeeding". NOT the
+# complement of LIVE_STATUSES -- "completed" is also terminal and belongs on
+# neither list, and "paused"/"awaiting_approval" are reserved and unused.
+# B21 reads this to tell a task that failed after producing output (a real
+# assistant row exists, the exchange stays in context) from one that failed
+# before its first token (no assistant row -- see context.py's orphan
+# filter).
+TERMINAL_FAILURE_STATUSES = ("failed", "cancelled")
+
 _UPSERT = """
 INSERT INTO tasks
     (id, session_id, agent_id, project_id, connection_id, kind, status,

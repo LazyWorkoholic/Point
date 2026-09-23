@@ -45,6 +45,7 @@ import appconfig
 from database.attachment_repository import AttachmentRepository
 from database.project_repository import ProjectRepository
 from database.session_repository import SessionRepository
+from database.task_repository import TERMINAL_FAILURE_STATUSES, TaskRepository
 from logging_setup import get_logger
 from managers.attachment import (
     MODE_DETACHED,
@@ -423,6 +424,8 @@ class MemoryService(Protocol):
 
     async def record_attachment_sent(self, attachment_id: str, mtime: int, size: int) -> None: ...
 
+    async def task_status(self, task_id: str) -> Optional[str]: ...
+
     async def search(self, query: str, scopes: list[str], limit: int) -> list[Any]: ...
 
     async def summary(self, session_id: str) -> Optional[str]: ...
@@ -448,6 +451,7 @@ class SessionMemoryService:
         self._sessions = SessionRepository(conn)
         self._attachments = AttachmentRepository(conn)
         self._projects = ProjectRepository(conn)
+        self._tasks = TaskRepository(conn)
 
     async def session(self, session_id: str) -> Optional[Session]:
         """Not part of the Protocol -- `report()` needs the session's
@@ -492,6 +496,17 @@ class SessionMemoryService:
 
     async def record_attachment_sent(self, attachment_id: str, mtime: int, size: int) -> None:
         await self._attachments.update_recorded_stat(attachment_id, mtime, size)
+
+    async def task_status(self, task_id: str) -> Optional[str]:
+        """B21. The `tasks` row's status for `task_id`, or None if the row
+        does not exist. Not part of the Protocol -- only `build()`'s orphan
+        filter reads it, the same way `task_messages` backs one caller.
+
+        Reuses S11b's join (`task_id` -> the `tasks` row) rather than a
+        second one: that pairing is already how the frontend answers "what
+        happened to this task", and this is the same question."""
+        row = await self._tasks.fetch_one(task_id)
+        return row["status"] if row else None
 
     # -- B13 ------------------------------------------------------------
 
@@ -885,6 +900,54 @@ async def build(
 
     # -- 5. recent messages, newest-first ---------------------------------
     window = await memory.recent_messages(request.session_id, policy.stm_window)
+
+    # B21: a task that failed before its first token persists a user
+    # message with no assistant row to answer it (B12's deliberate choice
+    # for the transcript -- see B12's handoff). Carried into the next
+    # prompt unfiltered, that orphaned question gets answered instead of --
+    # or as well as -- whatever the user actually just asked. Excluded here
+    # on the same task_id join S11b already built for transcript footers,
+    # never on position or timing (this project already deleted one
+    # adjacency heuristic for corrupting correct transcripts).
+    #
+    # The assistant-reply check is answered from `window` itself, not a
+    # second query: an assistant row is always chronologically after its
+    # question (executor.py generates task_id, appends the user message,
+    # then runs), so if the question is in this suffix its reply -- if one
+    # exists -- is too.
+    #
+    # A task that failed AFTER producing output keeps its exchange exactly
+    # as it is (it has a real assistant row, so it never reaches the
+    # lookup below); a genuinely in-flight turn has no assistant row either,
+    # but its task has no terminal status yet, so it is never excluded.
+    answered_task_ids = {
+        message.task_id
+        for message in window
+        if message.task_id and message.role == MessageRole.ASSISTANT
+    }
+    orphaned_ids: set[str] = set()
+    for message in window:
+        if (
+            message.role != MessageRole.USER
+            or not message.task_id
+            or message.task_id in answered_task_ids
+        ):
+            continue
+        status = await memory.task_status(message.task_id)
+        if status not in TERMINAL_FAILURE_STATUSES:
+            continue
+        orphaned_ids.add(message.id)
+        log.evicted.append(
+            EvictedItem(
+                SECTION_HISTORY, _short(message.id), message.role.value,
+                estimate_tokens(_message_text(message), request.model),
+                f"orphaned: task {_short(message.task_id)} ended {status!r} "
+                "with no reply",
+            )
+        )
+    if orphaned_ids:
+        window = [m for m in window if m.id not in orphaned_ids]
+
     history = MessageHistory(request.session_id, window)
 
     # Reasoning blocks produced by a different provider are filtered on

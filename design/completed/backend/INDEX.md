@@ -27,6 +27,7 @@ it passed.
 | B13–B17 | — | not started | — |
 | B18 | Message Pagination (keyset scrollback) | ✅ built + manually verified | `B18-message-pagination.md` |
 | B19 | Silence-Based Agent Timeout | ✅ built + manually verified | `B19-silence-based-timeout.md` |
+| B21 | Orphaned Messages Must Not Enter the Next Prompt | ✅ built + manually verified | `B21-orphaned-message-context.md` |
 
 ## Verified file structure — end of Episode 11
 

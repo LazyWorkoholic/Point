@@ -12,6 +12,17 @@ Why these two are not in the CLI script:
     does not exist yet. Calling `build()` twice with two literals is the
     honest way to show the knob works.
 
+    Precondition this check does not enforce: `<session-id>` must already
+    have MORE than 2 persisted messages (2 being the smaller literal
+    below) before this runs. `recent_messages` is `messages[-n:]` --
+    against a session with 2 or fewer messages, `[-2:]` and `[-50:]` are
+    the same slice, so the two rows come out identical and the check's own
+    "PASS if the two rows differ" reads as a FAIL no matter how `build()`
+    handles the window. That is a test-setup gap, not a defect (found
+    during B21's verification, chasing exactly this false alarm) -- point
+    this at a session from an ordinary multi-turn conversation, not a
+    freshly created one.
+
   * **Reasoning-block filtering.** No B4 provider emits a thinking block
     yet, and on a keyless profile the only usable provider is `echo`,
     which never reaches the provider layer at all. So the block has to
