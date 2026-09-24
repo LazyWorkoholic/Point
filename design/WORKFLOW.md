@@ -926,6 +926,10 @@ argv test. No CLI flags on the Go app, no backend change, no log-level
 change, no log rotation.
 
 Stop at the verification gate with PowerShell checks.
+
+If anything in this episode's Build section is ambiguous or seems to
+assume something not true of this repo, stop and tell me before
+writing code.
 ```
 
 **You do:** run the gate with and without the variable — one

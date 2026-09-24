@@ -11,6 +11,10 @@ import (
 // point somewhere the source tree layout does not describe.
 const BackendDirEnv = "POINT_BACKEND_DIR"
 
+// BackendVerboseEnv, when set to exactly "1", makes buildCommand launch the
+// backend with --verbose, surfacing its DEBUG lines in point.log.
+const BackendVerboseEnv = "POINT_BACKEND_VERBOSE"
+
 // backendMarker is the file whose presence proves a directory is backend\.
 const backendMarker = "main.py"
 
@@ -101,8 +105,14 @@ func validateBackendDir(dir string) error {
 //
 // `uv` is resolved through PATH, so no .exe suffix handling is needed on
 // Windows; exec.LookPath applies PATHEXT for us.
+//
+// BackendVerboseEnv, when exactly "1", appends --verbose to the argv.
 func buildCommand(backendDir string) *exec.Cmd {
-	cmd := exec.Command("uv", "run", "python", "main.py")
+	args := []string{"run", "python", "main.py"}
+	if os.Getenv(BackendVerboseEnv) == "1" {
+		args = append(args, "--verbose")
+	}
+	cmd := exec.Command("uv", args...)
 	cmd.Dir = backendDir
 	configureChild(cmd)
 	return cmd
