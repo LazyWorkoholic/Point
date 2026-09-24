@@ -299,7 +299,14 @@ func TestOverlayTrapsFocus(t *testing.T) {
 // touching the help screen.
 func TestHelpListsEveryAction(t *testing.T) {
 	r := newRoot(t)
-	out := newHelpOverlay(r).View(r.theme, 80, 20)
+	// 60 rows -- comfortably past today's action count (grouped under a
+	// handful of category headers), with headroom for more before this
+	// needs raising again. 20 was tight enough that S13d's context.expand
+	// (the 12th action) pushed "Retry Backend" out of a plain View call at
+	// that height -- Popup genuinely scrolls in the real app, but this test
+	// asserts every action WITHOUT scrolling, so its viewport has to be
+	// tall enough to hold all of them at once.
+	out := newHelpOverlay(r).View(r.theme, 80, 60)
 
 	for _, a := range r.actions.All() {
 		if !strings.Contains(out, a.Name) {
@@ -457,6 +464,8 @@ func key(s string) tea.KeyMsg {
 	switch s {
 	case "esc":
 		return tea.KeyMsg{Type: tea.KeyEsc}
+	case "enter":
+		return tea.KeyMsg{Type: tea.KeyEnter}
 	case "tab":
 		return tea.KeyMsg{Type: tea.KeyTab}
 	case "ctrl+l":

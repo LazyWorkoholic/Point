@@ -417,15 +417,25 @@ func (w *Workspace) writeSend(e *liveEntry, payload map[string]any) tea.Cmd {
 	// the header animation (120ms) and the watchdog (500ms) both re-arm
 	// forever, on an app that is doing nothing. That is an unbounded idle
 	// CPU leak with no way out, and it is why every failure path here ends
-	// the entry rather than only setting loadErr.
+	// the entry.
+	//
+	// None of them sets w.loadErr any more. That banner used to come from
+	// here, which made it depend on which of two timing windows a send
+	// landed in — see connection.go. "The backend is not connected" is now
+	// drawn from connection state alone; this function only records how its
+	// OWN send ended, on its own reply, where the user sees it.
 	fail := func(reason string) tea.Cmd {
-		w.loadErr = reason
 		e.errText = reason
 		w.finish(e, statusFailed)
 		return nil
 	}
 	if w.client == nil {
 		return fail("no backend connection")
+	}
+	if w.connectionDown() {
+		// Refused by the same check that draws the banner, so the two can
+		// never disagree about whether the backend was there.
+		return fail(w.connectionNotice())
 	}
 	raw, err := json.Marshal(payload)
 	if err != nil {

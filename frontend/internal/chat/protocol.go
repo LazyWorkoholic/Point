@@ -34,6 +34,11 @@ const (
 	// onSessionList can skip a session pinned to a provider this backend
 	// does not have. See beginBootstrap.
 	queryListProviders
+	// queryGetContextReport is S13d's once-per-load pull: a reloaded
+	// session has no per-message composition snapshot to seed w.usage-style
+	// from, so setSession asks explicitly. See requestContextReport and
+	// onContextReport.
+	queryGetContextReport
 )
 
 // localID mints a request id. protocol.newID does the equivalent job inside
@@ -84,10 +89,27 @@ func (w *Workspace) doSend(cmdType string, kind queryKind, payload map[string]an
 	id := localID()
 	env := protocol.Envelope{ID: id, Type: cmdType, Payload: raw}
 	if _, err := w.client.Request(env, 0); err != nil {
+		if kind.decorative() {
+			// Same treatment handleEnvelope already gives these kinds when
+			// the backend REFUSES them: a lost ListTasks or GetContextReport
+			// costs a footer or the Status card's row 1, never the
+			// transcript. Before this, the transport error became loadErr
+			// and blanked the viewport — the same "banner from whichever
+			// path failed" defect writeSend had (see connection.go).
+			w.log.Warn("chat: query not sent", "type", cmdType, "err", err)
+			return
+		}
 		w.loadErr = err.Error()
 		return
 	}
 	w.pending[id] = kind
+}
+
+// decorative reports whether a query only DECORATES a session that is
+// already on screen. A load query failing leaves nothing to show, so it
+// earns the loadErr screen; a decorative one never does.
+func (k queryKind) decorative() bool {
+	return k == queryListTasks || k == queryGetContextReport
 }
 
 // beginBootstrap fires once — the first time the backend is known to be
@@ -110,6 +132,37 @@ func (w *Workspace) beginBootstrap() {
 	w.send(protocol.CmdListProviders, queryListProviders, map[string]any{})
 }
 
+// onConnected handles every ConnectedMsg: the first one bootstraps, and a
+// RECONNECT (Root forwards those too, Restarted=true) clears what the outage
+// left behind.
+//
+// Before this, a reconnect called beginBootstrap and nothing else — which
+// returns at once when bootstrapped is already true. A send attempted while
+// the backend was dead sets w.loadErr from the client's own "backend is not
+// connected" (stream.go's writeSend), and render.go shows a non-empty loadErr
+// as the "! ..." banner IN PLACE of the transcript. Only beginBootstrap and
+// setSession ever cleared it, so after ctrl+w r the backend was genuinely
+// back while the viewport kept saying it was not, until the app restarted.
+//
+// Clearing unconditionally is safe: the transcript under the banner was
+// never discarded, and the send that failed keeps its own errText footer on
+// its reply entry, so the failure stays visible where it happened. A session
+// that never finished loading (its replies died with the old process, which
+// would also leave w.loading stuck true) bootstraps again instead — the new
+// process is a legitimate reason to retry, and this cannot litter the
+// database with sessions the way re-bootstrapping a LOADED session would.
+func (w *Workspace) onConnected() {
+	if !w.bootstrapped {
+		w.beginBootstrap()
+		return
+	}
+	w.loadErr = ""
+	if w.sessionID == "" {
+		w.bootstrapped = false
+		w.beginBootstrap()
+	}
+}
+
 // listSessions is the second half of the bootstrap, reached however the
 // provider list turned out — including when it failed. A provider list this
 // workspace could not get is a reason to fall back to the old "just open the
@@ -126,6 +179,18 @@ func (w *Workspace) listSessions() {
 func (w *Workspace) handleEnvelope(env protocol.Envelope) tea.Cmd {
 	if cmd, taken := w.handleStreamEvent(env); taken {
 		return cmd
+	}
+	// S13d: the push half of ContextReport. It shares its wire type with
+	// GetContextReport's reply but carries no corr_id (runtime.py's
+	// _push_context_report emits with request_id=None) and no task_id, so
+	// neither handleStreamEvent above nor the pending-map lookup below ever
+	// matches it -- checked directly against client.go's routing order,
+	// which is corr_id, then task_id, then session_id: this is exactly the
+	// RouteSession case. Caught here, before the pending lookup would
+	// otherwise silently drop it as "not one of ours".
+	if env.Type == protocol.EvContextReport && env.CorrID == "" {
+		w.onContextReport(env)
+		return nil
 	}
 	kind, ok := w.pending[env.CorrID]
 	if !ok {
@@ -163,6 +228,15 @@ func (w *Workspace) handleEnvelope(env protocol.Envelope) tea.Cmd {
 			w.log.Warn("chat: ListTasks refused, reloaded footers not rebuilt", "err", p.Error)
 			return nil
 		}
+		if kind == queryGetContextReport {
+			// NOT w.loadErr, same reasoning as queryListTasks: a refused
+			// pull costs the Status card's row 1 (it stays the dim
+			// placeholder) and nothing else. The transcript already on
+			// screen is correct without it, and the next completed turn's
+			// push will populate it anyway.
+			w.log.Warn("chat: GetContextReport refused, Status card stays unwired this load", "err", p.Error)
+			return nil
+		}
 		w.loading = false
 		w.loadErr = p.Error
 		if w.loadErr == "" {
@@ -182,6 +256,8 @@ func (w *Workspace) handleEnvelope(env protocol.Envelope) tea.Cmd {
 		w.onSession(env)
 	case queryListTasks:
 		w.onTaskList(env)
+	case queryGetContextReport:
+		w.onContextReport(env)
 	}
 	return nil
 }
@@ -276,6 +352,11 @@ func (w *Workspace) setSession(s wireSession) {
 			break
 		}
 	}
+	// S13d's Status card row 1: no per-message composition snapshot exists
+	// to seed from the way w.usage seeds above, so this resets to "nothing
+	// yet" here and requestContextReport (below) is what actually populates
+	// it for the newly-open session.
+	w.contextReport = nil
 	// F5: live entries and the queue belong to the session that made them.
 	// Nothing switches sessions yet (F6 owns that), but leaving them
 	// attached across a setSession would render one session's stream into
@@ -295,6 +376,7 @@ func (w *Workspace) setSession(s wireSession) {
 	// Last, and deliberately after the transcript is complete: the tasks
 	// join only decorates, so nothing waits on it. See requestTaskRows.
 	w.requestTaskRows()
+	w.requestContextReport()
 }
 
 // Update is the Workspace interface's entry point. Root's Update forwards
@@ -315,7 +397,7 @@ func (w *Workspace) setSession(s wireSession) {
 func (w *Workspace) Update(msg tea.Msg) (app.Workspace, tea.Cmd) {
 	switch m := msg.(type) {
 	case protocol.ConnectedMsg:
-		w.beginBootstrap()
+		w.onConnected()
 	case app.DiagnosticsMsg:
 		// F6: the root-owned Task card snapshot and connection state — see
 		// chat.go's doc comment on why this workspace does not fetch either
@@ -341,6 +423,7 @@ func (w *Workspace) Update(msg tea.Msg) (app.Workspace, tea.Cmd) {
 			w.diagnosticsSeq = m.D.Seq
 			w.tasks = m.D.Tasks
 			w.backendDown = m.D.ConnState == protocol.StateFailed
+			w.connState = m.D.ConnState
 		}
 	case protocol.EnvelopeMsg:
 		return w, w.handleEnvelope(m.Envelope)

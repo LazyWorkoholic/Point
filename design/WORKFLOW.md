@@ -900,6 +900,52 @@ F06-right-pane.md's handoff note that said it was owed.
 
 ---
 
+# SESSION 13e — S13e Backend Verbose Passthrough
+
+**Goal:** a Go-launched app can run its backend with `--verbose`, so the
+backend's DEBUG lines (B20's push confirmation among them) reach
+`point.log` without launching the backend by hand.
+
+**This is a repair/wiring session, the same shape as S11b, S12b and S13d —
+not a full F-episode.** It does not consume an F number.
+
+**Why it exists:** S13d's gate found that the app spawns the backend as a
+fixed `uv run python main.py`, so no DEBUG line is ever logged, and there
+was no working way to change that. `go run .\frontend\cmd\point --verbose`
+is silently ignored, and `cli.py` always runs its own separate Runtime.
+The task doc already exists — it was written at the end of S13d, from the
+direct evidence.
+
+**Paste:**
+```
+Read CLAUDE.md and design/tasks/frontend/S13e-backend-verbose-passthrough.md.
+
+Scope is exactly its Build section: spawn.go appends --verbose to the
+backend launch command when POINT_BACKEND_VERBOSE is exactly "1", plus the
+argv test. No CLI flags on the Go app, no backend change, no log-level
+change, no log rotation.
+
+Stop at the verification gate with PowerShell checks.
+```
+
+**You do:** run the gate with and without the variable — one
+`B20: pushing context report` line per completed turn with it, none
+without. Note `backend-stderr.log`'s size.
+
+**Record:**
+```
+Write design/completed/frontend/S13e-backend-verbose-passthrough.md
+following the format in design/completed/frontend/INDEX.md. Add a row to
+that INDEX's status table.
+
+Record the measured backend-stderr.log growth under verbose, and whether
+stderrTail still ended on the real error after a deliberate exit.
+```
+
+**Then:** commit · `/clear`
+
+---
+
 # SESSION 14 — F8 @ Picker and Attachments
 
 **Paste:**

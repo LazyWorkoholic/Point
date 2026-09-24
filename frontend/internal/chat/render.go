@@ -33,6 +33,11 @@ func (w *Workspace) View(l layout.Layout) string {
 	)
 
 	if !l.ShowRightPane || len(l.RightPane) == 0 {
+		// S13d: the real pane isn't on screen this frame -- rightPane()
+		// (below) is what refreshes statusCardRect, so a stale rect from
+		// before a resize hid the pane must not survive to falsely satisfy
+		// a later click at the same screen coordinates.
+		w.statusCardRect = layout.Rect{}
 		return left
 	}
 	return sideBySide(left, l.Main.W, w.rightPane(l), l.RightPaneWidth, layout.PaneGapX)
@@ -53,6 +58,13 @@ func (w *Workspace) rightPane(l layout.Layout) string {
 	for i, r := range l.RightPane {
 		if r.IsZero() || i >= len(titles) {
 			continue
+		}
+		if i == 0 {
+			// S13d: the Status card's on-screen rect, remembered for
+			// dispatchMouse's click-to-expand hit-test (context_report.go's
+			// OverlayForClick) -- the only consumer of card geometry outside
+			// this render pass.
+			w.statusCardRect = r
 		}
 		lines := bodies[i](r.W-2*genericBoxPadding-2, r.H-2)
 		cards = append(cards, paneBox(idleEdge, label, r, titles[i], lines, genericBoxPadding))
@@ -187,8 +199,25 @@ func (w *Workspace) viewportLines(rect layout.Rect) []string {
 	if contentWidth < 4 {
 		contentWidth = 4
 	}
+	// The connection banner is one row ABOVE the transcript, never in place
+	// of it: during an outage the reply that just failed — and its footer —
+	// is exactly what the user needs to see. Drawn from connectionDown alone
+	// (connection.go), so it appears and clears with the connection itself,
+	// whichever way a send happened to fail.
+	if w.connectionDown() && rows > 1 {
+		notice := th.Style(theme.Error).Render(truncateCells("! "+w.connectionNotice(), contentWidth))
+		return append([]string{notice}, w.viewportBody(rows-1, contentWidth)...)
+	}
+	return w.viewportBody(rows, contentWidth)
+}
+
+// viewportBody is everything under the connection banner: a status screen,
+// or the transcript window, in exactly `rows` rows.
+func (w *Workspace) viewportBody(rows, contentWidth int) []string {
+	th := w.theme
 	// The key handlers scroll and page against the box actually on screen;
-	// a keypress has no other way to know its size. See scroll.go.
+	// a keypress has no other way to know its size. See scroll.go. These are
+	// the rows the transcript really gets, banner row excluded.
 	w.viewRows, w.viewWidth = rows, contentWidth
 
 	switch {

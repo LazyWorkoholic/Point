@@ -918,8 +918,21 @@ async def build(
     #
     # A task that failed AFTER producing output keeps its exchange exactly
     # as it is (it has a real assistant row, so it never reaches the
-    # lookup below); a genuinely in-flight turn has no assistant row either,
-    # but its task has no terminal status yet, so it is never excluded.
+    # lookup below).
+    #
+    # IN-FLIGHT questions are excluded too -- the rule is "an unanswered
+    # question from another task never enters a prompt", whatever that
+    # task's status. B21 originally carved in-flight turns OUT of this
+    # filter, and that carve-out was a live defect: this function runs at
+    # task CREATION (executor.py builds before it persists), so three sends
+    # fired back-to-back built prompts of [Q1], [Q1, Q2], [Q1, Q2, Q3] --
+    # the earlier questions persisted, still unanswered, with nothing
+    # between them. The model answered the first unanswered question it
+    # saw: "hi" came back as a bubble-sort answer under a correct task_id.
+    # A question this build is FOR is never in `window` (it is passed as
+    # `user_text` and persisted only after this returns), so excluding
+    # every unanswered one here can never drop the task's own question.
+    # The status is read only to say WHY in the report.
     answered_task_ids = {
         message.task_id
         for message in window
@@ -934,15 +947,19 @@ async def build(
         ):
             continue
         status = await memory.task_status(message.task_id)
-        if status not in TERMINAL_FAILURE_STATUSES:
-            continue
+        if status in TERMINAL_FAILURE_STATUSES:
+            reason = f"orphaned: task {_short(message.task_id)} ended {status!r} with no reply"
+        else:
+            reason = (
+                f"unanswered: task {_short(message.task_id)} "
+                f"({status or 'not yet scheduled'}) has no reply"
+            )
         orphaned_ids.add(message.id)
         log.evicted.append(
             EvictedItem(
                 SECTION_HISTORY, _short(message.id), message.role.value,
                 estimate_tokens(_message_text(message), request.model),
-                f"orphaned: task {_short(message.task_id)} ended {status!r} "
-                "with no reply",
+                reason,
             )
         )
     if orphaned_ids:

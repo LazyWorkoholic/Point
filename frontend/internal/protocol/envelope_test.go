@@ -25,6 +25,7 @@ func TestEveryEventTypeRoundTrips(t *testing.T) {
 		EvToolStarted, EvToolCompleted,
 		EvProject, EvProjectFileList, EvProjectFile,
 		EvFileLockResult, EvFileLockReleased, EvFileStaleResult,
+		EvContextReport,
 	}
 
 	seq := 7

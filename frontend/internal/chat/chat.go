@@ -241,6 +241,10 @@ type Workspace struct {
 	// workspace only renders what it is handed.
 	tasks       []app.TaskRow
 	backendDown bool
+	// connState is the connection state Root last pushed (same Seq guard as
+	// the fields around it). It is the ONE input to connectionDown — see
+	// connection.go for why the banner and a send's failure both read it.
+	connState protocol.ConnState
 	// diagnosticsSeq is the last app.DiagnosticsMsg.Seq this workspace has
 	// applied — see protocol.go's DiagnosticsMsg case for why arrival
 	// order alone cannot be trusted.
@@ -255,6 +259,19 @@ type Workspace struct {
 	// so the card omits it, per spec, rather than inventing a number
 	// nothing computed.
 	usage wireUsage
+
+	// contextReport is S13d's: the last decoded ContextReport, from either
+	// the once-per-load pull (setSession) or the push after every turn
+	// (onContextReport, protocol.go). nil is the real "nothing yet" state --
+	// distinct from a zero-valued report -- same distinction this file
+	// already makes for w.usage above.
+	contextReport *wireContextReport
+
+	// statusCardRect is the Status card's on-screen rect from the most
+	// recent real (non-overlay) right-pane render (render.go's rightPane) --
+	// S13d's click-to-expand hit-test target. Zero until the right pane has
+	// rendered at least once.
+	statusCardRect layout.Rect
 }
 
 // New builds a Chat workspace. It does nothing over the wire yet — Init and

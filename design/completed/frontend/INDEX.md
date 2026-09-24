@@ -21,6 +21,7 @@ it passed.
 | F7 | Popup Framework (Popup + Confirm) | ✅ built + manually verified | `F07-popup-framework.md` |
 | S12b | F7 Verification Repairs (chat/ render + startup) | ✅ built + manually verified | `S12b-f7-verification-repairs.md` |
 | F6 | Right Pane (Status · Task · Sessions) | ✅ built + manually verified | `F06-right-pane.md` |
+| S13d | Wire the Context Card (Status row 1 + UI-09) | ✅ built + manually verified | `S13d-wire-context-card.md` |
 | F8–F18 | — | not started | — |
 
 **F1 and F2 were built and verified in one session** (`batchable: yes`).
@@ -124,23 +125,23 @@ The two contracts the rest of the frontend is built on:
 **F8 can start now.** F6 closed; F7's `Popup` is built and F8's `@` picker is
 its next consumer.
 
-**F6 carries two open items.** Neither blocks F8.
+**F6's two open items are both closed.**
 
-1. **B20 is owed, and one Status card row is stubbed until it lands** — a
-   `GetContextReport` request and a `ContextReport` push event, calling
-   B8's existing `context.py` calculation rather than a second copy of the
-   arithmetic. The expanded context composition card (UI-09) is **not
-   built at all**, so F6's Done-when #2 is not satisfied — by direct
-   consequence of that decision, not by oversight.
-2. **B21 is owed, and it is the more urgent of the two.** F6's gate found a
-   backend correctness defect that has nothing to do with the right pane: a
-   task that fails before producing a token leaves its user message
-   persisted with no answer, and `context.py`'s history window hands that
-   unanswered question to the NEXT unrelated send — which the model then
-   answers instead. Reproduced deterministically with no concurrency.
-   Specced as `tasks/backend/B21-orphaned-message-context.md`; the full
-   diagnostic trace, including the four hypotheses eliminated before the
-   real one, is in `F06-right-pane.md`'s "Bug C".
+1. **✅ B20 + UI-09.** B20 put `ContextReport` on the wire
+   (`../backend/B20-context-report.md`); S13d replaced the Status card's
+   stub row and built UI-09, so **F6's Done-when #2 is now satisfied**
+   (`S13d-wire-context-card.md`).
+2. **✅ B21** (`../backend/B21-orphaned-message-context.md`) — a failed,
+   empty-output task no longer poisons the next prompt. The original trace
+   is in `F06-right-pane.md`'s "Bug C". S13d then found that B21's filter
+   deliberately kept in-flight unanswered questions, which let concurrent
+   sends answer each other's questions; that carve-out is removed
+   (`S13d-wire-context-card.md`'s Bug 1).
+
+**S13d is a repair/wiring session like S11b/S12b, and it changed the
+backend once** (`managers\context.py`). Anyone working on
+`context.build()`'s history filter should read its Bug 1 and run
+`backend\tests\manual_prompt_isolation.py` before and after.
 
 **Read `F06-right-pane.md`'s "The pattern this episode is really about"
 before adding any flag, sequence number or cached snapshot that more than

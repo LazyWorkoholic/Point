@@ -257,7 +257,8 @@ context: not wired yet (B20)     ← STUB, see below
 anthropic · claude               ← real, from the session
 ```
 
-1. **Context fill — a marked stub.** There is no `context.report` on the
+1. **Context fill — a marked stub** *(superseded: S13d reads B20's real
+   `ContextReport` here now — see `S13d-wire-context-card.md`)*. There is no `context.report` on the
    wire. The row says so in words rather than drawing a bar B8 never sent,
    because a fabricated bar is indistinguishable from a real one that is
    lying. B20 wires it; a frontend follow-up then replaces this line.
@@ -514,7 +515,8 @@ Raised this episode: rolling time windows, a purchased-token balance,
 per-session running totals — as against the single per-turn figure the
 Status card shows today.
 
-**Blocked on B20.** Real session-level token data arrives with
+**No longer blocked — B20 landed; still has no task doc.** The paragraph
+below is the original reasoning. Real session-level token data arrives with
 `context.report`; until that event exists, the only usage on the wire is
 one `TokenUsage` per turn, reported once at end of stream (see the Status
 card section). Anything built now would be inventing a data model the
@@ -527,13 +529,20 @@ get a real task doc once B20 exists and the actual shape of
 
 ## What the next episode inherits
 
-**B21 is owed, and it is the more urgent of the two.** A failed, empty-output
+**✅ CLOSED — B21 landed** (`design/completed/backend/B21-orphaned-message-context.md`).
+Originally: B21 is owed, and it is the more urgent of the two. A failed, empty-output
 task poisons the next prompt in the same session — see "Bug C" above and
 `design/tasks/backend/B21-orphaned-message-context.md`. It is a backend
 correctness defect found at F6's gate, not a right-pane issue, and nothing in
-this episode works around it.
+this episode works around it. *(S13d later found that B21's filter
+deliberately kept IN-FLIGHT unanswered questions, which let concurrent sends
+answer each other's questions; that carve-out is gone — see
+`S13d-wire-context-card.md`'s Bug 1.)*
 
-**B20 is owed, and F6 is blocked on it for one row.** Spec: a
+**✅ CLOSED — B20 landed** (`design/completed/backend/B20-context-report.md`),
+**and S13d replaced the stub row and built UI-09**
+(`S13d-wire-context-card.md`). **Done-when #2 is now satisfied, by S13d.**
+Originally: B20 is owed, and F6 is blocked on it for one row. Spec: a
 `GetContextReport` request and a `ContextReport` push event, driven off
 `usage.updated` / turn boundaries, **calling B8's existing `context.py`
 calculation — never a second implementation of the arithmetic.** A frontend

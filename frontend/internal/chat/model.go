@@ -96,3 +96,52 @@ type wireSession struct {
 	UpdatedAt float64       `json:"updated_at"`
 	Messages  []wireMessage `json:"messages"`
 }
+
+// wireContextReport mirrors backend\managers\context.py's
+// ContextReport.to_dict() exactly, field for field, no subset. S13d reads
+// this off both GetContextReport's reply and the ContextReport push — see
+// protocol.go's onContextReport, the one decoder for both.
+type wireContextReport struct {
+	SessionID     string            `json:"session_id"`
+	Provider      string            `json:"provider"`
+	Model         string            `json:"model"`
+	BudgetTokens  int               `json:"budget_tokens"`
+	Sections      map[string]int    `json:"sections"`
+	Counts        map[string]int    `json:"counts"`
+	UsedTokens    int               `json:"used_tokens"`
+	FreeTokens    int               `json:"free_tokens"`
+	Included      []wireContextItem `json:"included"`
+	NextEvictions []wireContextItem `json:"next_evictions"`
+}
+
+// wireContextItem serves both IncludedItem (Detail populated, Reason not)
+// and EvictedItem (Reason populated, Detail not) from context.py -- the two
+// dataclasses share every field but their last, so one Go shape decodes
+// both rather than two near-identical types.
+type wireContextItem struct {
+	Section string `json:"section"`
+	Ref     string `json:"ref"`
+	Kind    string `json:"kind"`
+	Tokens  int    `json:"tokens"`
+	Detail  string `json:"detail"`
+	Reason  string `json:"reason"`
+}
+
+// contextSectionOrder mirrors context.py's SECTION_ORDER exactly -- the
+// fixed key order every ContextReport's Sections/Counts maps are guaranteed
+// to carry, zero-valued entries included, which is what lets the
+// composition card sum them without a special case for "nothing there yet".
+var contextSectionOrder = []string{
+	"system", "attachments", "memory", "summary", "history", "task_state",
+}
+
+// contextSectionLabel is the mockup's own wording (F06-right-pane.md) for
+// each SECTION_ORDER key -- six entries, not worth a shared type.
+var contextSectionLabel = map[string]string{
+	"system":      "system prompt",
+	"attachments": "attachments",
+	"memory":      "memory",
+	"summary":     "summary",
+	"history":     "history",
+	"task_state":  "task state",
+}

@@ -80,9 +80,25 @@ func (w *Workspace) statusCardLines(width, rows int) []string {
 
 	// 1. Context fill + numbers — always attempted first, per
 	// F06-right-pane.md's priority order, so it is the LAST thing dropped
-	// as the card shrinks. See this file's header: there is nothing real
-	// to show yet.
-	lines = append(lines, dim.Render("context: not wired yet (B20)"))
+	// as the card shrinks. S13d: real, off B20's ContextReport -- w.usage
+	// (row 2 below) is a DIFFERENT number (per-turn input/output tokens),
+	// this row is the session's whole composition against its budget.
+	switch {
+	case w.contextReport == nil:
+		lines = append(lines, dim.Render("context: not wired yet (B20)"))
+	default:
+		cr := w.contextReport
+		numbers := fmt.Sprintf("%s/%s", formatTokens(cr.UsedTokens), formatTokens(cr.BudgetTokens))
+		barWidth := width - len(numbers) - 1
+		switch {
+		case barWidth < 3:
+			barWidth = 3
+		case barWidth > 16:
+			barWidth = 16
+		}
+		lines = append(lines, tokenBar(th, cr.UsedTokens, cr.BudgetTokens, barWidth)+
+			" "+th.Style(theme.TextPrimary).Render(numbers))
+	}
 
 	// 2. Tokens / cost — real, from the latest UsageUpdated or reload.
 	// Cost is never computed anywhere in the backend yet, so it is omitted
@@ -118,6 +134,33 @@ func formatTokens(n int) string {
 		return fmt.Sprintf("%d", n)
 	}
 	return fmt.Sprintf("%.1fk", float64(n)/1000)
+}
+
+// tokenBar renders a fixed-width used/budget fraction as filled cells over a
+// track -- AccentPrimary against TextDim, matching statusCardLines' own
+// dim/primary split. Not present anywhere in this codebase before S13d
+// (checked: no bar-drawing helper existed in frontend/). Used by both the
+// Status card's row 1 and UI-09's per-section bars (context_overlay.go).
+func tokenBar(th theme.Theme, used, budget, width int) string {
+	if width < 1 {
+		return ""
+	}
+	frac := 0.0
+	if budget > 0 {
+		frac = float64(used) / float64(budget)
+	}
+	switch {
+	case frac < 0:
+		frac = 0
+	case frac > 1:
+		frac = 1
+	}
+	filled := int(frac*float64(width) + 0.5)
+	if filled > width {
+		filled = width
+	}
+	return th.Style(theme.AccentPrimary).Render(strings.Repeat("█", filled)) +
+		th.Style(theme.TextDim).Render(strings.Repeat("░", width-filled))
 }
 
 // ---------------------------------------------------------------------------
@@ -419,15 +462,50 @@ type rightPaneOverlay struct {
 	// hand at render time. Logged only when it CHANGES, because View runs
 	// on every frame and an unconditional line would bury the log.
 	lastLogged string
+
+	// statusRows is how many content rows (label included) the Status
+	// section occupied on the most recent View call -- S13d's hit-test
+	// target for "click the embedded Status section to expand it". Set at
+	// the top of the section's rendering, below.
+	statusRows int
 }
 
 func (o *rightPaneOverlay) MinSize() (int, int)       { return 36, 20 }
 func (o *rightPaneOverlay) Title() string             { return "Right Pane" }
 func (o *rightPaneOverlay) IsRightPaneFallback() bool { return true }
 
+// Update recognizes two things beyond the ordinary esc-closes case: `enter`,
+// and a click on the embedded Status section, both of which SWAP this
+// overlay for UI-09's context composition card by returning it in place of
+// `o` -- root.setOverlay (app/root.go) fit-checks the return value exactly
+// like a fresh OpenOverlay, so a terminal too small for UI-09's real
+// MinSize refuses with the actual numbers and this overlay stays open,
+// rather than clipping or closing to nothing. `enter` is free to claim here
+// specifically because this overlay traps ALL input while it is the open
+// one (root.go's dispatchKey) -- chat.Workspace's own Enter is doubly
+// claimed (send / expand-a-message-slot) and never reachable this way; that
+// conflict does not exist inside an overlay's own Update. Both branches go
+// through the SAME guard (o.w.ContextExpandOverlay), so a press before the
+// first report arrives, or with the backend down, is a silent no-op rather
+// than opening UI-09 with nothing to show.
 func (o *rightPaneOverlay) Update(msg tea.Msg) (app.Overlay, tea.Cmd) {
-	if k, ok := msg.(tea.KeyMsg); ok && k.String() == "esc" {
-		return nil, nil
+	switch m := msg.(type) {
+	case tea.KeyMsg:
+		switch m.String() {
+		case "esc":
+			return nil, nil
+		case "enter":
+			if next, ok := o.w.ContextExpandOverlay(); ok {
+				return next, nil
+			}
+		}
+	case tea.MouseMsg:
+		if m.Button == tea.MouseButtonLeft && m.Action == tea.MouseActionPress &&
+			m.Y >= 0 && m.Y < o.statusRows {
+			if next, ok := o.w.ContextExpandOverlay(); ok {
+				return next, nil
+			}
+		}
 	}
 	return o, nil
 }
@@ -465,8 +543,11 @@ func (o *rightPaneOverlay) View(th theme.Theme, w, h int) string {
 	taskLines := o.w.taskCardLines(contentW, rows-1)
 	o.logRendered(len(o.w.tasks), taskLines)
 
+	statusLines := o.w.statusCardLines(contentW, rows-1)
+	o.statusRows = 1 + len(statusLines) // +1 for the "Status" label row
+
 	var out []string
-	out = append(out, section("Status", o.w.statusCardLines(contentW, rows-1))...)
+	out = append(out, section("Status", statusLines)...)
 	out = append(out, "")
 	out = append(out, section("Task", taskLines)...)
 	out = append(out, "")

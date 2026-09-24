@@ -68,6 +68,10 @@ type Root struct {
 	tasksDirty         bool
 	taskCardWasVisible bool
 
+	// contextViewWasShown is refreshContextIfShown's transition memory.
+	// Written ONLY there — see its doc comment for why.
+	contextViewWasShown bool
+
 	// diagnosticsSeq is pushDiagnostics's monotonic counter — see its own
 	// doc comment for why a sequence number, not arrival order, is what a
 	// DiagnosticsMsg's receiver has to trust.
@@ -243,6 +247,7 @@ func (r *Root) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	// opened, is the first TaskDone. That is exactly the reported
 	// "the overlay shows nothing until the first task completes".
 	r.refreshTasksIfVisible()
+	r.refreshContextIfShown(msg)
 	if anim := r.ensureAnimation(); anim != nil {
 		return model, tea.Batch(cmd, anim)
 	}
@@ -545,6 +550,41 @@ func (r *Root) refreshTasksIfVisible() {
 	r.taskCardWasVisible = visible
 }
 
+// refreshContextIfShown keeps UI-09 current while it is open. Before this,
+// the overlay only ever drew whatever the workspace last received — the
+// once-per-load pull or the backend's push after a turn PERSISTS — so a
+// task that started (a new unanswered question) or ended without an
+// answer never reached an open overlay. Found live: one @research running,
+// UI-09 open, "next turn evicts: nothing", while a fresh report for that
+// same moment said "unanswered: task X (running) has no reply".
+//
+// Asked ONCE, after every message, exactly like refreshTasksIfVisible and
+// for the same reason: UI-09 opens from three places (the leader action, a
+// click on the Status card, rightPaneOverlay's own enter/click swap) and
+// closes from more (esc, a click outside, closeOverlayIfTooSmall). A flag
+// updated at each of them is the taskCardWasVisible bug again; one derived
+// here cannot miss a path. Refreshes on the transition to shown, and on
+// every task lifecycle event while shown — event-driven, never a timer,
+// and nothing at all while UI-09 is closed.
+func (r *Root) refreshContextIfShown(msg tea.Msg) {
+	cv, ok := r.overlay.(ContextView)
+	shown := ok && cv.IsContextView()
+	trigger := shown && !r.contextViewWasShown
+	if shown && !trigger {
+		if e, isEnv := msg.(protocol.EnvelopeMsg); isEnv {
+			t := e.Envelope.Type
+			trigger = t == protocol.EvTaskStarted || protocol.IsTerminal(t)
+		}
+	}
+	r.contextViewWasShown = shown
+	if !trigger {
+		return
+	}
+	if cr, ok := r.current().(ContextRefresher); ok {
+		cr.RefreshContextReport()
+	}
+}
+
 // closeRightPaneFallbackIfObsolete retires the narrow-width fallback overlay
 // the moment a resize widens the terminal back past the breakpoint where
 // the real pane fits — the real pane's own visibility is entirely
@@ -698,7 +738,7 @@ func (r *Root) dispatchKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 	// nil Overlay from Update, exactly like any other state change.
 	if r.overlay != nil {
 		o, cmd := r.overlay.Update(k)
-		r.overlay = o
+		r.setOverlay(o)
 		return r, cmd
 	}
 
@@ -810,13 +850,48 @@ func (r *Root) overlayFits(o Overlay) (fits bool, refusal string) {
 }
 
 // OpenOverlay refuses one that does not fit and shows the ACTUAL numbers.
+// recompute only runs when the overlay actually changed — a refusal leaves
+// r.overlay (and therefore the layout it feeds) exactly as it was, same as
+// before setOverlay existed.
 func (r *Root) OpenOverlay(o Overlay) {
-	if ok, msg := r.overlayFits(o); !ok {
-		r.status = msg
-		return
+	if r.setOverlay(o) {
+		r.recompute()
 	}
-	r.overlay = o
-	r.recompute()
+}
+
+// setOverlay applies whatever an Overlay's own Update returned in place of
+// the one that was open, or a fresh overlay from OpenOverlay -- the ONE
+// place r.overlay is ever assigned. Reports whether it actually changed.
+// nil always closes. Anything else is choosing to open a (possibly
+// different) overlay -- rightPaneOverlay swapping itself for UI-09's
+// composition card (S13d) does exactly this on enter or a click on its own
+// embedded Status section -- and must clear the same MinSize floor a fresh
+// OpenOverlay already enforces. Before this, dispatchKey and dispatchMouse
+// both assigned whatever Update returned unconditionally, which was never a
+// problem while the only non-nil, non-self value any Overlay ever returned
+// was... none — every Overlay in this codebase returned only itself or nil
+// until S13d's swap. An Overlay's own View() cannot check this itself: it
+// only ever receives its OWN rendered box size (overlayRect never grows an
+// overlay past its MinSize), never the real terminal dimensions, so a
+// self-returned swap without this check could render an overlay larger
+// than the terminal actually has room for.
+func (r *Root) setOverlay(next Overlay) bool {
+	if next == nil {
+		if r.overlay == nil {
+			return false
+		}
+		r.overlay = nil
+		return true
+	}
+	if next == r.overlay {
+		return false // unchanged -- most Update calls hit this path
+	}
+	if ok, msg := r.overlayFits(next); !ok {
+		r.status = msg
+		return false // keep whatever is already open; do not clip, do not close
+	}
+	r.overlay = next
+	return true
 }
 
 // closeOverlayIfTooSmall re-runs the SAME fit check on an overlay that is
@@ -875,6 +950,23 @@ func (r *Root) overlayRect() layout.Rect {
 // seat, from "the popup ignored my click": it was already gone.
 func (r *Root) dispatchMouse(m tea.MouseMsg) (tea.Model, tea.Cmd) {
 	if r.overlay == nil {
+		// S13d: a left-click-press may target something the active
+		// workspace wants to open as an overlay -- chat.Workspace's Status
+		// card, expanding into the context composition card. Asked through
+		// MouseOverlayTarget, the same narrow-interface shape as
+		// OverlayProvider/FocusAware, so root decides WHETHER to open
+		// (OpenOverlay's fit check) while the workspace decides WHAT
+		// on-screen rect it owns and whether it has real data to show
+		// (chat's own ContextExpandOverlay guard). Root never reads the
+		// workspace's rect or report fields directly.
+		if m.Button == tea.MouseButtonLeft && m.Action == tea.MouseActionPress {
+			if mo, ok := r.current().(MouseOverlayTarget); ok {
+				if o, hit := mo.OverlayForClick(m.X, m.Y); hit {
+					r.OpenOverlay(o)
+					return r, nil
+				}
+			}
+		}
 		ws, cmd := r.current().Update(m)
 		r.workspaces[r.active] = ws
 		return r, cmd
@@ -893,7 +985,7 @@ func (r *Root) dispatchMouse(m tea.MouseMsg) (tea.Model, tea.Cmd) {
 	m.X -= rect.X + 1
 	m.Y -= rect.Y + 1
 	o, cmd := r.overlay.Update(m)
-	r.overlay = o
+	r.setOverlay(o)
 	return r, cmd
 }
 

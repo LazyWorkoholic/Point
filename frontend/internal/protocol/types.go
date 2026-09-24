@@ -34,6 +34,7 @@ const (
 	CmdReleaseFileLock       = "ReleaseFileLock"
 	CmdTakeOverFileLock      = "TakeOverFileLock"
 	CmdCheckFileStale        = "CheckFileStale"
+	CmdGetContextReport      = "GetContextReport"
 )
 
 // Events — Python to Go (OutgoingEventType).
@@ -81,6 +82,11 @@ const (
 	EvFileLockResult   = "FileLockResult"
 	EvFileLockReleased = "FileLockReleased"
 	EvFileStaleResult  = "FileStaleResult"
+
+	// EvContextReport is B20's ContextReport -- one wire type serving both
+	// the GetContextReport reply (corr_id set) and the push after a turn's
+	// assistant message persists (corr_id null, session_id always set).
+	EvContextReport = "ContextReport"
 )
 
 // Client-side pseudo-events. These never appear on the wire; the client

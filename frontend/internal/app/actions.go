@@ -237,6 +237,34 @@ func registerActions() *actions.Registry[*Root] {
 	})
 
 	r.Register(actions.Action[*Root]{
+		ID:          "context.expand",
+		Name:        "Expand Context",
+		Description: "Open the context composition card -- per-section token counts and what the next turn would evict",
+		Category:    "Interface",
+		Leader:      "x",
+		When: func(root *Root) bool {
+			ce, ok := root.current().(ContextExpandable)
+			if !ok {
+				return false
+			}
+			_, ready := ce.ContextExpandOverlay()
+			return ready
+		},
+		Run: func(root *Root) tea.Cmd {
+			ce, ok := root.current().(ContextExpandable)
+			if !ok {
+				return nil
+			}
+			o, ready := ce.ContextExpandOverlay()
+			if !ready {
+				return nil
+			}
+			root.OpenOverlay(o)
+			return nil
+		},
+	})
+
+	r.Register(actions.Action[*Root]{
 		ID:          "backend.retry",
 		Name:        "Retry Backend",
 		Description: "Start the backend again after it has been given up on",
