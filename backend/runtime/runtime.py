@@ -1357,9 +1357,26 @@ class Runtime:
                     # The guardrails hook (B9, no-op in v1): every
                     # persisted assistant reply, streamed or echoed,
                     # passes through here before it reaches the session.
-                    msg = await self.agent_executor.apply_response_middleware(msg)
-                    await self.sessions.append_message(msg)
-                    persisted = True
+                    #
+                    # Wrapped: this is the one place a DB hiccup used to
+                    # be fatal to the whole terminal event. A task whose
+                    # body already finished (successfully or not) must
+                    # still reach the client with exactly one terminal
+                    # event even if writing its transcript row fails --
+                    # the alternative is the task's own exception handler
+                    # catching this, marking a *successful* task FAILED,
+                    # and then the fallback sink call below crashing too
+                    # with nothing left to catch it (the "Task exception
+                    # was never retrieved" failure mode).
+                    try:
+                        msg = await self.agent_executor.apply_response_middleware(msg)
+                        await self.sessions.append_message(msg)
+                        persisted = True
+                    except Exception:  # noqa: BLE001
+                        _log.exception(
+                            "Task %s: failed to persist its %r reply -- "
+                            "the terminal event still goes out", task.id, kind,
+                        )
                 self.streams.close_stream(task.id)
             else:
                 if kind == "done" and echo_collected:
@@ -1374,15 +1391,27 @@ class Runtime:
                         session_id, full_reply, task_id=task.id, message_id=message_id,
                         invocation=invocation, outcome=Outcome.DONE,
                     )
-                    msg = await self.agent_executor.apply_response_middleware(msg)
-                    await self.sessions.append_message(msg)
-                    persisted = True
+                    try:
+                        msg = await self.agent_executor.apply_response_middleware(msg)
+                        await self.sessions.append_message(msg)
+                        persisted = True
+                    except Exception:  # noqa: BLE001
+                        _log.exception(
+                            "Task %s: failed to persist its echoed reply -- "
+                            "the terminal event still goes out", task.id,
+                        )
                 # The echo path never registers a stream, but it does draw
                 # sequence numbers for its envelopes. Drop the counter or
                 # it outlives the task it belonged to.
                 self.streams.close_stream(task.id)
 
-            await self.sessions.set_active_task(session_id, None)
+            try:
+                await self.sessions.set_active_task(session_id, None)
+            except Exception:  # noqa: BLE001
+                _log.exception(
+                    "Task %s: failed to clear active_task_id for session %s",
+                    task.id, session_id,
+                )
             self.state.active_task_count = self.tasks.active_count()
 
             out_type = {

@@ -19,6 +19,10 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, AsyncIterator, Awaitable, Callable, Optional
 
+from logging_setup import get_logger
+
+_log = get_logger("task")
+
 
 class TaskState(str, Enum):
     PENDING = "pending"
@@ -139,17 +143,12 @@ class Task:
         try:
             async for chunk in self._body():
                 await self._sink(self, {"type": "chunk", **chunk})
-            self.state = TaskState.COMPLETED
-            self.result = TaskResult(state=TaskState.COMPLETED)
-            self.finished_at = self.result.finished_at
-            await self._record()
-            await self._sink(self, {"type": "done"})
         except asyncio.CancelledError:
             self.state = TaskState.CANCELLED
             self.result = TaskResult(state=TaskState.CANCELLED)
             self.finished_at = self.result.finished_at
             await self._record()
-            await self._sink(self, {"type": "cancelled"})
+            await self._sink_terminal({"type": "cancelled"})
             raise
         except Exception as exc:  # noqa: BLE001 - we deliberately convert to a result
             # `code` is read off the exception when it carries one --
@@ -169,8 +168,42 @@ class Task:
             self.result = TaskResult(state=TaskState.FAILED, error=str(exc), code=code)
             self.finished_at = self.result.finished_at
             await self._record()
-            await self._sink(
-                self, {"type": "failed", "error": str(exc), "code": code, "bound": bound}
+            await self._sink_terminal(
+                {"type": "failed", "error": str(exc), "code": code, "bound": bound}
+            )
+            return
+
+        # The body itself is done deciding pass/fail -- this line only
+        # runs if the `async for` above finished cleanly. Everything past
+        # this point is bookkeeping (recording the row, telling the
+        # client), and a failure in *that* must never be mistaken for the
+        # task having failed: it stays COMPLETED, and `_sink_terminal`
+        # guarantees the client still gets a terminal event either way.
+        self.state = TaskState.COMPLETED
+        self.result = TaskResult(state=TaskState.COMPLETED)
+        self.finished_at = self.result.finished_at
+        await self._record()
+        await self._sink_terminal({"type": "done"})
+
+    async def _sink_terminal(self, chunk: dict[str, Any]) -> None:
+        """Deliver the one terminal sink call `_run()` makes, and never
+        let a failure escape it uncaught.
+
+        `_run()` is scheduled with a bare `asyncio.create_task()`
+        (`start()`) and nothing awaits it directly, so an exception
+        raised here would become "Task exception was never retrieved" on
+        the event loop -- silently, with no terminal event ever reaching
+        the client and this task's live state stuck wherever it was.
+        Caught and logged instead: `_record()` already wrote the durable
+        `tasks` row before this is called, so a client that never sees
+        the live event still has a correct row to fall back on.
+        """
+        try:
+            await self._sink(self, chunk)
+        except Exception:  # noqa: BLE001
+            _log.exception(
+                "Task %s: terminal sink call failed for %r -- state stays %s",
+                self.id, chunk.get("type"), self.state.value,
             )
 
     async def _record(self) -> None:

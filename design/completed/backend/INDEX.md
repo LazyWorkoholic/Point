@@ -29,6 +29,7 @@ it passed.
 | B19 | Silence-Based Agent Timeout | ✅ built + manually verified | `B19-silence-based-timeout.md` |
 | B20 | `context.report` on the Wire | ✅ built + manually verified | `B20-context-report.md` |
 | B21 | Orphaned Messages Must Not Enter the Next Prompt | ✅ built + manually verified | `B21-orphaned-message-context.md` |
+| B22 | Concurrent Task Completion Race (`SerializedConnection`) | ✅ built + manually verified | `B22-concurrent-completion-race.md` |
 
 ## Verified file structure — end of Episode 11
 
@@ -474,6 +475,52 @@ backend\
 in this episode's Build section, so that is the only new CLI surface.
 `fetch_messages`/`fetch_messages_for_task` (both keyed on `created_at`) are
 untouched; every B18 addition keys on `seq`.
+
+## Delta — Episode 22
+
+Not a task-doc episode — a pre-existing concurrency defect, found live and
+fixed. Full reasoning, both reproductions, and the verification evidence in
+`B22-concurrent-completion-race.md`.
+
+```
+backend\
+├── database\
+│   └── connection.py       open_database() now returns a SerializedConnection
+│                            (NEW class, + _DrainedCursor) wrapping the real
+│                            aiosqlite.Connection: execute() acquires a
+│                            connection-wide lock and fully drains its cursor
+│                            before returning, so no cursor is ever left
+│                            "in progress" across an await boundary for
+│                            another coroutine's commit() to trip over. No
+│                            repository file changed -- every one still calls
+│                            .execute()/.fetchone()/.fetchall()/.commit()
+│                            exactly as before                             [B22]
+├── runtime\
+│   ├── task.py              _run() restructured: TaskState.COMPLETED is
+│   │                        decided and recorded BEFORE the terminal sink
+│   │                        call, not inside the same try that catches the
+│   │                        task body's own failures -- a bookkeeping
+│   │                        failure afterward can no longer flip a
+│   │                        successful task to FAILED;
+│   │                        + _sink_terminal() (NEW) -- the one terminal
+│   │                        sink call, guaranteed not to escape _run()
+│   │                        uncaught (closes "Task exception was never
+│   │                        retrieved" structurally)                      [B22]
+│   └── runtime.py           sink()'s message-persistence calls (streamed
+│                            and echo branches) and set_active_task wrapped
+│                            in try/except -- a DB failure there is logged,
+│                            never costs the terminal TaskDone/TaskFailed/
+│                            TaskCancelled event                           [B22]
+└── tests\
+    └── manual_concurrent_completion.py   NEW -- kept in the repo (not a
+                                           one-off): bursts of concurrent
+                                           sends, asserts exactly-one-
+                                           terminal-event per task,
+                                           tasks-row status, no unretrieved
+                                           loop exceptions, no
+                                           OperationalError/IntegrityError
+                                           on stderr                       [B22]
+```
 
 ## ⚠ One inaccuracy inherited from the original log
 
