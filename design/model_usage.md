@@ -25,7 +25,13 @@ SESSION  EPISODE                          MODEL         WHY
 13c      B20 context.report on the wire   Sonnet high   transport over a calculation
                                                         that already exists
 13d      S13d wire the context card       Sonnet 5, switched to Opus 5.5 partway
+13f      B23 agent + directory listing   Sonnet high   plumbing over an existing,
+         on the wire                                   tested registry.list() --
+                                                        one real open decision
+                                                        (the outside-project gate
+                                                        for a listing vs. a read)
 14       F8  @ picker                     Sonnet high   modes + guards, well defined
+                                                        -- now reads B23's events
 15       F9  tray, cards, diff            Opus medium   diff computation + apply paths
 15b      B19 Silence-Based Agent Timeout
 16       F10 settings, first run          Sonnet high   forms and flows

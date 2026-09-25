@@ -950,11 +950,71 @@ stderrTail still ended on the real error after a deliberate exit.
 
 ---
 
+# SESSION 13f — B23 Agent + Directory Listing on the Wire
+
+**Goal:** give Go the two live queries F8's `@` picker needs and cannot get
+today — which agents exist, and what is in an arbitrary directory — neither
+of which any existing wire event answers.
+
+**Why this episode exists.** F8 (Session 14) was started and stopped before
+writing any code, per its own "stop and tell me if ambiguous" instruction:
+`ListProjectFiles` requires a resolved project and cannot browse an
+arbitrary path, and there is no wire event at all for listing registered
+agents (`cli.py agents list` calls `AgentRegistry.list()` in-process, but
+nothing exposes it to Go). Full trace in
+`design/tasks/backend/B23-agent-and-directory-listing.md`'s "Why this
+episode exists".
+
+**Paste:**
+```
+Read CLAUDE.md and design/tasks/backend/B23-agent-and-directory-listing.md.
+
+Two read-only wire additions, nothing else: ListAgents/AgentList over
+AgentRegistry.list() (already correct, already tested -- this is
+plumbing), and a directory-listing event that works with or without a
+resolved project. Do NOT build any picker UI, fuzzy matching, or F8 code
+-- that is Session 14's job once this lands.
+
+The doc leaves one real decision open on purpose: whether a directory
+LISTING should share the allow_outside_project gate a file READ uses, or
+be exempt from it since it exposes names, not content. Decide it
+deliberately and write down why, in the Build section's own words.
+
+Stop at the verification gate with PowerShell checks.
+
+If anything in this episode's Build section is ambiguous or seems to
+assume something not true of this repo, stop and tell me before writing
+code.
+```
+
+**You do:** confirm both new commands work with **no project open at all** —
+that is the exact case F8 needs and the exact case `ListProjectFiles` cannot
+serve.
+
+**Record:**
+```
+Write design/completed/backend/B23-agent-and-directory-listing.md
+following the format in design/completed/backend/INDEX.md. Include the
+bugs we hit and how they were fixed, and what the next episode inherits.
+Add a row to that INDEX.md status table.
+
+Record the exact payload shapes for both new events -- field names and
+all -- and which way you decided the allow_outside_project-for-listing
+question. F8 (Session 14) is written against these exact names next.
+```
+
+**Then:** commit · `/clear`
+
+---
+
 # SESSION 14 — F8 @ Picker and Attachments
 
 **Paste:**
 ```
-Read CLAUDE.md and design/tasks/frontend/F08-at-picker.md.
+Read CLAUDE.md, design/tasks/frontend/F08-at-picker.md, and
+design/completed/backend/B23-agent-and-directory-listing.md for the
+ListAgents and directory-browse wire events this episode reads from --
+they did not exist when F08's own spec was written.
 
 Mode is decided by the first character after @. Go never reads files —
 the backend resolves every path.
