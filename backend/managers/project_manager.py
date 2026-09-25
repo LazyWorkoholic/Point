@@ -265,6 +265,83 @@ class ProjectManager:
             "outside_project": is_outside_project(resolved, project),
         }
 
+    # -- plain directory browse (B23) ------------------------------------
+    # Not list_files()/  _build_index(): that is an indexed, gitignore-
+    # aware, 30s-cached tree for one resolved project. This is a single,
+    # uncached readdir of whatever folder the caller names, project or
+    # no project, for F8's `@` picker to page through live.
+
+    async def list_directory(
+        self, project: Optional[Project], raw_path: str, *, cwd: Optional[str] = None
+    ) -> dict:
+        """List `raw_path`'s immediate children.
+
+        B23 Gap 2's decision: a directory *listing* is exempt from the
+        `allow_outside_project` gate a file *read* is subject to --
+        `allow_outside_project=True` is passed unconditionally below,
+        never read from `project.allow_outside_project` config. Listing
+        exposes names, not content, and F8's spec wants `@C:\\` to work
+        as ordinary filesystem browsing with no project open and no
+        config flip at all; the config gate keeps guarding the read/
+        attach path exactly as before (read_file, check_stale,
+        AttachmentManager all still default to False). Browsing to find
+        a file is not the same permission as reading it.
+        """
+        resolved = self._resolve_browse_target(raw_path, project, cwd)
+        if not resolved.exists():
+            raise InvalidEventError(f"No such path: {resolved}")
+        if not resolved.is_dir():
+            raise InvalidEventError(f"Not a directory: {resolved}")
+        entries = await asyncio.to_thread(self._read_dir, resolved)
+        return {
+            "path": str(resolved),
+            "entries": entries,
+            "outside_project": is_outside_project(resolved, project),
+        }
+
+    @staticmethod
+    def _resolve_browse_target(raw_path: str, project: Optional[Project], cwd: Optional[str]) -> Path:
+        """resolve_path() refuses a relative path outright when there is
+        no project -- there is nothing to resolve it against. F8's "no
+        project: browse cwd" fallback needs one anyway, so a relative
+        `raw_path` is joined onto the caller-supplied `cwd` *before*
+        resolve_path ever sees it. `~` is left to resolve_path's own
+        `os.path.expanduser` -- this only decides whether a join happens.
+
+        `cwd` must be the caller's (the frontend's) own working
+        directory, not the backend's: per CLAUDE.md the backend always
+        runs from inside `backend\\`, which is essentially never where
+        the user launched point.exe from.
+        """
+        expanded = os.path.expandvars(os.path.expanduser(raw_path))
+        candidate = Path(expanded)
+        if project is None and not candidate.is_absolute():
+            if not cwd:
+                raise InvalidEventError(
+                    f"{raw_path!r} is relative and no project is open -- 'cwd' is required"
+                )
+            base = Path(os.path.expandvars(os.path.expanduser(cwd)))
+            candidate = base / candidate
+        return resolve_path(str(candidate), project, allow_outside_project=True)
+
+    @staticmethod
+    def _read_dir(path: Path) -> list[dict]:
+        entries: list[dict] = []
+        try:
+            with os.scandir(path) as it:
+                for entry in it:
+                    try:
+                        is_dir = entry.is_dir()
+                    except OSError:
+                        continue
+                    if is_dir and entry.name in _ALWAYS_SKIP_DIRS:
+                        continue
+                    entries.append({"name": entry.name, "is_dir": is_dir})
+        except OSError as exc:
+            raise InvalidEventError(f"Cannot list directory: {path} ({exc})") from exc
+        entries.sort(key=lambda e: (not e["is_dir"], e["name"].casefold()))
+        return entries
+
     async def check_stale(
         self,
         project: Optional[Project],

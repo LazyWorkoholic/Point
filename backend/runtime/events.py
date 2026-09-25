@@ -91,6 +91,15 @@ class IncomingEventType(str, Enum):
     # computes. Payload mirrors `cli.py context report`: an optional
     # `session_id`, absent meaning the most recently updated session.
     GET_CONTEXT_REPORT = "GetContextReport"
+    # B23: F8's `@` picker. ListAgents needs no session and no project --
+    # AgentRegistry.list() already returns every registered agent.
+    LIST_AGENTS = "ListAgents"
+    # B23: a plain, uncached directory listing for the picker's
+    # filesystem-browse mode. Distinct from LIST_PROJECT_FILES, which
+    # requires a resolved project and serves the indexed/gitignore-aware/
+    # cached file tree -- this lists one folder's immediate children,
+    # with or without a project, live.
+    LIST_DIRECTORY = "ListDirectory"
 
 
 @dataclass(frozen=True)
@@ -199,6 +208,9 @@ class OutgoingEventType(str, Enum):
     # assistant message is persisted (corr_id null) -- one shape, one
     # decoder, not two.
     CONTEXT_REPORT = "ContextReport"
+    # B23: reply to ListAgents / ListDirectory.
+    AGENT_LIST = "AgentList"
+    DIRECTORY_LIST = "DirectoryList"
     # Connection-level, caused by no request: corr_id is null on both.
     HELLO = "hello"
     PING = "ping"

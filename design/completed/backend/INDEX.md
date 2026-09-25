@@ -30,6 +30,7 @@ it passed.
 | B20 | `context.report` on the Wire | ✅ built + manually verified | `B20-context-report.md` |
 | B21 | Orphaned Messages Must Not Enter the Next Prompt | ✅ built + manually verified | `B21-orphaned-message-context.md` |
 | B22 | Concurrent Task Completion Race (`SerializedConnection`) | ✅ built + manually verified | `B22-concurrent-completion-race.md` |
+| B23 | Agent and Directory Listing on the Wire | ✅ built + manually verified | `B23-agent-and-directory-listing.md` |
 
 ## Verified file structure — end of Episode 11
 

@@ -129,6 +129,40 @@ This is the part with a real decision in it, not just plumbing:
   This endpoint answers "what is in this folder" (name, is-directory),
   nothing about whether any entry could be attached.
 
+### Decision recorded: `allow_outside_project` for a listing vs. a read
+
+**A directory listing is exempt from the gate. `ListDirectory` always
+calls `resolve_path(..., allow_outside_project=True)`, unconditionally,
+never reading `project.allow_outside_project` from config.**
+
+Why: the gate exists to stop a file **read** from pulling content out of
+the machine from wherever a session's project happens not to cover —
+that is a real exposure, and defaulting it off is right. A **listing**
+exposes names, not content, and F8's own spec requires `@C:\`, `@~\`,
+`@\` to work as ordinary filesystem browsing with **no project open at
+all** — if listing shared the read gate, that basic case would refuse by
+default on every fresh profile (`project.allow_outside_project` defaults
+`false`), and browsing would only "just work" for someone who had
+already flipped a config flag for an unrelated reason (enabling
+outside-project attachment). That is the wrong default for a picker's
+primary navigation mode.
+
+This does not weaken anything already built. `ReadProjectFile`,
+`CheckFileStale`, and `AttachmentManager` (attach/detach/resolve) are
+untouched and keep defaulting to `allow_outside_project=False` — finding
+a file by browsing to it is not the same permission as reading or
+attaching it, and the existing gate still stands between "I can see this
+file's name" and "I can pull its content into a session." `is_outside_
+project()` is still called on every `ListDirectory` result and the
+`outside_project` flag is still reported (B7 done-when #3), so a client
+can still show "outside your project" chrome on entries that need it —
+listing being exempt from the *refusal* does not mean the *fact* of
+being outside the project is hidden.
+
+Implemented in `managers/project_manager.py`'s `ProjectManager.
+list_directory()` / `_resolve_browse_target()`, called from `Runtime.
+_handle_list_directory()`.
+
 ---
 
 ## Do NOT
@@ -240,7 +274,20 @@ finally {
   is exempt from it since it exposes names, not content — and this doc
   deliberately does not answer it. That is this episode's own ambiguity to
   resolve (and write down), not something decided in advance by the
-  session that found the gap.
+  session that found the gap. **Resolved above: exempt.**
+- One more small call this episode had to make that the doc above didn't
+  name explicitly: `ListDirectory` resolves a project **only** from an
+  explicit `project_id` in the payload, unlike `ReadProjectFile`/
+  `CheckFileStale`'s `_resolve_optional_project`, which also walks up
+  from the very path it operates on to auto-discover a `.point\` marker.
+  A browse target is meant to sweep across arbitrary, often
+  project-unrelated locations (`@C:\`, `@D:\`); auto-discovering a
+  project from wherever the picker currently happens to be pointed would
+  make the same absolute path behave differently depending on ambient
+  `.point\` markers no caller asked about. F8 passes its session's
+  already-resolved `project_id` explicitly when it has one, the same way
+  `AcquireFileLock` and its siblings require one. See `Runtime.
+  _handle_list_directory()`'s docstring.
 - F8 (`design/tasks/frontend/F08-at-picker.md`) resumes in its own fresh
   session once this episode is built and verified — same three-step chain
   as F6 → B20/B21 → S13d.

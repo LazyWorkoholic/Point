@@ -300,6 +300,8 @@ class Runtime:
         self.dispatcher.register(IncomingEventType.RELEASE_FILE_LOCK, self._handle_release_file_lock)
         self.dispatcher.register(IncomingEventType.TAKE_OVER_FILE_LOCK, self._handle_take_over_file_lock)
         self.dispatcher.register(IncomingEventType.CHECK_FILE_STALE, self._handle_check_file_stale)
+        self.dispatcher.register(IncomingEventType.LIST_AGENTS, self._handle_list_agents)
+        self.dispatcher.register(IncomingEventType.LIST_DIRECTORY, self._handle_list_directory)
 
     async def receive(self, raw: dict[str, Any]) -> None:
         try:
@@ -724,6 +726,52 @@ class Runtime:
             type=OutgoingEventType.FILE_STALE_RESULT,
             request_id=event.request_id,
             payload={"changed": changed},
+        ))
+
+    # -- agent / directory listing (B23) -------------------------------
+    # F8's `@` picker needs both, live, per keystroke: which agents
+    # exist, and what is in an arbitrary directory.
+
+    async def _handle_list_agents(self, event: IncomingEvent) -> None:
+        """No session, no project -- AgentRegistry.list() already does
+        the whole job (B9); this is plumbing, not new logic."""
+        configs = await self.agents.list()
+        await self._emit(OutgoingEvent(
+            type=OutgoingEventType.AGENT_LIST,
+            request_id=event.request_id,
+            payload={
+                "agents": [
+                    {"id": c.id, "name": c.name, "description": c.description}
+                    for c in configs
+                ],
+            },
+        ))
+
+    async def _handle_list_directory(self, event: IncomingEvent) -> None:
+        """Project scope here is explicit-only (`project_id`), unlike
+        ReadProjectFile/CheckFileStale's `_resolve_optional_project`,
+        which also walks up from the same `path` it operates on to
+        auto-discover a project. A browse target is meant to sweep
+        across arbitrary, often unrelated locations (`@C:\\`, `@D:\\`) --
+        letting it silently pick up whatever `.point\\` happens to sit
+        above whichever folder the user is currently looking at would
+        make browsing behave differently depending on ambient project
+        markers no one asked about. A session that already has a
+        resolved project passes its id explicitly, exactly as
+        AcquireFileLock and friends require one; browsing with no
+        project is a first-class, equally valid case, not a fallback.
+        """
+        p = event.payload
+        if "path" not in p:
+            raise InvalidEventError("ListDirectory requires 'path'")
+        project = None
+        if p.get("project_id"):
+            project = await self.projects.resolve(explicit_project_id=p["project_id"])
+        result = await self.projects.list_directory(project, p["path"], cwd=p.get("cwd"))
+        await self._emit(OutgoingEvent(
+            type=OutgoingEventType.DIRECTORY_LIST,
+            request_id=event.request_id,
+            payload=result,
         ))
 
     # -- task handlers ----------------------------------------------------

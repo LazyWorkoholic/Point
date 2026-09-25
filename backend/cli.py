@@ -16,6 +16,8 @@ verified without Go (B6 14).
     uv run python cli.py detach <attachment-id>
     uv run python cli.py set-mode <attachment-id> reference
     uv run python cli.py attachments list
+    uv run python cli.py agents list [--wire]
+    uv run python cli.py project browse <path> [--project ID] [--cwd DIR]
 
 Run from inside `backend\`, like everything else here.
 
@@ -104,6 +106,8 @@ _EXPECTED_REPLY: dict[str, set[str]] = {
     "SetAttachmentMode": {"Attachment"},
     "ListAttachments": {"AttachmentList"},
     "GetContextReport": {"ContextReport"},
+    "ListAgents": {"AgentList"},
+    "ListDirectory": {"DirectoryList"},
 }
 
 _TASK_TERMINAL = {"TaskDone", "TaskFailed", "TaskCancelled"}
@@ -943,6 +947,24 @@ async def cmd_memory_list(runtime: Runtime, args: argparse.Namespace) -> int:
 # ---------------------------------------------------------------------------
 
 async def cmd_agents_list(runtime: Runtime, args: argparse.Namespace) -> int:
+    if args.wire:
+        # B23: exercises ListAgents/AgentList over the wire, the same
+        # envelope F8's picker will call. The plain (non-wire) path
+        # below calls runtime.agents.list() in-process and proves only
+        # that the data exists, not that the wire event works.
+        envelopes = await call(runtime, "ListAgents", verbose=args.verbose)
+        _print_errors(envelopes)
+        if _failed(envelopes) or not envelopes:
+            return EXIT_FAILED
+        agents = envelopes[-1]["payload"]["agents"]
+        if not agents:
+            print("(no agents)")
+            return EXIT_OK
+        for a in agents:
+            print(f"{a['id']:<18}{a['name']:<20}{a['description']}")
+        print(f"\n{len(agents)} agent(s)")
+        return EXIT_OK
+
     configs = await runtime.agents.list()
     if not configs:
         print("(no agents)")
@@ -1085,6 +1107,29 @@ async def cmd_project_read_file(runtime: Runtime, args: argparse.Namespace) -> i
     print(f"outside_project: {f['outside_project']}")
     print("---")
     print(f["content"])
+    return EXIT_OK
+
+
+async def cmd_project_browse(runtime: Runtime, args: argparse.Namespace) -> int:
+    """B23: no _require_project / _resolve_project here on purpose --
+    browsing is explicit-project-or-none, never an implicit resolve
+    against --path the way every other `project` subcommand works. See
+    Runtime._handle_list_directory's docstring for why."""
+    envelopes = await call(
+        runtime, "ListDirectory", verbose=args.verbose,
+        path=args.target, project_id=args.project_id, cwd=args.cwd or os.getcwd(),
+    )
+    _print_errors(envelopes)
+    if _failed(envelopes) or not envelopes:
+        return EXIT_FAILED
+    result = envelopes[-1]["payload"]
+    print(f"path:            {result['path']}")
+    print(f"outside_project: {result['outside_project']}")
+    print("---")
+    for e in result["entries"]:
+        marker = "<DIR>" if e["is_dir"] else "     "
+        print(f"{marker}  {e['name']}")
+    print(f"\n{len(result['entries'])} entries")
     return EXIT_OK
 
 
@@ -1490,7 +1535,13 @@ def build_parser() -> argparse.ArgumentParser:
     agents_sub = sub.add_parser("agents", help="agent operations", parents=[common]).add_subparsers(
         dest="agents_command", required=True
     )
-    agents_sub.add_parser("list", help="list built-in and user agents", parents=[common])
+    agents_list_parser = agents_sub.add_parser(
+        "list", help="list built-in and user agents", parents=[common]
+    )
+    agents_list_parser.add_argument(
+        "--wire", action="store_true",
+        help="go over the wire (ListAgents/AgentList) instead of the in-process registry",
+    )
     agents_show = agents_sub.add_parser("show", help="show one agent's full config", parents=[common])
     agents_show.add_argument("agent_id")
     agents_set_model = agents_sub.add_parser(
@@ -1542,6 +1593,21 @@ def build_parser() -> argparse.ArgumentParser:
     p_stale.add_argument("--mtime", type=float, required=True, help="the mtime read-file reported at open")
     p_stale.add_argument("--allow-outside", dest="allow_outside", action="store_true")
 
+    # B23: plain, uncached directory listing -- no --path here on purpose.
+    # Every other `project` subcommand resolves a project from --path
+    # implicitly; browse takes an explicit --project instead (default:
+    # none), since a browse target is meant to sweep across arbitrary,
+    # often project-unrelated locations. See cmd_project_browse.
+    p_browse = project.add_parser(
+        "browse", help="list a directory's immediate children (no project required)", parents=[common]
+    )
+    p_browse.add_argument("target", help="absolute path, '.', '..', '~', or relative to --cwd")
+    p_browse.add_argument("--project", dest="project_id", default=None, help="explicit project id")
+    p_browse.add_argument(
+        "--cwd", default=None,
+        help="root for a relative TARGET when no project is given (default: this process's own cwd)",
+    )
+
     return parser
 
 
@@ -1588,6 +1654,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         ("project", "list-files"): cmd_project_list_files,
         ("project", "read-file"): cmd_project_read_file,
         ("project", "check-stale"): cmd_project_check_stale,
+        ("project", "browse"): cmd_project_browse,
         # Attachments and single-task cancel (B12).
         ("attach", None): cmd_attach,
         ("detach", None): cmd_detach,
