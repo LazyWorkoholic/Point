@@ -1063,8 +1063,17 @@ class Runtime:
         if not path:
             raise InvalidEventError("AttachContext requires 'path'")
         project, allow_outside = await self._attachment_scope(session_id)
+        # The project an unbound session would adopt is RESOLVED here (the
+        # guard below needs it to resolve the path against -- B12's bug #1)
+        # but only WRITTEN after the attach succeeds. Adopting before the
+        # guard meant a refused attach still permanently bound the
+        # session's project: reproduced with a genuinely binary file
+        # inside a `.point\` tree, refused with "looks binary", project_id
+        # set regardless. See _adoptable_project_for / _commit_adoption.
+        pending_adopt: Optional[Project] = None
         if project is None:
-            project = await self._adopt_project_for(session, path)
+            project = await self._adoptable_project_for(session, path)
+            pending_adopt = project
         mode = p.get("mode") or await self._default_attach_mode(session)
         attachment, resolution = await self.attachments.attach(
             session_id, path,
@@ -1073,6 +1082,9 @@ class Runtime:
             allow_outside_project=allow_outside,
             model=session.model,
         )
+        # Past the guards: the attach is real, so the binding is earned.
+        if pending_adopt is not None:
+            await self._commit_adoption(session, pending_adopt)
         await self._emit(OutgoingEvent(
             type=OutgoingEventType.ATTACHMENT,
             request_id=event.request_id,
@@ -1217,9 +1229,22 @@ class Runtime:
             payload={"attachments": [a.to_dict() for a in attachments]},
         ))
 
-    async def _adopt_project_for(self, session: Session, path: str) -> Optional[Project]:
-        r"""Bind an unbound session to the project the attached file
-        lives in, and return it.
+    async def _adoptable_project_for(self, session: Session, path: str) -> Optional[Project]:
+        r"""The project an unbound session WOULD adopt from this path --
+        resolved only, never written. `_commit_adoption` is what writes.
+
+        Split in two (F8 verification): this used to resolve AND write in
+        one step, and `_handle_attach_context` called it BEFORE
+        `attachments.attach()` -- which is what raises
+        AttachmentRefusedError. So a refused attach still permanently
+        bound the session's project: reproduced with a real binary file
+        (a copy of notepad.exe) inside a `.point\` tree, refused with
+        "looks binary", `project_id` set anyway. The guard has to run
+        first and the write has to be conditional on it passing, but the
+        guard ALSO needs the project to resolve the path against (B12's
+        own bug #1 -- "no project is open" while standing in one), so the
+        resolve cannot simply move after it. Hence: resolve first, guard
+        with the result, write only on success.
 
         Without this, `attach` was unusable in the only workflow anyone
         actually has: `project init`, then `session new`, then `attach` --
@@ -1252,12 +1277,18 @@ class Runtime:
             # purpose -- the path guard refuses it a moment later, with
             # a message naming the real reason.
             return None
+        return project
+
+    async def _commit_adoption(self, session: Session, project: Project) -> None:
+        """Write the binding `_adoptable_project_for` resolved. Called
+        ONLY after `attachments.attach()` has returned successfully --
+        a refused attach, for any reason the guards can give, must leave
+        `project_id` exactly as it was."""
         await self.sessions.set_project(session.id, project.id)
         _log.info(
-            "Session %s adopted project %s (%s) from its first attachment",
+            "Session %s adopted project %s (%s) from its first successful attachment",
             session.id, project.id, project.root_path,
         )
-        return project
 
     async def _attachment_scope(self, session_id: str) -> tuple[Optional[Project], bool]:
         """The project and the outside-project permission an attachment
