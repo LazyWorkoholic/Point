@@ -39,6 +39,16 @@ const (
 	// from, so setSession asks explicitly. See requestContextReport and
 	// onContextReport.
 	queryGetContextReport
+	// queryDetachAttachment is F8's: the chip is already removed locally
+	// (attachments.go's detachChip) by the time this reply arrives, so
+	// there is nothing left to apply — only whether a refusal is worth
+	// more than a log line, which decorative() below answers "no" to.
+	queryDetachAttachment
+	// queryListAttachments is F8's chip-freshness refresh (attachments.go's
+	// refreshAttachmentFreshness/onAttachmentList) — decorative like the
+	// two above: a refused refresh costs a chip staying on its last known
+	// state one cycle longer, never the transcript.
+	queryListAttachments
 )
 
 // localID mints a request id. protocol.newID does the equivalent job inside
@@ -109,7 +119,8 @@ func (w *Workspace) doSend(cmdType string, kind queryKind, payload map[string]an
 // already on screen. A load query failing leaves nothing to show, so it
 // earns the loadErr screen; a decorative one never does.
 func (k queryKind) decorative() bool {
-	return k == queryListTasks || k == queryGetContextReport
+	return k == queryListTasks || k == queryGetContextReport ||
+		k == queryDetachAttachment || k == queryListAttachments
 }
 
 // beginBootstrap fires once — the first time the backend is known to be
@@ -180,6 +191,12 @@ func (w *Workspace) handleEnvelope(env protocol.Envelope) tea.Cmd {
 	if cmd, taken := w.handleStreamEvent(env); taken {
 		return cmd
 	}
+	// F8: a staleness sweep's own ResolveAttachment reply — see
+	// attachments.go's own doc for why it is matched on a private map
+	// instead of the pending/queryKind one below.
+	if w.handleResolveAttachmentEnvelope(env) {
+		return nil
+	}
 	// S13d: the push half of ContextReport. It shares its wire type with
 	// GetContextReport's reply but carries no corr_id (runtime.py's
 	// _push_context_report emits with request_id=None) and no task_id, so
@@ -237,6 +254,21 @@ func (w *Workspace) handleEnvelope(env protocol.Envelope) tea.Cmd {
 			w.log.Warn("chat: GetContextReport refused, Status card stays unwired this load", "err", p.Error)
 			return nil
 		}
+		if kind == queryDetachAttachment {
+			// NOT w.loadErr: detachChip already removed the chip locally
+			// (optimistic, matching backspace's own pre-F8 behaviour) —
+			// AttachmentNotFoundError here means the row was already gone
+			// server-side, which is the outcome the user wanted anyway, not
+			// a reason to blank the transcript.
+			w.log.Warn("chat: DetachContext refused", "err", p.Error)
+			return nil
+		}
+		if kind == queryListAttachments {
+			// NOT w.loadErr: a refused freshness refresh costs a chip
+			// staying on its last known state, never the transcript.
+			w.log.Warn("chat: ListAttachments refused, chip freshness not refreshed", "err", p.Error)
+			return nil
+		}
 		w.loading = false
 		w.loadErr = p.Error
 		if w.loadErr == "" {
@@ -258,6 +290,8 @@ func (w *Workspace) handleEnvelope(env protocol.Envelope) tea.Cmd {
 		w.onTaskList(env)
 	case queryGetContextReport:
 		w.onContextReport(env)
+	case queryListAttachments:
+		w.onAttachmentList(env)
 	}
 	return nil
 }
@@ -326,6 +360,7 @@ func (w *Workspace) setSession(s wireSession) {
 	w.loading = false
 	w.loadErr = ""
 	w.sessionID = s.ID
+	w.projectID = s.ProjectID
 	w.sessionTitle = s.Title
 	w.sessionProvider = s.Provider
 	w.sessionModel = s.Model
@@ -383,11 +418,12 @@ func (w *Workspace) setSession(s wireSession) {
 // protocol.ConnectedMsg (so bootstrap can wait for a live connection
 // instead of failing against a nil backend), protocol.EnvelopeMsg (query
 // replies), app.PasteMsg, app.EnterBrowseMsg/app.FocusInputMsg (F4's focus
-// arbitration — see app\focus.go), and every tea.KeyMsg the action registry
-// did not consume, via Root.dispatchKey's fallthrough. draftSaveMsg and
-// OpenAttachmentPickerMsg are this package's own messages, arriving the
-// same way: Root has no case for them, so its Update falls through to
-// r.current().Update, which is here.
+// arbitration — see app\focus.go), app.AgentPickedMsg/app.AttachmentPickedMsg
+// (F8's @ picker writing back into this input — see app\picker.go and
+// input_keys.go's openPickerCmd), and every tea.KeyMsg the action registry
+// did not consume, via Root.dispatchKey's fallthrough. draftSaveMsg is this
+// package's own message, arriving the same way: Root has no case for it, so
+// its Update falls through to r.current().Update, which is here.
 //
 // tea.KeyMsg and app.PasteMsg both branch on w.input.focused: focused
 // routes to the query input (input_keys.go); unfocused routes to F3's
@@ -448,14 +484,18 @@ func (w *Workspace) Update(msg tea.Msg) (app.Workspace, tea.Cmd) {
 		return w, w.enterInputMode()
 	case draftSaveMsg:
 		w.saveDraftIfDue(m.gen)
+	case chipTickMsg:
+		return w, w.onChipTick(m.gen)
 	case app.CancelStreamMsg, app.DiscardPendingMsg, app.EditPendingMsg,
 		app.RetryMsg, streamTickMsg:
 		// F5's own messages — cancel, the queue's edit/discard, retry, and
 		// the render/watchdog tick. See stream.go's handleStreamMsg.
 		cmd, _ := w.handleStreamMsg(msg)
 		return w, cmd
-	case OpenAttachmentPickerMsg:
-		// F8's seam — see input_keys.go's doc comment on this type.
+	case app.AgentPickedMsg:
+		return w, w.applyAgentPicked(m.ID)
+	case app.AttachmentPickedMsg:
+		return w, w.applyAttachmentPicked(m.Chip)
 	case tea.KeyMsg:
 		if w.input.focused {
 			return w, w.handleInputKey(m)

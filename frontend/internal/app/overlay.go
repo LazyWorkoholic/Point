@@ -43,16 +43,16 @@ func newPaletteOverlay(root *Root) *Popup {
 		Title: "Command Palette",
 		Tabs:  []PopupTab{{Items: items}},
 		MinW:  70, MinH: 16, // matches Help's size — see the file doc above
-		OnSelect: func(it *array.Item) tea.Cmd {
+		OnSelect: func(it *array.Item) (tea.Cmd, bool) {
 			a, ok := root.actions.ByID(it.GetID())
 			if !ok {
-				return nil
+				return nil, true
 			}
 			if !a.Available(root) {
 				root.status = a.Name + " is not available right now"
-				return nil
+				return nil, true
 			}
-			return a.Run(root)
+			return a.Run(root), true
 		},
 	})
 }

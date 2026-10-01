@@ -82,8 +82,13 @@ const (
 // wireSession mirrors Runtime._session_to_dict's output, trimmed to the
 // fields this workspace reads.
 type wireSession struct {
-	ID    string `json:"id"`
-	Title string `json:"title"`
+	ID string `json:"id"`
+	// ProjectID is F8's: which project's tree the @ picker should fuzzy
+	// over, and what ListDirectory/AttachContext scope this session's
+	// files against. The wire has always sent it (runtime.py's
+	// _session_to_dict); nothing decoded it until F8 needed it.
+	ProjectID string `json:"project_id"`
+	Title     string `json:"title"`
 	// Provider is the session's pinned provider name, empty when the
 	// session inherits the global config. The backend has always sent it
 	// (runtime.py's _session_to_dict); nothing decoded it until the

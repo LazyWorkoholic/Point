@@ -123,7 +123,7 @@ func TestDisabledItemCannotBeChosen(t *testing.T) {
 	}
 	p := NewPopup(PopupConfig{
 		Title: "T", Tabs: []PopupTab{{Items: items}}, MinW: 40, MinH: 10,
-		OnSelect: func(*array.Item) tea.Cmd { chosen = true; return nil },
+		OnSelect: func(*array.Item) (tea.Cmd, bool) { chosen = true; return nil, true },
 	})
 	p.menu.MoveDown() // select the disabled item
 
@@ -153,7 +153,7 @@ func TestChoosingAnItemRunsOnSelectAndCloses(t *testing.T) {
 	var got *array.Item
 	p := NewPopup(PopupConfig{
 		Title: "T", Tabs: []PopupTab{{Items: testItems()}}, MinW: 40, MinH: 10,
-		OnSelect: func(it *array.Item) tea.Cmd { got = it; return nil },
+		OnSelect: func(it *array.Item) (tea.Cmd, bool) { got = it; return nil, true },
 	})
 
 	o, _ := p.Update(tea.KeyMsg{Type: tea.KeyEnter})
@@ -199,7 +199,7 @@ func TestClickSelectsAndChooses(t *testing.T) {
 	var got *array.Item
 	p := NewPopup(PopupConfig{
 		Title: "T", Tabs: []PopupTab{{Items: testItems()}}, MinW: 40, MinH: 10,
-		OnSelect: func(it *array.Item) tea.Cmd { got = it; return nil },
+		OnSelect: func(it *array.Item) (tea.Cmd, bool) { got = it; return nil, true },
 	})
 	// Force a render so the menu's height (and thus row layout) is set.
 	p.View(theme.New("turquoise", theme.BackgroundTransparent), 38, 8)
@@ -380,5 +380,156 @@ func TestNoNameOrBindingTruncatesAtMinSize(t *testing.T) {
 		if !seen[a.ID] {
 			t.Errorf("%s was never scrolled into view — the test did not actually check it", a.ID)
 		}
+	}
+}
+
+// F8: OnSelect's close bool, SetItems, QueryFor, OnFilterChange — additive
+// extensions for the @ picker's directory-descent and path-typing needs.
+// The two existing consumers (palette, Help) must be unaffected: both
+// always report closes=true, byte-for-byte the same as before this change.
+
+func TestPaletteAndHelpOnSelectAlwaysReportClose(t *testing.T) {
+	r := newRoot(t)
+
+	p := newPaletteOverlay(r)
+	it, ok := p.menu.Selected()
+	if !ok {
+		t.Fatal("palette has no selected item to test with")
+	}
+	_, closes := p.cfg.OnSelect(it)
+	if !closes {
+		t.Error("palette's OnSelect must always report closes=true")
+	}
+
+	unavailable := array.NewItem("does-not-exist", "Does Not Exist")
+	_, closes = p.cfg.OnSelect(unavailable)
+	if !closes {
+		t.Error("palette's OnSelect must report closes=true even for an unresolvable item")
+	}
+
+	if newHelpOverlay(r).cfg.OnSelect != nil {
+		t.Fatal("Help must keep OnSelect nil — browsing an entry has nothing to run")
+	}
+}
+
+func TestOnSelectCanKeepThePopupOpen(t *testing.T) {
+	var chosen *array.Item
+	p := NewPopup(PopupConfig{
+		Title: "T", Tabs: []PopupTab{{Items: testItems()}}, MinW: 40, MinH: 10,
+		OnSelect: func(it *array.Item) (tea.Cmd, bool) { chosen = it; return nil, false },
+	})
+
+	o, _ := p.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if o == nil {
+		t.Fatal("OnSelect reporting closes=false must keep the popup open")
+	}
+	if chosen == nil || chosen.GetID() != "apple" {
+		t.Errorf("OnSelect got %v, want the selected item", chosen)
+	}
+}
+
+func TestSetItemsClearsFilterAndSelectsTop(t *testing.T) {
+	p := NewPopup(PopupConfig{Title: "T", Tabs: []PopupTab{{Items: testItems()}}, MinW: 40, MinH: 10})
+
+	o, _ := p.Update(runeKey("banana"))
+	p = o.(*Popup)
+	if p.filter != "banana" {
+		t.Fatalf("filter = %q, want \"banana\" before SetItems", p.filter)
+	}
+	if _, ok := p.menu.Selected(); !ok {
+		t.Fatal("expected a match for \"banana\" before SetItems")
+	}
+
+	next := []*array.Item{
+		array.NewItem("readme.md", "README.md"),
+		array.NewItem("main.go", "main.go"),
+	}
+	p.SetItems(next)
+
+	if p.filter != "" {
+		t.Errorf("filter = %q after SetItems, want cleared", p.filter)
+	}
+	it, ok := p.menu.Selected()
+	if !ok || it.GetID() != "readme.md" {
+		t.Errorf("selection after SetItems = %v, want the first new item", it)
+	}
+	if p.menu.Len() != len(next) {
+		t.Errorf("menu holds %d items after SetItems, want %d (the OLD items must be gone, not merged)", p.menu.Len(), len(next))
+	}
+}
+
+func TestQueryForOverridesWhatTheMenuActuallyFilters(t *testing.T) {
+	items := []*array.Item{array.NewItem("point", "Point"), array.NewItem("other", "Other")}
+	p := NewPopup(PopupConfig{
+		Title: "T", Tabs: []PopupTab{{Items: items}}, MinW: 40, MinH: 10,
+		QueryFor: func(raw string) string {
+			if i := strings.LastIndexByte(raw, '\\'); i >= 0 {
+				return raw[i+1:]
+			}
+			return raw
+		},
+	})
+
+	for _, r := range "D:\\Projects\\Poi" {
+		o, _ := p.Update(runeKey(string(r)))
+		p = o.(*Popup)
+	}
+	if p.filter != "D:\\Projects\\Poi" {
+		t.Errorf("filter (display text) = %q, want the whole typed path kept verbatim", p.filter)
+	}
+	if p.menu.Len() != 1 {
+		t.Fatalf("menu matched %d items for leaf query \"Poi\", want exactly 1 (Point)", p.menu.Len())
+	}
+	it, _ := p.menu.Selected()
+	if it.GetID() != "point" {
+		t.Errorf("matched item = %v, want Point — QueryFor's leaf extraction did not reach the menu", it)
+	}
+}
+
+func TestNilQueryForFiltersOnRawText(t *testing.T) {
+	p := NewPopup(PopupConfig{Title: "T", Tabs: []PopupTab{{Items: testItems()}}, MinW: 40, MinH: 10})
+	o, _ := p.Update(runeKey("ap"))
+	p = o.(*Popup)
+	if p.menu.Len() != 2 {
+		t.Errorf("nil QueryFor: matched %d items for \"ap\", want 2", p.menu.Len())
+	}
+}
+
+func TestOnFilterChangeFiresWithTheRawTypedText(t *testing.T) {
+	var seen []string
+	p := NewPopup(PopupConfig{
+		Title: "T", Tabs: []PopupTab{{Items: testItems()}}, MinW: 40, MinH: 10,
+		OnFilterChange: func(raw string) tea.Cmd {
+			seen = append(seen, raw)
+			return nil
+		},
+	})
+
+	o, _ := p.Update(runeKey("a"))
+	p = o.(*Popup)
+	o, _ = p.Update(runeKey("p"))
+	p = o.(*Popup)
+	o, _ = p.Update(tea.KeyMsg{Type: tea.KeyBackspace})
+	p = o.(*Popup)
+
+	want := []string{"a", "ap", "a"}
+	if len(seen) != len(want) {
+		t.Fatalf("OnFilterChange fired %d times (%v), want %d (%v)", len(seen), seen, len(want), want)
+	}
+	for i := range want {
+		if seen[i] != want[i] {
+			t.Errorf("call %d: raw = %q, want %q", i, seen[i], want[i])
+		}
+	}
+}
+
+func TestNilOnFilterChangeIsSafe(t *testing.T) {
+	p := NewPopup(PopupConfig{Title: "T", Tabs: []PopupTab{{Items: testItems()}}, MinW: 40, MinH: 10})
+	o, cmd := p.Update(runeKey("a"))
+	if cmd != nil {
+		t.Error("a nil OnFilterChange must never produce a command")
+	}
+	if o.(*Popup).filter != "a" {
+		t.Error("filter typing must still work with no OnFilterChange set")
 	}
 }

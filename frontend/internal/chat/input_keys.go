@@ -4,6 +4,8 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+
+	"github.com/lazyworkoholic/point/frontend/internal/app"
 )
 
 // pasteSettle is how long after a paste an Enter is read as that
@@ -129,8 +131,11 @@ func (w *Workspace) handleInputKey(k tea.KeyMsg) tea.Cmd {
 		case k.Alt:
 			in.DeleteWordLeft() // the working alias — see doc above
 		case in.cursor == 0 && !in.hasSelection() && len(w.input.chips) > 0:
-			// "Backspace at position 0 removes the last chip."
-			w.input.chips = w.input.chips[:len(w.input.chips)-1]
+			// "Backspace at position 0 removes the last chip." — and now
+			// (F8) actually detaches it on the backend too; see
+			// attachments.go's detachChip doc for why a local-only splice
+			// stopped being correct the moment a chip became a real row.
+			return w.detachChip(len(w.input.chips) - 1)
 		default:
 			in.Backspace()
 		}
@@ -149,10 +154,44 @@ func (w *Workspace) handleInputKey(k tea.KeyMsg) tea.Cmd {
 		if k.Type == tea.KeySpace {
 			text = " "
 		}
+		// Captured BEFORE InsertText moves it: whether this '@' landed at
+		// buffer index 0 decides whether the picker it opens may offer
+		// agents at all (app.OpenAttachmentPickerMsg's own doc — only the
+		// LEADING @token can ever name one, per B12's invocation rule).
+		// The trigger itself fires identically either way: an '@' typed
+		// here is an '@' typed here, position never gates whether the
+		// picker opens — see input_workspace_test.go's
+		// TestOpenAttachmentPickerFiresAtIndexZeroAndElsewhere for the
+		// regression this guards, the picker-opening counterpart to F04's
+		// own Bug 3 (agentTokenState's cursor-bounded pending token).
+		leading := in.cursor == 0
 		in.InsertText(text)
 		if text == "@" {
-			return tea.Batch(w.scheduleDraftSave(), openPickerCmd())
+			return tea.Batch(w.scheduleDraftSave(), openPickerCmd(leading))
 		}
+		// DECIDED, not a gap: the picker opens on the '@' KEYSTROKE EVENT,
+		// never on a live recompute of "is there an unclosed @ token near
+		// the cursor" the way agentTokenState recomputes the mode chip on
+		// every keystroke. Esc (Popup's own handleKey, routed through
+		// Root — this method never sees it while the popup is open)
+		// dismisses without touching this buffer at all, so the '@'
+		// stays, as ordinary typed text — exactly as it would if the
+		// picker had never existed. Typing more after a dismissal (e.g.
+		// '?', making the buffer read "@?") does NOT reopen it: a
+		// verification round asked this be confirmed as intentional
+		// rather than silently assumed. It is. Re-deriving "should the
+		// picker be open" from buffer content on every keystroke would
+		// mean tracking a SECOND fact — "has the user already dismissed
+		// THIS '@'" — independent from the buffer text itself, which is
+		// precisely the two-sources-of-truth shape this codebase has
+		// already been bitten by three times (DiagnosticsMsg.Seq,
+		// taskCardWasVisible, B23 existing at all). The '@?' explorer
+		// gesture the spec describes needs no such mechanism: typed
+		// without an intervening Esc, the '?' lands in the POPUP's own
+		// filter box (focus is trapped while it is open), reaching
+		// onPickerFilterChange directly — see picker.go. Esc truly means
+		// "dismiss"; a fresh '@' is what reopens it, exactly as backspacing
+		// the stray text and retyping '@' already does today.
 
 	default:
 		return nil
@@ -177,15 +216,13 @@ func (w *Workspace) handleInputPaste(text string) tea.Cmd {
 // and it is now the real send: CmdSendMessage, a live entry, and the queue.
 // The clear is still its last step, exactly as that stub asked.
 
-// OpenAttachmentPickerMsg is F4's whole implementation of "emit an 'open
-// picker' message when @ is typed" (F04-query-input.md's Do-NOT forbids
-// building the picker itself). Nothing consumes it meaningfully yet — the
-// case below exists so a reader can find where F8 hooks in, rather than
-// this message silently reaching Update's generic no-op path.
-type OpenAttachmentPickerMsg struct{}
-
-func openPickerCmd() tea.Cmd {
-	return func() tea.Msg { return OpenAttachmentPickerMsg{} }
+// openPickerCmd emits app.OpenAttachmentPickerMsg — F4's whole
+// implementation of "ask for the picker when @ is typed" was a local type
+// nothing consumed; F8 moved it to app (see that type's own doc for why:
+// Root, not this workspace, owns OpenOverlay and the backend round trips
+// the picker needs).
+func openPickerCmd(leading bool) tea.Cmd {
+	return func() tea.Msg { return app.OpenAttachmentPickerMsg{Leading: leading} }
 }
 
 // InputFocused satisfies app.FocusAware — see app\focus.go and the

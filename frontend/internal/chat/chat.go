@@ -97,6 +97,25 @@ type Workspace struct {
 	sessionModel    string
 	bootstrapped    bool
 
+	// projectID is the session's bound project, or "" when unbound. F8's @
+	// picker reads it (PickerSession, picker.go) to decide fuzzy-over-the-
+	// project-tree vs filesystem-browse-rooted-at-cwd, and to scope
+	// ListDirectory/AttachContext the same way the backend already scopes
+	// them by session.
+	projectID string
+
+	// chipTickArmed/chipTickGen pace attachments.go's periodic staleness
+	// sweep — the same self-re-arming, idle-cost-zero shape as stream.go's
+	// tickArmed/tickGen, a separate generation counter because the two
+	// ticks pace unrelated things (render/watchdog vs. attachment
+	// staleness) and must not stop or re-arm each other.
+	chipTickArmed bool
+	chipTickGen   int
+	// resolvingPath maps an in-flight ResolveAttachment request's own
+	// correlation id to the chip path it is pricing — see attachments.go's
+	// own doc for why this lives outside the ordinary pending/queryKind map.
+	resolvingPath map[string]string
+
 	// providers is the set of provider names this backend registered, or
 	// nil when it could not be established. Read only by knownProvider
 	// (providers.go), which explains why nil has to mean "accept
@@ -296,6 +315,7 @@ func New(opts Options) *Workspace {
 		scrollback:    sb,
 		streamTimeout: st,
 		pending:       make(map[string]queryKind),
+		resolvingPath: make(map[string]string),
 		cache:         make(map[string][]string),
 		focus:         -1,
 		pinned:        true,

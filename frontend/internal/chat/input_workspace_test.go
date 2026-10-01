@@ -190,9 +190,15 @@ func TestCtrlJInsertsNewline(t *testing.T) {
 	}
 }
 
-// F4's whole implementation of "Enter sends": clear the buffer, the chips,
-// and the persisted draft — nothing is sent over the wire (F5's job). See
+// F4's whole implementation of "Enter sends": clear the buffer and the
+// persisted draft — nothing is sent over the wire (F5's job). See
 // input_keys.go's onSend doc for exactly what F5 replaces.
+//
+// Chips are the one thing this no longer clears — F8 corrected it. B12: an
+// attachment is per-SESSION, not per-message ("the same file stays attached
+// across turns" is the whole reason its (mtime, size) pair is worth
+// recording at all), so a chip surviving a send is the CORRECT behaviour,
+// not a leftover — see stream.go's clearInput doc for the full account.
 func TestEnterClearsInputAndDraft(t *testing.T) {
 	w := newTestWorkspace(t)
 	w.sessionID = "s1"
@@ -215,8 +221,8 @@ func TestEnterClearsInputAndDraft(t *testing.T) {
 	if w.input.buf.text() != "" || w.input.buf.cursor != 0 {
 		t.Fatalf("input not cleared: %q cursor=%d", w.input.buf.text(), w.input.buf.cursor)
 	}
-	if len(w.input.chips) != 0 {
-		t.Fatal("chips not cleared on send")
+	if len(w.input.chips) != 1 {
+		t.Fatal("chips must survive a send — an attachment is per-session, not per-message")
 	}
 	if saveCalls != 1 {
 		t.Fatalf("saveStateFn called %d times, want 1 (clearDraft saves immediately)", saveCalls)
@@ -775,6 +781,64 @@ func TestPendingResolvesTheTokenAtTheCursor(t *testing.T) {
 				c.name, c.text, c.cursor, got, c.want)
 		}
 	}
+}
+
+// F8's picker-opening path (input_keys.go's openPickerCmd) is a SEPARATE
+// mechanism from the mode chip (agentTokenState) that Bug 3 was about, and
+// this is its own regression coverage: it must open identically whether the
+// '@' lands at buffer index 0 or anywhere else. The trigger already does
+// this unconditionally (`if text == "@"`, no cursor/position check at all),
+// so this proves it, at both positions, rather than trusting the reading of
+// the code — and proves the position-specific piece the trigger itself does
+// carry: Leading, which is what decides whether the picker may offer agents
+// at all (only the buffer's leading @token can ever name one — B12's
+// invocation rule).
+func TestOpenAttachmentPickerFiresAtIndexZeroAndElsewhere(t *testing.T) {
+	w := newTestWorkspace(t)
+	w.input.textWidth = 60
+	for _, r := range "hello world" {
+		w.Update(keyMsg(string(r)))
+	}
+
+	w.Update(tea.KeyMsg{Type: tea.KeyHome})
+	if w.input.buf.cursor != 0 {
+		t.Fatalf("Home left the cursor at %d, want 0", w.input.buf.cursor)
+	}
+	_, cmd := w.Update(keyMsg("@"))
+	msgs := drainOnce(cmd)
+	open, ok := findOpenPickerMsg(msgs)
+	if !ok {
+		t.Fatal("'@' at buffer index 0 did not open the picker")
+	}
+	if !open.Leading {
+		t.Error("'@' at buffer index 0 must report Leading = true")
+	}
+	// Cancel out the '@' so the next probe starts from a clean, known
+	// buffer — Undo is the least assumption-laden way to do that.
+	w.input.buf.Undo()
+
+	w.Update(tea.KeyMsg{Type: tea.KeyEnd})
+	if w.input.buf.cursor == 0 {
+		t.Fatalf("End left the cursor at 0 — this probe needs a NON-leading position")
+	}
+	_, cmd = w.Update(keyMsg("@"))
+	msgs = drainOnce(cmd)
+	open, ok = findOpenPickerMsg(msgs)
+	if !ok {
+		t.Fatal("'@' typed elsewhere in the buffer did not open the picker — the trigger must not be position-gated")
+	}
+	if open.Leading {
+		t.Error("'@' typed at a non-zero position must report Leading = false")
+	}
+}
+
+func findOpenPickerMsg(msgs []tea.Msg) (app.OpenAttachmentPickerMsg, bool) {
+	for _, m := range msgs {
+		if o, ok := m.(app.OpenAttachmentPickerMsg); ok {
+			return o, true
+		}
+	}
+	return app.OpenAttachmentPickerMsg{}, false
 }
 
 // Driven through real keystrokes rather than setText, which is how the

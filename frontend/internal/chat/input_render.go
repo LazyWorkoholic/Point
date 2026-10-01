@@ -158,13 +158,36 @@ func (in *inputState) currentMode() editorMode {
 
 // AttachmentChip is one pinned chip above the typed text — F8's @ picker
 // produces these; F4 only renders whatever it is handed (F04-query-input.md:
-// "Do NOT implement the @ picker — render chips you are handed"). Nothing in
-// this episode ever populates a non-empty slice; it exists so F8 has a
-// stable shape to fill in rather than inventing one under time pressure.
+// "Do NOT implement the @ picker — render chips you are handed").
 type AttachmentChip struct {
+	// ID is the backend's attachment row id (AttachContext's reply) —
+	// what DetachContext addresses. Empty only on a chip built before F8
+	// existed, which never happened in product code.
+	ID string
+	// Path is the resolved source path — attachments.go's staleness
+	// re-check (ResolveAttachment) is keyed on it, not on Name, since two
+	// attachments can share a filename in different directories.
+	Path    string
 	Name    string
 	Current bool // true: "✓ current". false: "⚠ changed" — will be re-sent.
 	Tokens  int  // a token estimate, shown alongside the chip
+
+	// RecordedMtime/RecordedSize are the (mtime, size) pair the backend
+	// last recorded as SENT for this attachment — attach.py's own
+	// change-detection pair, mirrored here so attachments.go's periodic
+	// ResolveAttachment check can compare a fresh live stat against it
+	// without asking the backend to also tell us what it thinks "current"
+	// means.
+	//
+	// *int, not int: managers\attachment.py is explicit that a fresh row's
+	// pair is NULL until the first turn that actually sends it — "a NULL
+	// pair reads as 'never sent', the correct answer for a row nothing has
+	// resolved yet". Decoding that null into a plain int silently produces
+	// 0, indistinguishable from a real recorded mtime of zero, which is
+	// what let a periodic sweep compare a real file's mtime against a
+	// bogus zero baseline and report "changed" on a file nobody touched
+	// (a real bug, caught in manual verification).
+	RecordedMtime, RecordedSize *int
 }
 
 // SetChips replaces the pinned attachment chips. F8's job to call; unused

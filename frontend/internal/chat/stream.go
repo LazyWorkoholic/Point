@@ -325,6 +325,13 @@ func (w *Workspace) onSend() tea.Cmd {
 	if strings.TrimSpace(raw) == "" {
 		return nil
 	}
+	if isDetachCommand(raw) {
+		// A command, never text sent to the model — detachChip clears the
+		// input's own way (draft save), so this returns straight from here
+		// rather than falling into the ordinary send path below.
+		w.input.buf.ClearKeepingUndo()
+		return w.detachChip(len(w.input.chips) - 1)
+	}
 	agentID, body := splitAgent(raw)
 
 	// "Agent tasks never enter this queue" — an @agent send fires
@@ -343,7 +350,17 @@ func (w *Workspace) onSend() tea.Cmd {
 
 func (w *Workspace) clearInput() {
 	w.input.buf.ClearKeepingUndo() // see its doc — recoverable via Ctrl+Z
-	w.input.chips = nil
+	// Chips are NOT cleared here. B12: an attachment is per-SESSION, not
+	// per-message — "the same file stays attached across turns" is the
+	// whole reason its (mtime, size) pair is worth recording at all.
+	// Clearing them on every send (F4's original behaviour, written before
+	// any attachment was ever real) would detach every file the instant it
+	// was first used. A chip goes away only through detachChip
+	// (attachments.go) — backspace at position 0, or /detach. F08's own
+	// wording also lists "esc" as a way to detach; esc is already bound to
+	// entering browse mode (chat.browse) for every OTHER purpose, and this
+	// episode did not carve out a chip-focused exception to it — see this
+	// episode's handoff notes.
 	w.input.scrollTop = 0
 }
 

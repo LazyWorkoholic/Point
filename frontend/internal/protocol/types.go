@@ -35,6 +35,18 @@ const (
 	CmdTakeOverFileLock      = "TakeOverFileLock"
 	CmdCheckFileStale        = "CheckFileStale"
 	CmdGetContextReport      = "GetContextReport"
+	// Attachments (B12). B8 built the read half; these are the writes.
+	// F8's @ picker is the first Go consumer.
+	CmdAttachContext     = "AttachContext"
+	CmdDetachContext     = "DetachContext"
+	CmdSetAttachmentMode = "SetAttachmentMode"
+	CmdListAttachments   = "ListAttachments"
+	CmdResolveAttachment = "ResolveAttachment"
+	// F8's @ picker (B23). ListAgents needs no session and no project;
+	// ListDirectory is a plain, uncached, single-level listing, distinct
+	// from ListProjectFiles' indexed/gitignore-aware/cached file tree.
+	CmdListAgents    = "ListAgents"
+	CmdListDirectory = "ListDirectory"
 )
 
 // Events — Python to Go (OutgoingEventType).
@@ -87,6 +99,16 @@ const (
 	// the GetContextReport reply (corr_id set) and the push after a turn's
 	// assistant message persists (corr_id null, session_id always set).
 	EvContextReport = "ContextReport"
+
+	// Attachments (B12).
+	EvAttachment           = "Attachment"
+	EvAttachmentList       = "AttachmentList"
+	EvAttachmentDetached   = "AttachmentDetached"
+	EvAttachmentResolution = "AttachmentResolution"
+
+	// F8's @ picker (B23): the replies to ListAgents / ListDirectory.
+	EvAgentList     = "AgentList"
+	EvDirectoryList = "DirectoryList"
 )
 
 // Client-side pseudo-events. These never appear on the wire; the client

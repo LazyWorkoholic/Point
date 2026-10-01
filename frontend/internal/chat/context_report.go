@@ -49,6 +49,12 @@ func (w *Workspace) onContextReport(env protocol.Envelope) {
 		return
 	}
 	w.contextReport = &p
+	// F8: the same two moments a report ever arrives (this pull, and the
+	// push after a completed turn) are the only points the backend's own
+	// recorded (mtime, size) baseline could have moved — see
+	// attachments.go's refreshAttachmentFreshness doc for why this reads
+	// the attachment rows directly rather than the report's own strings.
+	w.refreshAttachmentFreshness()
 }
 
 // ContextExpandOverlay satisfies app.ContextExpandable -- S13d's one guard,

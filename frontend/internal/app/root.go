@@ -88,6 +88,11 @@ type Root struct {
 	// correctness fix and not just a speed one.
 	lastFrame string
 
+	// picker is F8's @ picker controller — see picker.go's own doc comment
+	// for why Root, not chat.Workspace, owns the backend round trips it
+	// needs. Zero value: no picker open.
+	picker pickerState
+
 	status   string
 	log      *slog.Logger
 	quitting bool
@@ -367,7 +372,7 @@ func (r *Root) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		ws, wsCmd := r.current().Update(m)
 		r.workspaces[r.active] = ws
 		r.refreshTasks()
-		return r, tea.Batch(r.afterBackend(), wsCmd)
+		return r, tea.Batch(r.afterBackend(), wsCmd, r.retryPickerIfAwaiting())
 
 	case protocol.VersionMismatchMsg:
 		// Refuse, with BOTH versions named. This is the envelope version from
@@ -429,9 +434,17 @@ func (r *Root) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			r.conn.inFlight = r.client.InFlight()
 		}
 		r.handleTaskListEnvelope(m.Envelope)
+		pickerCmd := r.handlePickerEnvelope(m.Envelope)
 		ws, wsCmd := r.current().Update(m)
 		r.workspaces[r.active] = ws
-		return r, tea.Batch(r.afterBackend(), wsCmd)
+		return r, tea.Batch(r.afterBackend(), wsCmd, pickerCmd)
+
+	case OpenAttachmentPickerMsg:
+		// F8's @ picker — see picker.go. Root, not the workspace, opens
+		// this one: it needs OpenOverlay and its own backend round trips
+		// (ListAgents, ListProjectFiles/ListDirectory), the same reason
+		// Root owns the Task card's own ListTasks cycle.
+		return r, r.openAttachmentPicker(m)
 
 	case protocol.ClosedMsg:
 		if !r.quitting {

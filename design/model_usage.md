@@ -33,7 +33,7 @@ SESSION  EPISODE                          MODEL         WHY
 14       F8  @ picker                     Sonnet high   modes + guards, well defined
                                                         -- now reads B23's events
 15       F9  tray, cards, diff            Opus medium   diff computation + apply paths
-15b      B19 Silence-Based Agent Timeout
+15b      B19 Silence-Based Agent Timeout (done)
 16       F10 settings, first run          Sonnet high   forms and flows
 16b      F18 windowed history             Opus high
 17       F12 workspace lifecycle          Opus high     Suspend/Resume + timers;

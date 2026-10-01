@@ -61,13 +61,52 @@ type PopupConfig struct {
 	Tabs  []PopupTab // len(Tabs) <= 1 draws no tab row
 
 	// OnSelect fires when an item is chosen (Enter, or a click) and is not
-	// disabled, and closes the popup. nil means there is nothing TO choose
-	// — Help passes nil because browsing an entry has nothing further to
-	// run — and Enter/click on a row is then a no-op that leaves the popup
-	// open, not a close with nothing behind it.
-	OnSelect func(*array.Item) tea.Cmd
+	// disabled. nil means there is nothing TO choose — Help passes nil
+	// because browsing an entry has nothing further to run — and
+	// Enter/click on a row is then a no-op that leaves the popup open, not
+	// a close with nothing behind it.
+	//
+	// The second return value says whether choosing this item closes the
+	// popup. Every consumer before F8 (palette, help) always wants true —
+	// choosing a palette action or browsing help both end the interaction.
+	// F8's @ picker is the first that sometimes wants false: selecting a
+	// directory in browse mode has to fetch that directory's listing and
+	// show it in the SAME popup, not close and reopen one. See SetItems.
+	OnSelect func(*array.Item) (tea.Cmd, bool)
 
 	Actions []ItemAction
+
+	// QueryFor, if set, computes the string actually handed to the menu's
+	// fuzzy filter from the raw typed filter text. nil (every consumer
+	// before F8) means "use the typed text as-is". F8's picker needs this
+	// in filesystem-browse mode: the filter box shows a literal path being
+	// typed (`D:\Projects\Poi`), but fuzzy-matching that WHOLE string
+	// against an entry name like "Point" would never match — only the
+	// path's own leaf segment (the part after the last separator) is a
+	// filter over the current directory's entries at all.
+	QueryFor func(raw string) string
+
+	// OnFilterChange, if set, fires whenever the raw typed filter text
+	// changes, before QueryFor runs. nil (every consumer before F8) means
+	// nothing extra happens. F8's picker uses this to notice the typed
+	// text has grown a new path segment (a `\` or `/` just typed) and
+	// fetch that directory's listing — the filter box is the only place
+	// that growing path is typed, so this is the only hook that can see it
+	// change.
+	OnFilterChange func(raw string) tea.Cmd
+
+	// Hint, if set, supplies one dim line of consumer-specific hints,
+	// rendered directly above the key-binding footer. nil (the palette,
+	// Help) reserves no row at all, so nothing about those changes.
+	//
+	// A FUNC, not a string, deliberately: it is called during render, so
+	// what it returns is always current with whatever state it reads.
+	// F8's picker needs that — '?' is a command in fuzzy mode but
+	// ordinary text once browsing, and F04's Bug 12 is this codebase's
+	// standing rule that a hint must never advertise a binding that does
+	// not currently work. A stored string would be a second copy of the
+	// mode to keep in sync; a func cannot go stale.
+	Hint func() string
 
 	MinW, MinH int
 }
@@ -108,8 +147,7 @@ func (p *Popup) handleKey(m tea.KeyMsg) (Overlay, tea.Cmd) {
 		// Clears a non-empty filter first, closes on the second press —
 		// F07's own rule, and Done-when #6.
 		if p.filter != "" {
-			p.setFilter("")
-			return p, nil
+			return p, p.setFilter("")
 		}
 		return nil, nil
 
@@ -145,13 +183,12 @@ func (p *Popup) handleKey(m tea.KeyMsg) (Overlay, tea.Cmd) {
 	case tea.KeyBackspace:
 		if p.filter != "" {
 			r := []rune(p.filter)
-			p.setFilter(string(r[:len(r)-1]))
+			return p, p.setFilter(string(r[:len(r)-1]))
 		}
 		return p, nil
 
 	case tea.KeySpace:
-		p.setFilter(p.filter + " ")
-		return p, nil
+		return p, p.setFilter(p.filter + " ")
 
 	case tea.KeyRunes:
 		// The filter is ALWAYS live: a plain rune types into it rather than
@@ -166,8 +203,7 @@ func (p *Popup) handleKey(m tea.KeyMsg) (Overlay, tea.Cmd) {
 		// chat\input.go's filterInsertable is the original fix for the
 		// query input; the popup's filter is a new surface it never
 		// reached, so it needs the identical rejection, not a new one.
-		p.setFilter(p.filter + insertableRunes(m.Runes))
-		return p, nil
+		return p, p.setFilter(p.filter + insertableRunes(m.Runes))
 	}
 
 	// Anything else is a chord (ctrl+_, alt+_, function keys, …) — the only
@@ -190,9 +226,17 @@ func (p *Popup) handleKey(m tea.KeyMsg) (Overlay, tea.Cmd) {
 	return p, nil
 }
 
-func (p *Popup) setFilter(q string) {
+func (p *Popup) setFilter(q string) tea.Cmd {
 	p.filter = q
-	p.menu.Filter(q)
+	query := q
+	if p.cfg.QueryFor != nil {
+		query = p.cfg.QueryFor(q)
+	}
+	p.menu.Filter(query)
+	if p.cfg.OnFilterChange != nil {
+		return p.cfg.OnFilterChange(q)
+	}
+	return nil
 }
 
 // insertableRunes drops every rune that is not real typed/pasted content —
@@ -238,7 +282,34 @@ func (p *Popup) chooseSelected() (Overlay, tea.Cmd) {
 		// popup open for more browsing, not a close with nothing behind it.
 		return p, nil
 	}
-	return nil, p.cfg.OnSelect(it)
+	cmd, closes := p.cfg.OnSelect(it)
+	if closes {
+		return nil, cmd
+	}
+	return p, cmd
+}
+
+// SetItems replaces the active tab's items in place — F8's @ picker
+// descending into a directory, or an initial async fetch (ListAgents/
+// ListProjectFiles/ListDirectory) landing after the popup already opened
+// with nothing to show yet.
+//
+// The filter always clears and the selection always resets to the top: a
+// filter typed against the OLD item set (a different directory's contents)
+// has no meaning against the new one, and there is no "same row" across two
+// unrelated listings — leaving either would silently hide every new entry
+// that does not happen to match old, stale filter text.
+func (p *Popup) SetItems(items []*array.Item) {
+	p.cfg.Tabs[p.active].Items = items
+	p.filter = ""
+	// array.Menu's own query is a SEPARATE field from p.filter — clearing
+	// one without the other left the menu re-filtering the NEW items
+	// against the OLD query text, which is how this looked "cleared" (the
+	// filter box read empty) while the list underneath was actually still
+	// empty too (nothing in a fresh directory listing matches a stale
+	// query left over from the last one).
+	p.menu.Filter("")
+	p.menu.SetItems(items)
 }
 
 // ---------------------------------------------------------------------------
@@ -326,7 +397,18 @@ func (p *Popup) View(th theme.Theme, w, h int) string {
 	// is exactly how two renders of the same, unchanged Popup at the same
 	// size produced two different indicators.
 	_, _, listTop := p.rowOffsets()
-	listHeight := h - listTop - 1 // 1 row always reserved for the footer
+	// The hint row (if a consumer supplies one) is reserved the same way
+	// the footer is — BEFORE SetHeight, so the list never renders into a
+	// row something else is about to occupy.
+	hint := ""
+	if p.cfg.Hint != nil {
+		hint = p.cfg.Hint()
+	}
+	reserved := 1 // the footer, always
+	if hint != "" {
+		reserved++
+	}
+	listHeight := h - listTop - reserved
 	if listHeight < 1 {
 		listHeight = 1
 	}
@@ -348,7 +430,18 @@ func (p *Popup) View(th theme.Theme, w, h int) string {
 		if i < len(rows) {
 			b.WriteString(p.renderRow(th, rows[i], i == selOffset, textW))
 		}
-		if i < listHeight-1 || footer != "" {
+		if i < listHeight-1 || hint != "" || footer != "" {
+			b.WriteByte('\n')
+		}
+	}
+	// Dim, and ABOVE the footer: subordinate to the key bindings, and in a
+	// different region entirely from the list, so it never competes with
+	// whatever the list is showing (F8's refusal notices and its
+	// "still showing <path>" line both live in the list).
+	if hint != "" {
+		b.WriteString(padCells(th.Style(theme.TextDim).Render(
+			runewidth.Truncate(hint, textW, "…")), textW))
+		if footer != "" {
 			b.WriteByte('\n')
 		}
 	}
