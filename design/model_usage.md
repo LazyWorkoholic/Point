@@ -32,20 +32,55 @@ SESSION  EPISODE                          MODEL         WHY
                                                         for a listing vs. a read)
 14       F8  @ picker                     Sonnet high   modes + guards, well defined
                                                         -- now reads B23's events
-15       F9  tray, cards, diff            Opus medium   diff computation + apply paths
+15       F9a tray + result cards         Opus 5        SPLIT before writing code --
+                                                       four of F9's eight Done-whens
+                                                       assume things this repo does
+                                                       not have (no Editor
+                                                       workspace, source_type is
+                                                       file-only, nothing writes
+                                                       memory_records, ListTasks
+                                                       carries no topic or token
+                                                       count). Built #1 and #8 only.
+                                                       The "Opus medium / diff
+                                                       computation + apply paths"
+                                                       estimate this row replaces
+                                                       was for the WHOLE episode and
+                                                       was never spent on it.
 15b      B19 Silence-Based Agent Timeout (done)
 16       F10 settings, first run          Sonnet high   forms and flows
 16b      F18 windowed history             Opus high
 17       F12 workspace lifecycle          Opus high     Suspend/Resume + timers;
                                                         wrong here breaks silently
+17b      B24 filler proposal on wire     Sonnet high   transport + validation over a
+                                                       prompt that already asks for
+                                                       the shape -- the B20 pattern
+                                                       again. Escalate only if the
+                                                       shown-region validation turns
+                                                       out to interact with
+                                                       resolve_scope.
 18       F13 editor core                  Opus high     largest, subtlest — CRLF,
                                                         undo grouping, wide chars
+18b      F9b diff card                   Opus high     was Opus MEDIUM as part of
+                                                       F9; raised. The apply path is
+                                                       destructive, and its three
+                                                       real hazards are each ones
+                                                       another episode already paid
+                                                       for: guard ORDER (B12 bug 2),
+                                                       staleness re-read (B12
+                                                       set_mode, F8 chips), and the
+                                                       card's state following the
+                                                       buffer edit (F8 chips again).
+                                                       Debugging those is reasoning,
+                                                       not typing.
 19       F15 explainer integration        Opus medium   ghost text + apply semantics
 20       B15 lifecycle + crash recovery   Opus high     demo-critical, easy to fake
 21       B14 usage + limits               Sonnet medium SQL and arithmetic
 22       F14 editor terminal              Sonnet high   ExecProcess is a known pattern
 23       B13 memory system                Opus high     the design you deferred on
                                                         purpose — decide well
+23b      F9c result card attach + save   Sonnet high   two axes over B13's and the
+                                                       attachment extension's own
+                                                       events, once both exist
 24       B16 SSH                          Opus medium   permissions must be right
 25       F16 polish                       Sonnet medium audits and checklists
 26       F17 web preview                  Sonnet high   small, well specced

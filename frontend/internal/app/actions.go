@@ -264,6 +264,30 @@ func registerActions() *actions.Registry[*Root] {
 		},
 	})
 
+	// ---- F9a ------------------------------------------------------------
+
+	r.Register(actions.Action[*Root]{
+		ID:          "tasks.tray",
+		Name:        "Task Tray",
+		Description: "Open the global task tray -- every workspace's background work, running, queued and finished",
+		Category:    "Interface",
+		Chord:       "f1",
+		Leader:      "t",
+		When: func(root *Root) bool {
+			// Reachable with ZERO tasks on purpose. A tray that greys out
+			// when nothing is running makes "is anything running?"
+			// unanswerable by the one key that exists to answer it, and
+			// trayItems has an explicit empty row for exactly this case.
+			// Gated only on a backend to ask -- without one the list could
+			// never refresh and the tray would be a snapshot of nothing,
+			// with no way to tell that apart from genuinely nothing.
+			return root.client != nil
+		},
+		Run: func(root *Root) tea.Cmd {
+			return root.openTaskTray()
+		},
+	})
+
 	r.Register(actions.Action[*Root]{
 		ID:          "backend.retry",
 		Name:        "Retry Backend",

@@ -28,6 +28,45 @@ type Popup struct {
 
 	active int // index into cfg.Tabs
 	filter string
+
+	// geom is the geometry View actually drew, recorded for handleMouse.
+	//
+	// # Why this is recorded and not re-derived
+	//
+	// rowOffsets shares the TOP of the list between View and handleMouse,
+	// and that was enough while every line below it was a list row. It is
+	// not: the hint line, the footer, and any blank tail below the last row
+	// all sit at y >= listTop, and handleMouse treated the whole half-plane
+	// as list rows. Clicking the footer at the top of a 22-task list
+	// selected and OPENED a task seven rows below the window.
+	//
+	// It cannot be re-derived either, which is the structural half of the
+	// bug: how many row lines were drawn depends on the box HEIGHT, and
+	// handleMouse never receives one — only View does. So the choice is a
+	// recorded value or a second, independent, drifting derivation. One
+	// writer (View), one reader (handleMouse), written every frame before
+	// any mouse event can target what that frame drew.
+	//
+	// Same lesson as stickyHeader's "one helper, two callers", applied to a
+	// value only one of the two callers can compute.
+	geom popupGeom
+}
+
+// popupGeom is what one render of the list actually put on screen.
+type popupGeom struct {
+	// drawn is true once View has run at least once. Before that there is
+	// nothing on screen, so no click can be in bounds.
+	drawn bool
+	// rowsTop is the first screen line that holds a LIST ROW — one below
+	// listTop when a pinned heading is drawn, listTop itself otherwise.
+	rowsTop int
+	// rowCount is how many row lines were drawn, which is NOT listHeight:
+	// at the end of a list, or with a pinned heading standing in for the
+	// first row, fewer rows are drawn than there is room for.
+	rowCount int
+	// dropped is stickyHeader's own value at render time, which the click
+	// offset has to add back to reach the menu's own indexing.
+	dropped int
 }
 
 // PopupTab is one tab's item set. A Popup with zero or one tab draws no tab
@@ -49,6 +88,43 @@ type ItemAction struct {
 	Label string
 	When  func(*array.Item) bool
 	Run   func(*array.Item) tea.Cmd
+}
+
+// RowDecor is per-row chrome a consumer supplies, computed fresh on every
+// render.
+//
+// # Why this is a func and not fields on array.Item
+//
+// Exactly the reason PopupConfig.Hint is a func: "it is called during render,
+// so what it returns is always current with whatever state it reads... A
+// stored string would be a second copy of the mode to keep in sync; a func
+// cannot go stale."
+//
+// F9a learned that the hard way. The tray put its state glyph in the item's
+// TITLE and its elapsed clock in the item's BINDING — both baked in at
+// trayItems() time. A tick that redrew the frame re-rendered the identical
+// stored strings, so a running task's m:ss clock sat frozen at whatever it
+// read when the items were last built: 0:00 on open, and only ever moving
+// when something REBUILT the items (reopening the tray, or the task changing
+// state). Scheduling a redraw cannot fix a value that was computed before the
+// redraw existed.
+//
+// The glyph had the matching problem in the other dimension: inside the
+// title, Popup rendered it with the title's own role (TextPrimary), so a
+// done/failed task's ✓/✕ came out uncoloured in the tray while the right-pane
+// Task card — which composes its own line and applies app.TaskRole — coloured
+// it. One shared TaskGlyph, two different colours, which is precisely what
+// consolidating the glyph was supposed to make impossible. The glyph has to
+// be handed over as a glyph, with its role, not smuggled inside text.
+type RowDecor struct {
+	// Icon is a one-or-two-cell marker drawn before the name, with IconRole
+	// as its colour. Empty means none.
+	Icon     string
+	IconRole theme.Role
+	// Note is the flush-right column. When Decor is set this REPLACES
+	// array.Item's binding, which stays the right answer for the palette
+	// and Help (a key binding genuinely is fixed for the life of the item).
+	Note string
 }
 
 // PopupConfig is the data a consumer supplies. It is intentionally close to
@@ -75,6 +151,36 @@ type PopupConfig struct {
 	OnSelect func(*array.Item) (tea.Cmd, bool)
 
 	Actions []ItemAction
+
+	// Decor, if set, supplies each row's icon and right-hand note at render
+	// time instead of reading them off the item. nil (the palette, Help,
+	// F8's picker) keeps the previous behaviour exactly: no icon, and the
+	// item's own binding as the note. See RowDecor for why it is a func.
+	Decor func(*array.Item) RowDecor
+
+	// StickySections pins the current section's label to the top of the
+	// list, so rows are never shown without the heading they belong to.
+	//
+	// false (the palette, Help, F8's picker) renders exactly as before.
+	//
+	// # Why this is not optional for a long sectioned list
+	//
+	// array.Menu's section headings are ORDINARY ROWS in the same scrollable
+	// slice as the items (menu.go's sectionedRows), and ensureVisible scrolls
+	// the minimum distance needed to show the selected ITEM. Nothing relates
+	// a heading to the rows beneath it. So a heading one row above the
+	// viewport's top edge is simply gone while every row it labels is on
+	// screen and selectable -- which is reachable in the most ordinary way
+	// there is: scroll down, then come back up. Reproduced with 22 tasks at
+	// a 14-row box: selecting the Running task put the cursor exactly on it
+	// and left "Running" one line above the window, so the only running task
+	// in the list rendered with no heading at all.
+	//
+	// It is the same shape as the two bugs before it in this episode -- a
+	// value fixed when the list was BUILT and never reconsidered at render
+	// time (the m:ss clock, then the glyph's colour). The fix is the same
+	// shape too: compute it per render from what is actually visible.
+	StickySections bool
 
 	// QueryFor, if set, computes the string actually handed to the menu's
 	// fuzzy filter from the raw typed filter text. nil (every consumer
@@ -332,7 +438,7 @@ func (p *Popup) handleMouse(m tea.MouseMsg) (Overlay, tea.Cmd) {
 		return p, nil
 	}
 
-	tabsRow, filterRow, listTop := p.rowOffsets()
+	tabsRow, filterRow, _ := p.rowOffsets()
 	switch {
 	case len(p.cfg.Tabs) > 1 && m.Y == tabsRow:
 		if i, ok := tabAt(p.cfg.Tabs, m.X); ok {
@@ -343,14 +449,23 @@ func (p *Popup) handleMouse(m tea.MouseMsg) (Overlay, tea.Cmd) {
 		return p, nil
 	case m.Y == filterRow:
 		return p, nil
-	case m.Y >= listTop:
-		if p.menu.ClickRow(m.Y - listTop) {
-			// A click both selects AND chooses — "mouse click selects" in
-			// F07's own words, and the fastest path is the one a mouse user
-			// expects: one click, not a click then an Enter.
-			return p.chooseSelected()
-		}
+	}
+
+	// ONLY the row lines this frame actually drew. The test used to be
+	// `m.Y >= listTop`, an unbounded half-plane that swallowed the pinned
+	// heading, the hint line, the footer and any blank tail -- every one of
+	// which then resolved to a row offset and opened a task that was not on
+	// screen. Three symptoms, one cause: the click handler had no idea where
+	// the list ENDED, because only View knows the box height. See Popup.geom.
+	g := p.geom
+	if !g.drawn || m.Y < g.rowsTop || m.Y >= g.rowsTop+g.rowCount {
 		return p, nil
+	}
+	if p.menu.ClickRow(m.Y - g.rowsTop + g.dropped) {
+		// A click both selects AND chooses — "mouse click selects" in F07's
+		// own words, and the fastest path is the one a mouse user expects:
+		// one click, not a click then an Enter.
+		return p.chooseSelected()
 	}
 	return p, nil
 }
@@ -358,6 +473,66 @@ func (p *Popup) handleMouse(m tea.MouseMsg) (Overlay, tea.Cmd) {
 // ---------------------------------------------------------------------------
 // Rendering
 // ---------------------------------------------------------------------------
+
+// hasSections reports whether the active tab's items carry any section at
+// all. Without one there is no heading to pin and the sticky row would be a
+// blank line stealing a row from the list.
+func (p *Popup) hasSections() bool {
+	for _, it := range p.cfg.Tabs[p.active].Items {
+		if it.GetSection() != "" {
+			return true
+		}
+	}
+	return false
+}
+
+// stickyActive: a pinned heading is drawn this frame.
+//
+// Suppressed under a filter, and that is a correctness requirement rather
+// than a simplification: a filtered list is RANKED, prefix-matches first
+// (menu.go's rankedRows), which interleaves sections and emits no headings at
+// all. A single pinned label over interleaved sections would be actively
+// wrong about where the reader is, which is worse than no label.
+func (p *Popup) stickyActive() bool {
+	return p.cfg.StickySections && p.filter == "" && p.hasSections()
+}
+
+// stickyHeader is the pinned label and how many leading rows of
+// VisibleRows() it stands in for (0 or 1).
+//
+// ONE function, consulted by both View and handleMouse, for exactly the
+// reason rowOffsets is: a click has to land on the row it visually sits on,
+// and two independent derivations of "is a row being replaced this frame"
+// disagree the moment either changes. Derived from menu state alone -- no
+// theme, no width -- so it cannot drift between a render and a click that
+// follows it.
+//
+// `dropped` is 1 when the first visible row is ITSELF the heading the sticky
+// line would show. Rendering both would print the same label twice, so the
+// in-list copy yields; the list then shows one fewer item, which costs a
+// trailing blank line at the very top of the list and nothing else. The
+// alternative -- suppressing the sticky line in that one position -- changes
+// the list's height by a row as you scroll past it, and a viewport that
+// changes size under a moving selection is a worse defect than a blank line
+// below the last item.
+func (p *Popup) stickyHeader() (label string, dropped int) {
+	if !p.stickyActive() {
+		return "", 0
+	}
+	rows := p.menu.VisibleRows()
+	if len(rows) == 0 {
+		return "", 0
+	}
+	switch rows[0].Kind {
+	case array.RowHeader:
+		return rows[0].Header, 1
+	default:
+		if rows[0].Item == nil {
+			return "", 0
+		}
+		return rows[0].Item.GetSection(), 0
+	}
+}
 
 // rowOffsets are the y-coordinates (relative to Popup's own content origin)
 // of the tab row, the filter row, and the first list row. Both View and
@@ -408,6 +583,13 @@ func (p *Popup) View(th theme.Theme, w, h int) string {
 	if hint != "" {
 		reserved++
 	}
+	// The pinned heading is reserved the same way, BEFORE SetHeight, so the
+	// menu is never told it has a row the sticky line is about to occupy.
+	// stickyActive reads only p.cfg and p.filter, neither of which SetHeight
+	// can change, so asking before is safe.
+	if p.stickyActive() {
+		reserved++
+	}
 	listHeight := h - listTop - reserved
 	if listHeight < 1 {
 		listHeight = 1
@@ -424,10 +606,51 @@ func (p *Popup) View(th theme.Theme, w, h int) string {
 	b.WriteByte('\n')
 	b.WriteByte('\n')
 
+	// When the pinned heading stands in for the first visible row, the list
+	// would show one FEWER item than everywhere else in the same box --
+	// visible as a blank line that appears above the footer at the top of
+	// the list and vanishes as you scroll, with a tenth task filling it.
+	// Asking the menu for one more row gives back the line the heading
+	// took, so the number of tasks on screen is the same at every scroll
+	// position. Done in two passes because `dropped` is a fact about the
+	// window and the window is what is being chosen; it converges in one
+	// step, since widening a window can only move the cursor up, which
+	// cannot turn a leading header row into a non-header one.
+	if _, dropped := p.stickyHeader(); dropped > 0 {
+		p.menu.SetHeight(listHeight + dropped)
+	}
+
 	rows := p.menu.VisibleRows()
 	selOffset := p.menu.SelectedOffset()
+	sticky, dropped := p.stickyHeader()
+
+	rowsTop := listTop
+	// The pinned heading, drawn in the same role an in-list heading uses so
+	// it reads as one -- a sticky header that looks different from the
+	// headers it stands in for reads as a separate widget.
+	if p.stickyActive() {
+		b.WriteString(th.Style(theme.TextDim).Render(padCells(sticky, textW)))
+		b.WriteByte('\n')
+		rowsTop++
+		if dropped > 0 {
+			rows = rows[dropped:]
+			// SelectedOffset is relative to the UNDROPPED slice.
+			if selOffset >= 0 {
+				selOffset -= dropped
+			}
+		}
+	}
+
+	drawn := len(rows)
+	if drawn > listHeight {
+		drawn = listHeight
+	}
+	// Recorded BEFORE the loop, from the same numbers the loop uses, so a
+	// click can only ever resolve against rows this frame really drew.
+	p.geom = popupGeom{drawn: true, rowsTop: rowsTop, rowCount: drawn, dropped: dropped}
+
 	for i := 0; i < listHeight; i++ {
-		if i < len(rows) {
+		if i < drawn {
 			b.WriteString(p.renderRow(th, rows[i], i == selOffset, textW))
 		}
 		if i < listHeight-1 || hint != "" || footer != "" {
@@ -586,41 +809,84 @@ func (p *Popup) renderRow(th theme.Theme, row array.Row, selected bool, width in
 	}
 
 	it := row.Item
-	avail := width - 2 // the "  " / marker column
+
+	// Decor is asked HERE, inside the render, which is the whole point of it
+	// being a func — see RowDecor.
+	var decor RowDecor
+	if p.cfg.Decor != nil {
+		decor = p.cfg.Decor(it)
+	}
+	icon := decor.Icon
+	iconW := runewidth.StringWidth(icon)
+	if iconW > 0 {
+		iconW++ // the space after it
+	}
+
+	avail := width - 2 - iconW // the "  " marker column, then the icon
 	if avail < 1 {
 		avail = 1
 	}
 	nameW, bindW := rowWidths(avail)
 
-	// Name flush LEFT, binding flush RIGHT, gap between them — the same
+	// Name flush LEFT, note flush RIGHT, gap between them — the same
 	// left/right composition footerLine uses. With the description column
 	// gone there is no third thing to sit between them, and two columns
 	// huddled together on the left with dead space trailing reads as a
 	// layout that lost something rather than one built for two.
 	name := runewidth.Truncate(it.GetTitle(), nameW, "…")
-	bind := runewidth.Truncate(it.GetBinding(), bindW, "…")
+	note := it.GetBinding()
+	if p.cfg.Decor != nil {
+		note = decor.Note
+	}
+	note = runewidth.Truncate(note, bindW, "…")
+
+	iconGap := ""
+	if icon != "" {
+		iconGap = " "
+	}
 
 	if selected {
 		// THEME.md rule 6: a Fill is for "a selected list row" by name — the
 		// whole row, plain text, carries it. Individual highlighted
 		// characters would fight the fill for attention on the one row that
 		// is already unambiguous.
-		plain := padCells("  "+name, width-runewidth.StringWidth(bind)) + bind
+		//
+		// The icon is PLAIN here too, and not only by that convention: a
+		// pre-styled icon inside a Fill would put its own foreground escape
+		// (and its reset) in the middle of the fill's run, and the reset
+		// terminates the fill for everything after it on the row. That is
+		// the severed-escape failure this package has already been bitten
+		// by twice (renderHighlighted's batching, spliceRow's column-exact
+		// cutting), so the selected row's colour is the Fill's, entirely.
+		plain := padCells("  "+icon+iconGap+name, width-runewidth.StringWidth(note)) + note
 		return th.Fill(theme.SelectText, theme.SelectBg).Render(padCells(plain, width))
 	}
 
 	normal, hi := th.Style(theme.TextPrimary), th.Style(theme.AccentPrimary)
-	bindStyle := th.Style(theme.AccentSecondary)
+	noteStyle := th.Style(theme.AccentSecondary)
+	iconStyle := th.Style(decor.IconRole)
 	if it.IsDisabled() {
-		normal, hi, bindStyle = th.Style(theme.TextDim), th.Style(theme.TextDim), th.Style(theme.TextDim)
+		dim := th.Style(theme.TextDim)
+		normal, hi, noteStyle, iconStyle = dim, dim, dim, dim
 	}
 
-	left := "  " + renderHighlighted(name, row.Match.Highlights, runewidth.StringWidth(name), normal, hi)
-	gap := width - visibleWidth(left) - runewidth.StringWidth(bind)
+	left := "  "
+	if icon != "" {
+		// The icon AND its following space are styled as one run, which is
+		// how chat\cards.go's task line composes the identical glyph
+		// (app.TaskRole(state).Render(app.TaskGlyph(state) + " ")). Styling
+		// only the glyph and emitting the space plain would render the same
+		// pixels but produce different bytes, and the regression tests on
+		// both sides compare against that one expression -- see
+		// TestTrayRowGlyphIsStyledLikeTheTaskCards.
+		left += iconStyle.Render(icon + iconGap)
+	}
+	left += renderHighlighted(name, row.Match.Highlights, runewidth.StringWidth(name), normal, hi)
+	gap := width - visibleWidth(left) - runewidth.StringWidth(note)
 	if gap < 1 {
 		gap = 1
 	}
-	return left + strings.Repeat(" ", gap) + bindStyle.Render(bind)
+	return left + strings.Repeat(" ", gap) + noteStyle.Render(note)
 }
 
 // renderHighlighted styles title up to width DISPLAY cells, colouring the
@@ -686,4 +952,41 @@ func renderHighlighted(title string, highlights []int, width int, normal, hi lip
 		used++
 	}
 	return b.String()
+}
+
+// RefreshItems replaces the active tab's items with a NEWER VIEW OF THE SAME
+// LIST, preserving the typed filter and keeping the same item selected if it
+// is still present.
+//
+// This is deliberately not SetItems, and the difference is the whole reason
+// it exists. SetItems answers "show me something else" — F8's picker
+// descending into a different directory — where a filter typed against the
+// old contents is meaningless and there is no "same row" to keep, so both are
+// discarded. RefreshItems answers "the same list, a moment later": F9's task
+// tray re-rendering after a task finished. Discarding the filter there would
+// wipe what the user is in the middle of typing every time any background
+// task changed state, and resetting the selection would move the highlight
+// off the row they were about to press ⏎ on.
+//
+// Selection is re-found by item ID, not by position: the list is re-sorted
+// (a task moving from Running to Finished changes its index and its section),
+// so an offset carried across a refresh would land on an unrelated row. An
+// item that has gone entirely leaves the selection where array.Menu's own
+// filter puts it, which is the first selectable row — nothing else is a
+// defensible answer once the thing that was selected does not exist.
+func (p *Popup) RefreshItems(items []*array.Item) {
+	var selectedID string
+	if it, ok := p.menu.Selected(); ok {
+		selectedID = it.GetID()
+	}
+	p.cfg.Tabs[p.active].Items = items
+	p.menu.SetItems(items)
+	// Re-applied, not left alone: Menu's query is its own field and
+	// SetItems does not re-filter against it (see SetItems' note on the two
+	// being separate), so without this the new items would be shown
+	// unfiltered under a filter box that still reads as non-empty.
+	p.menu.Filter(p.filter)
+	if selectedID != "" {
+		p.menu.SelectByID(selectedID)
+	}
 }

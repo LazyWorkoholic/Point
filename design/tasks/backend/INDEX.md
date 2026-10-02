@@ -12,6 +12,15 @@ uv run python main.py
 
 ## Status
 
+**State is derived from `design/completed/backend/`, not maintained by hand.**
+An episode is built when, and only when, it has a completed doc there. This
+column had drifted badly -- B12 through B23 all read "not started" while their
+completed docs were on disk, and B19 and B22 were missing from the table
+altogether -- which is the same failure CLAUDE.md's layout section had: a file
+every session reads first, stating something the repo contradicts. Re-derived
+2026-10-02. If it disagrees with `completed/` again, **`completed/` is right**;
+fix this table.
+
 | # | Episode | Phase | Batchable | Depends on | State |
 |---|---|---|---|---|---|
 | B1 | Runtime | — | — | — | ✅ built |
@@ -25,16 +34,19 @@ uv run python main.py
 | B9 | Agent Foundation | P1 | no | B8 | ✅ built |
 | B10 | Tool System | P1 | no | B9 | ✅ built |
 | B11 | The Three Agents | P1 | no | B10 | ✅ built |
-| B12 | Routing, Attachments, Caps | P1 | no | B11 | not started |
-| B13 | Memory System | P2 | no | B12 + real usage | not started |
-| B14 | Usage & Limits | P2 | no | B12 | not started |
-| B15 | Lifecycle & Resources | P2 | no | B12 | **demo-critical** |
+| B12 | Routing, Attachments, Caps | P1 | no | B11 | ✅ built |
+| B13 | Memory System | P2 | no | B12 + real usage | not started — `memory_records`/`memory_scopes` exist since schema v2 and NOTHING writes them; B11's `agent_proposals` is the insert-only stopgap |
+| B14 | Usage & Limits | P2 | no | B12 | not started — `usage_records` exists and is written per turn, but has no repository and no wire event |
+| B15 | Lifecycle & Resources | P2 | no | B12 | not started — **demo-critical** |
 | B16 | SSH Serving | P2 | no | B15, F12 | not started |
 | B17 | Hardening | P2 | no | all | not started |
-| B18 | Message Pagination | P2 | no | B6 | not started |
-| B20 | `context.report` on the Wire | P1 | no | B8, B6 | not started |
-| B21 | Orphaned Messages in Context | P1 | no | B8, B12, S11b | not started |
-| B23 | Agent + Directory Listing on the Wire | P1 | no | B7, B9 | not started |
+| B18 | Message Pagination | P2 | no | B6 | ✅ built |
+| B19 | Silence-Based Agent Timeout | P1 | no | B11 | ✅ built |
+| B20 | `context.report` on the Wire | P1 | no | B8, B6 | ✅ built |
+| B21 | Orphaned Messages in Context | P1 | no | B8, B12, S11b | ✅ built |
+| B22 | Concurrent Task Completion Race | P1 | no | B12 | ✅ built |
+| B23 | Agent + Directory Listing on the Wire | P1 | no | B7, B9 | ✅ built |
+| B24 | The Filler's Proposal on the Wire | P1 | no | B11, B8, B12 | not started — unblocks F9's diff card (WORKFLOW.md session 17b) |
 
 **B1–B5 are frozen.** Additive changes only — new columns, new optional fields.
 Never refactors.
@@ -43,34 +55,26 @@ Never refactors.
 rebuild, envelope v1, and six B1–B5 correctness fixes; one session cannot verify
 both honestly. `F1+F2` is now the only batchable pair in the project.
 
-**B1–B12 is v1.** Checkpoint after B12: ~3 weeks left → build B15 + frontend,
-then B13, and **drop B16**. ~6 weeks → do everything.
+**B1–B12 is v1, and it is built.** B12 closed on 2026-09-06; everything since
+(B18–B23) has been a correctness or wire-surface follow-up found by a frontend
+episode, not new v1 scope. The checkpoint this note used to describe -- "~3
+weeks left → B15 + frontend, then B13, drop B16" -- is a scheduling call for
+Aryan, not a fact about the code; it is left to `WORKFLOW.md`, which is where
+session order actually lives.
 
-## Current backend layout (verified)
+## Current backend layout
 
-```
-backend\
-├── main.py            stdin reader thread + outbox writer, one Runtime
-├── runtime.db         SQLite — B6 relocates this out of the source tree
-├── runtime\           runtime, events, dispatcher, task, task_manager,
-│                      state, errors                                    [B1]
-├── managers\          session, session_manager                         [B2]
-│                      message, message_history, message_translator     [B3]
-│                      agent.py, memory.py, tool.py  ← EMPTY FILES
-├── database\          connection, session_repository                   [B2]
-├── providers\         base, bootstrap, errors, models, registry
-│                      + anthropic\ gemini\ ollama\ openai\ openrouter\  [B4]
-│                      (no providers\__init__.py — namespace package)
-├── streaming\         accumulator, adapter, events, manager            [B5]
-└── tests\             manual_provider_test.py
-```
+**`CLAUDE.md`'s "Actual repo layout" is the one copy. Read it there.**
 
-**`agents\`, `memory\`, and `schemas\` do not exist.** B9 and B10 create what
-they need. The empty `managers\*.py` placeholder files are fair game to fill or
-delete — say which you did in the handoff.
-
-**`managers\provider.py` no longer exists** — it was deleted as superseded by
-`providers\` (B4). Older copies of this tree list it; they are stale.
+A second tree lived here and went stale exactly as you would expect a second
+copy to: it still showed `backend\runtime.db` in the source tree (B6 moved it
+to `%LOCALAPPDATA%\Point\`), still called `agent.py`, `memory.py` and
+`tool.py` "EMPTY FILES" (B9 filled the first with `AgentConfig`, B11 filled the
+second with `Proposal`, and B10 deleted the third), still said
+`providers\__init__.py` was absent (B6 added it), and still said `agents\` did
+not exist (B9 created it, B10 created `tools\`). Every one of those was
+corrected in `CLAUDE.md` and not here, which is the argument for not having
+this section at all.
 
 ## Additive changes to frozen episodes
 

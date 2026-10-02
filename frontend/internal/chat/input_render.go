@@ -6,6 +6,7 @@ import (
 
 	"github.com/charmbracelet/lipgloss"
 
+	"github.com/lazyworkoholic/point/frontend/internal/app"
 	"github.com/lazyworkoholic/point/frontend/internal/theme"
 )
 
@@ -43,35 +44,39 @@ const (
 // S11b widened the VALUE from a bool to a lane, because reload has to decide
 // the lane with no TaskStarted to reconcile against.
 //
-// THE LANE HERE IS A SECOND HARDCODED BACKEND FACT, and a deliberate one.
-// The backend's real rule is `agent.max_steps > 1` (runtime.py's
-// `is_bounded_loop`), ridden out on TaskStarted.background, which F5's own
-// contract makes the sole authority on the lane. `max_steps` is not on the
-// wire and there is no ListAgents to fetch it from, so the one agent that
-// satisfies it — research, at max_steps=8; general and filler-explainer are
-// both max_steps=1 — is written down here instead. The correct long-term
-// rule is "task lane iff the agent is a background agent (max_steps > 1)",
-// read from a real registry. This map stands in for a backend capability
-// that does not exist yet; it is not an oversight. See S11b's completed doc
-// and F8's handoff note.
-var knownAgents = map[string]lane{
-	"general":          laneTurn,
-	"filler-explainer": laneTurn,
-	"research":         laneTask,
-}
+// THE LANE IS A HARDCODED BACKEND FACT, and a deliberate one — but the map
+// that held it no longer lives here. `app.IsKnownAgent` /
+// `app.IsBackgroundAgent` (app\tasks.go) are the one copy, because F9's task
+// tray needs the same fact to decide which tasks belong in it, and `chat`
+// imports `app` so the dependency can only run this way.
+//
+// The fact itself is unchanged: the backend's real rule is
+// `agent.max_steps > 1` (runtime.py:822's `is_bounded_loop`), ridden out on
+// TaskStarted.background, which F5's own contract makes the sole authority on
+// the lane. `max_steps` is not on the wire and ListAgents (B23) returns only
+// {id, name, description}, so the one agent that satisfies it — research, at
+// max_steps=8; general and filler-explainer are both max_steps=1 — is written
+// down in app\tasks.go instead. See S11b's completed doc and F8's handoff
+// note; the long-term replacement is a real registry read, in one place now
+// rather than two.
+//
+// What stays here is the LANE, which is a chat rendering concept: `app` has
+// no business knowing that a reply renders as a collapsed slot.
 
-// isKnownAgent is the membership half of knownAgents — the only question
-// every pre-S11b caller asked of the bool map this replaced.
-func isKnownAgent(id string) bool {
-	_, ok := knownAgents[id]
-	return ok
-}
+// isKnownAgent is the membership half — the only question every pre-S11b
+// caller asked of the bool map this replaced.
+func isKnownAgent(id string) bool { return app.IsKnownAgent(id) }
 
 // agentLane is the lane an agent's replies belong in. An unknown agent falls
 // to laneTurn (the zero value, and the deliberate default): an inline reply
 // that should have been a slot only loses a fold, while a slot that should
 // have been inline hides a whole answer behind a collapsed one-liner.
-func agentLane(id string) lane { return knownAgents[id] }
+func agentLane(id string) lane {
+	if app.IsBackgroundAgent(id) {
+		return laneTask
+	}
+	return laneTurn
+}
 
 // agentTokenState reports how the leading @token relates to the registry:
 // the exact agent it names, or whether it is still a viable prefix of one.
@@ -118,7 +123,7 @@ func agentTokenState(runes []rune, cursor int) (id string, exact bool, viablePre
 	if isKnownAgent(tok) {
 		return tok, true, false
 	}
-	for known := range knownAgents {
+	for _, known := range app.KnownAgentIDs() {
 		if strings.HasPrefix(known, tok) {
 			return "", false, true // the bare "@" case lands here too
 		}

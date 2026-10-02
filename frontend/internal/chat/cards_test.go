@@ -452,3 +452,73 @@ func TestTaskCardSortsUnrecordedFinishTimesLast(t *testing.T) {
 		t.Errorf("first row = %q, want the row with a real finish time ahead of the unrecorded one", got)
 	}
 }
+
+// The Task card and F9's task tray must read ONE copy of the state glyph, its
+// colour, the grouping and the label. This codebase has paid for two
+// independently-maintained copies of one fact three times (F5's Seq, F6's
+// taskCardWasVisible, F8's Bug A), and here the risk is concrete rather than
+// theoretical: '⋯' for queued degraded to three literal dots in Windows
+// Terminal and was replaced by '◌'. A fix like that landing in one copy and
+// not the other is the failure this test exists to prevent.
+//
+// Asserted by calling app's exported vocabulary and comparing it against what
+// this package actually renders — a local re-fork would make the rendered
+// line stop matching, which a test on app's functions alone could not catch.
+func TestTaskCardReadsTheSharedVocabulary(t *testing.T) {
+	th := theme.New("turquoise", theme.BackgroundTransparent)
+
+	for _, state := range []string{
+		app.TaskStateRunning, app.TaskStateQueued, app.TaskStateCompleted,
+		app.TaskStateFailed, app.TaskStateCancelled, "a_state_no_build_knows",
+	} {
+		row := app.TaskRow{Agent: "research", State: state}
+		line := stripANSI(taskLine(th, row, 32))
+
+		if glyph := app.TaskGlyph(state); !strings.HasPrefix(line, glyph+" ") {
+			t.Errorf("state %q: card line %q does not start with app.TaskGlyph %q — "+
+				"the glyph has been re-forked locally", state, line, glyph)
+		}
+		if label := app.TaskLabel(row); !strings.Contains(line, label) {
+			t.Errorf("state %q: card line %q does not contain app.TaskLabel %q",
+				state, line, label)
+		}
+		// The colour too: a locally re-forked role would render the same
+		// characters in the wrong semantic role, which stripANSI hides.
+		styled := taskLine(th, row, 32)
+		want := th.Style(app.TaskRole(state)).Render(app.TaskGlyph(state) + " ")
+		if !strings.HasPrefix(styled, want) {
+			t.Errorf("state %q: the glyph is not styled with app.TaskRole", state)
+		}
+	}
+
+	// The grouping is the same fact, consumed through the local aliases.
+	for _, state := range []string{
+		app.TaskStateRunning, app.TaskStateQueued, app.TaskStateCompleted,
+		app.TaskStateFailed, app.TaskStateCancelled, "unknown",
+	} {
+		if taskPriority(state) != app.TaskPriority(state) {
+			t.Errorf("state %q: taskPriority disagrees with app.TaskPriority", state)
+		}
+	}
+	if terminalPriority != app.TerminalPriority {
+		t.Error("terminalPriority disagrees with app.TerminalPriority")
+	}
+}
+
+// The NOTE text is deliberately NOT shared: this card has 26 columns and
+// shows a bare state word, where the tray has a full overlay width and shows
+// an error code and a wall duration. Pinned so a later "finish the
+// de-duplication" pass has to read why it stopped here.
+func TestTaskCardNoteIsDeliberatelyNarrowerThanTheTrays(t *testing.T) {
+	th := theme.New("turquoise", theme.BackgroundTransparent)
+	row := app.TaskRow{Agent: "x", State: app.TaskStateFailed, ErrorCode: "tool_timeout"}
+	line := stripANSI(taskLine(th, row, 32))
+
+	if !strings.Contains(line, "failed") {
+		t.Fatalf("card line = %q", line)
+	}
+	if strings.Contains(line, "tool_timeout") {
+		t.Errorf("card line = %q — the 26-column card shows a bare state word; "+
+			"the error code is the TRAY's note, and sharing them would overflow here", line)
+	}
+}

@@ -88,10 +88,31 @@ type Root struct {
 	// correctness fix and not just a speed one.
 	lastFrame string
 
+	// trayClock drives the tray's own m:ss redraw — see trayTickWanted.
+	trayClock struct {
+		running bool
+		gen     int
+	}
+
+	// backgroundSeen records, per task id, that this client saw a
+	// TaskStarted saying the task is a background one. Authoritative where
+	// it has an answer (the backend computed it from max_steps), and used
+	// ONLY to promote a task into the tray, never to demote one. Pruned to
+	// the current snapshot in handleTaskListEnvelope, so it cannot grow
+	// without bound across a long session.
+	backgroundSeen map[string]bool
+
 	// picker is F8's @ picker controller — see picker.go's own doc comment
 	// for why Root, not chat.Workspace, owns the backend round trips it
 	// needs. Zero value: no picker open.
 	picker pickerState
+
+	// tray is F9a's task tray controller -- see tray.go. Root, not a
+	// workspace, owns it for the same reason it owns the Task card's
+	// ListTasks cycle: the list is global, and a task whose originating
+	// view has been unloaded still has to appear and still has to open.
+	// Zero value: no tray open.
+	tray trayState
 
 	status   string
 	log      *slog.Logger
@@ -253,8 +274,22 @@ func (r *Root) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	// "the overlay shows nothing until the first task completes".
 	r.refreshTasksIfVisible()
 	r.refreshContextIfShown(msg)
+	// Asked here for the same "ask once, afterwards" reason the animation
+	// and the two refreshes above are: the tray opens, closes, and is
+	// swapped for a result card and back from several different messages,
+	// and a flag updated at each of those call sites is the
+	// taskCardWasVisible bug again. Derived here, it cannot miss a path --
+	// including the result card returning the tray in its own place, where
+	// nothing in root.go's own switch runs at all.
+	extra := []tea.Cmd{}
 	if anim := r.ensureAnimation(); anim != nil {
-		return model, tea.Batch(cmd, anim)
+		extra = append(extra, anim)
+	}
+	if clock := r.ensureTrayClock(); clock != nil {
+		extra = append(extra, clock)
+	}
+	if len(extra) > 0 {
+		return model, tea.Batch(append([]tea.Cmd{cmd}, extra...)...)
 	}
 	return model, cmd
 }
@@ -293,6 +328,27 @@ func (r *Root) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case tea.MouseMsg:
 		return r.dispatchMouse(m)
+
+	case trayTickMsg:
+		// The Running row's m:ss clock. Mirrors animTickMsg exactly — a
+		// generation counter so a tick left over from an earlier loop is
+		// dropped, and re-arming only while there is still a reason to,
+		// which is the only way to end a tea.Tick already scheduled.
+		if m.gen != r.trayClock.gen {
+			return r, nil
+		}
+		if !r.trayClockWanted() {
+			r.trayClock.running = false
+			return r, nil
+		}
+		// Nothing to mutate, and that is only true because the note is
+		// computed inside the render (PopupConfig.Decor -> trayDecor ->
+		// trayNote). Arriving here causes a frame; the frame recomputes
+		// the clock. It was NOT true when the note was baked into the
+		// item at build time -- the tick fired, re-armed correctly, and
+		// redrew the identical stored string, which is how a clock that
+		// "ticked" still read 0:00. See RowDecor.
+		return r, trayTick(m.gen)
 
 	case animTickMsg:
 		if m.gen != r.anim.gen {
@@ -434,10 +490,32 @@ func (r *Root) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			r.conn.inFlight = r.client.InFlight()
 		}
 		r.handleTaskListEnvelope(m.Envelope)
+		r.handleTrayEnvelope(m.Envelope)
 		pickerCmd := r.handlePickerEnvelope(m.Envelope)
 		ws, wsCmd := r.current().Update(m)
 		r.workspaces[r.active] = ws
 		return r, tea.Batch(r.afterBackend(), wsCmd, pickerCmd)
+
+	case openOverlayMsg:
+		// tray.go's OnSelect cannot assign r.overlay itself: it runs inside
+		// the Popup's own Update, and setOverlay is "the ONE place
+		// r.overlay is ever assigned". So it asks, here.
+		r.OpenOverlay(m.o)
+		return r, nil
+
+	case cancelTaskMsg:
+		r.sendCancelTask(m.taskID)
+		return r, nil
+
+	case resultDiscardedMsg:
+		// Nothing to clean up -- discard deletes nothing, which is
+		// Done-when #8 and is structural: this build has no event that
+		// could delete a task or a message. The tray's rows are left in
+		// trayState exactly as they were, so reopening finds the same task
+		// and re-fetches the same text.
+		r.status = "card discarded -- the result is still in the tray"
+		r.log.Debug("tray: result card discarded", "task", m.taskID)
+		return r, nil
 
 	case OpenAttachmentPickerMsg:
 		// F8's @ picker — see picker.go. Root, not the workspace, opens
@@ -504,8 +582,23 @@ func (r *Root) rightPaneVisible() bool {
 	return ok
 }
 
+// tasksOnScreen is rightPaneVisible widened by F9a's tray.
+//
+// refreshTasks deliberately sends NOTHING while the surface that shows its
+// answer is hidden (F6's Done-when #6), so every surface that displays the
+// global snapshot has to be counted here or it renders one frozen at the
+// moment it opened. rightPaneVisible already learned this once -- the
+// narrow-width fallback overlay shows the same cards and was left with a
+// Task section that never updated until it was closed and reopened. The
+// tray is the third such surface, and the failure would be worse: a running
+// task that never moves to Finished while you are watching the list whose
+// whole job is to tell you it did.
+func (r *Root) tasksOnScreen() bool {
+	return r.rightPaneVisible() || r.trayOpen()
+}
+
 func (r *Root) refreshTasks() {
-	if r.client == nil || !r.rightPaneVisible() {
+	if r.client == nil || !r.tasksOnScreen() {
 		return
 	}
 	if r.tasksReqID != "" {
@@ -556,7 +649,11 @@ func (r *Root) sendListTasks(env protocol.Envelope) bool {
 // deliberately sends nothing while hidden, so a missed transition is not
 // a delayed update, it is a permanently missed one.
 func (r *Root) refreshTasksIfVisible() {
-	visible := r.rightPaneVisible()
+	// tasksOnScreen, not rightPaneVisible: the predicate that gates the
+	// REQUEST and the predicate that detects the TRANSITION have to be the
+	// same one, or opening the tray with the pane hidden is a transition
+	// nothing notices and a request refreshTasks would have sent.
+	visible := r.tasksOnScreen()
 	if visible && !r.taskCardWasVisible {
 		r.refreshTasks()
 	}
@@ -639,16 +736,34 @@ func (r *Root) handleTaskListEnvelope(env protocol.Envelope) {
 		if err := env.UnmarshalPayload(&p); err == nil {
 			r.tasks = p.Tasks
 			r.log.Debug("root: task snapshot applied", "corr_id", env.CorrID,
-				"count", len(p.Tasks), "right_pane_visible", r.rightPaneVisible())
+				"count", len(p.Tasks), "right_pane_visible", r.rightPaneVisible(),
+				"tray_open", r.trayOpen())
 		}
+		// F9a: the open tray re-renders against the snapshot that just
+		// landed. Inside this branch, not after it -- the rows only
+		// changed because this reply changed them.
+		r.pruneBackgroundSeen()
+		r.refreshTray()
 		if r.tasksDirty {
 			r.tasksDirty = false
 			r.refreshTasks()
 		}
 		return
 	}
+	if env.Type == protocol.EvTaskStarted {
+		r.noteTaskBackground(env)
+	}
 	if env.Type == protocol.EvTaskStarted || protocol.IsTerminal(env.Type) {
 		r.refreshTasks()
+		// Also re-render NOW, from the snapshot already in hand, rather
+		// than only when the refresh's own reply lands. A terminal event
+		// is itself news about a row the tray is displaying, and
+		// refreshTasks may not even send (a request already in flight
+		// sets tasksDirty instead), so waiting for a reply would leave a
+		// just-finished task sitting under "Running" for an extra round
+		// trip. r.tasks has not changed yet, so sameTrayRows makes this a
+		// no-op whenever it adds nothing -- which is most of the time.
+		r.refreshTray()
 	}
 }
 
@@ -941,6 +1056,48 @@ func (r *Root) overlayRect() layout.Rect {
 	if max := r.h - 4; h > max && max > 4 {
 		h = max
 	}
+
+	// A MaximisedOverlay may ask for more than its MinSize. What it is
+	// OFFERED is the transcript pane's own rect (r.layout.Main) less one
+	// cell per side -- not the terminal's. See MaximisedOverlay for why:
+	// Main already has the right pane's columns and the header/status/query
+	// rows subtracted by Compute, so an overlay sized to it is the size of
+	// the thing the reader is already reading, and it tracks pane
+	// proportions with no fraction-of-the-screen constant to drift.
+	//
+	// Read off r.layout rather than threaded in: overlayRect is a *Root
+	// method and Compute's answer is already stored there. View recomputes
+	// it whenever the terminal's dimensions have changed before using it,
+	// and recompute() runs on every WindowSizeMsg and on the right-pane
+	// toggle -- so the rect this reads is the one the current frame was
+	// laid out with, which is also what keeps dispatchMouse's hit-test and
+	// withOverlay's composite agreeing (the whole reason they share this
+	// function).
+	if mo, ok := r.overlay.(MaximisedOverlay); ok {
+		availW, availH := r.layout.Main.W-2, r.layout.Main.H-2
+		pw, ph := mo.PreferredSize(availW, availH)
+		// Capped against the TERMINAL as well, not just against what was
+		// offered: PreferredSize may return anything, and a panel wider
+		// than the screen is the one failure overlayFits exists to
+		// prevent. Main is always inside the terminal, so for an overlay
+		// that simply accepts the offer this cap never fires -- it is
+		// here for the one that does not.
+		if maxW := r.w - 2; pw > maxW {
+			pw = maxW
+		}
+		if maxH := r.h - 2; ph > maxH {
+			ph = maxH
+		}
+		if pw > w {
+			w = pw
+		}
+		if ph > h {
+			h = ph
+		}
+	}
+	// Centred in the whole TERMINAL, not over Main: the right pane and the
+	// status bar stay visible around the panel under the scrim. Size comes
+	// from the pane, position from the screen.
 	return layout.Rect{X: (r.w - w) / 2, Y: (r.h - h) / 2, W: w, H: h}
 }
 

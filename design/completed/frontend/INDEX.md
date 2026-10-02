@@ -22,9 +22,36 @@ it passed.
 | S12b | F7 Verification Repairs (chat/ render + startup) | ✅ built + manually verified | `S12b-f7-verification-repairs.md` |
 | F6 | Right Pane (Status · Task · Sessions) | ✅ built + manually verified | `F06-right-pane.md` |
 | S13d | Wire the Context Card (Status row 1 + UI-09) | ✅ built + manually verified | `S13d-wire-context-card.md` |
-| F8–F18 | — | not started | — |
+| S13e | Backend Verbose Passthrough (`POINT_BACKEND_VERBOSE`) | ✅ built + manually verified | `S13e-backend-verbose-passthrough.md` |
+| F8 | @ Picker + Attachments | ✅ built + manually verified | `F08-at-picker.md` |
+| **F9a** | **Task Tray + Result Cards (F9, SPLIT)** | 🟡 **built + manually verified — F9 NOT complete; F9b + F9c are the remainder** | `F09a-task-tray-cards.md` |
+| F9b | Diff Card | not started — blocked on F13 + B24 | — |
+| F9c | Result Card Attach + Save | not started — blocked on B13 + an unspecced B12 attachment-source extension | — |
+| F10–F18 | — | not started | — |
 
 **F1 and F2 were built and verified in one session** (`batchable: yes`).
+
+**F9 is SPLIT across three sessions and is NOT complete.** F9a shipped the
+global task tray and the result card's render/discard half — two of the
+episode's eight "Done when" criteria. The other six were deferred before any
+code was written, each on a dependency that does not exist in this repo: there
+is no Editor workspace to apply a diff into (F13), nothing parses the Filler's
+JSON reply into a structured proposal (B24), `context_attachments.source_type`
+is `file`-only so a task result cannot be attached, and nothing writes
+`memory_records` (B13). **All four are recorded with file:line evidence in
+`F09a-task-tray-cards.md`** so Sessions 18b and 23b do not re-derive them.
+
+F9 closes only when **F9b** (Session 18b — the diff card) and **F9c**
+(Session 23b — attach and save) land. Until then this row stays 🟡.
+
+**`F09a-task-tray-cards.md` is worth reading before building any Popup
+consumer**, F10's settings and F11's memory popup especially. Four of the six
+defects found verifying it were one cross-cutting pattern — a value computed
+when the list was BUILT and never reconsidered when it was DRAWN (a frozen
+`m:ss` clock, a glyph that lost its colour, section headings that vanished
+while their rows stayed, and a footer that opened a task which was not on
+screen). The doc names the pattern, the four instances, and `Popup.geom` as
+its closing fix.
 
 **S12b is the same shape as S11b, and it is where three `chat/` defects
 live.** They were found while verifying F7 but none of them is F7's code —

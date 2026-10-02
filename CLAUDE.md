@@ -176,78 +176,128 @@ sqlite3 "$env:LOCALAPPDATA\Point\runtime.db" ".schema"
 
 ## Actual repo layout
 
+Verified against the tree on 2026-10-02. The previous version of this section
+described the frontend as `cmd\point\` plus `internal\array\` — it had been
+true through F1 and was eight episodes out of date — and claimed
+`managers\memory.py` was empty after B11 had filled it. If this section and
+the tree disagree again, **the tree is right**; fix this file.
+
 ```
 D:\Projects\Point\
-â”œâ”€â”€ CLAUDE.md  VERSION  README.md  makefile  go.mod  go.sum
-â”œâ”€â”€ pyproject.toml  uv.lock  .python-version  .gitignore  .venv\
-â”‚
-â”œâ”€â”€ backend\                    Python â€” run from inside this folder
-â”‚   â”œâ”€â”€ main.py                 transport only: stdin reader thread,
-â”‚   â”‚                           outbox writer, teardown              [B6 âœ…]
-â”‚   â”œâ”€â”€ bootstrap.py            resolve_db_path, run_migrations,
-â”‚   â”‚                           build_runtime, shutdown_runtime      [B6 âœ…]
-â”‚   â”œâ”€â”€ cli.py                  doctor Â· migrate Â· session new|list Â·
-â”‚   â”‚                           send Â· tasks list                    [B6 âœ…]
-â”‚   â”œâ”€â”€ appconfig.py            paths, config.toml, key resolution   [B6 âœ…]
-â”‚   â”œâ”€â”€ logging_setup.py        rotating file + stderr, redaction    [B6 âœ…]
-â”‚   â”œâ”€â”€ lockfile.py             single-instance lock                 [B6 âœ…]
-â”‚   â”‚
-â”‚   â”‚                           (no database here â€” B6 moved it to
-â”‚   â”‚                           %LOCALAPPDATA%\Point\runtime.db. Override with
-â”‚   â”‚                           POINT_DB, then config `database.path`. The old
-â”‚   â”‚                           backend\runtime.db was COPIED, not moved, and
-â”‚   â”‚                           is deliberately still on disk.)
-â”‚   â”‚
-â”‚   â”œâ”€â”€ runtime\                runtime, dispatcher, task, task_manager,
-â”‚   â”‚                           state, errors                        [B1 âœ…]
-â”‚   â”‚                           events.py is envelope v1              [B6 âœ…]
-â”‚   â”œâ”€â”€ managers\               session, session_manager             [B2 âœ…]
-â”‚   â”‚                           message, message_history,
-â”‚   â”‚                           message_translator                   [B3 âœ…]
-â”‚   â”‚                           project, pathguard, gitignore,
-â”‚   â”‚                           project_manager                      [B7 âœ…]
-â”‚   â”‚                           context, attachment                  [B8 âœ…]
-â”‚   â”‚                           agent.py (AgentConfig only)          [B9 âœ…]
-â”‚   â”‚                           memory.py                            â† EMPTY
-â”‚   â”‚                           tool.py is DELETED, not filled â€” see below
-â”‚   â”œâ”€â”€ agents\                 builtins, registry, executor         [B9 âœ…]
-â”‚   â”œâ”€â”€ tools\                  models, schema, registry, executor,
-â”‚   â”‚                           faults, builtins\ (read_file,
-â”‚   â”‚                           list_files, web_search,
-â”‚   â”‚                           load_task_result)                    [B10 âœ…]
-â”‚   â”œâ”€â”€ database\               connection, session_repository       [B2 âœ…]
-â”‚   â”‚                           migrations.py, task_repository.py    [B6 âœ…]
-â”‚   â”‚                           project_repository                   [B7 âœ…]
-â”‚   â”‚                           attachment_repository                [B8 âœ…]
-â”‚   â”‚                           agent_repository                     [B9 âœ…]
-â”‚   â”‚                           tool_call_repository                 [B10 âœ…]
-â”‚   â”œâ”€â”€ providers\              base, bootstrap, errors, models, registry,
-â”‚   â”‚                           __init__.py                          [B6 âœ…]
-â”‚   â”‚                           + anthropic\ gemini\ ollama\ openai\ openrouter\  [B4 âœ…]
-â”‚   â”‚                           + mock\ (POINT_MOCK=1 only, never in the UI) [B6 âœ…]
-â”‚   â”œâ”€â”€ streaming\              accumulator, adapter, events, manager [B5 âœ…]
-â”‚   â””â”€â”€ tests\                  manual_provider_test.py,
-â”‚                               manual_context_test.py               [B8 âœ…]
-â”‚                               fixtures\ (mock_stream.json, mock_slow.json) [B6 âœ…]
-â”‚                               + the seven B10 tool-loop scripts,
-â”‚                                 replayed by `send --script <name>`  [B10 âœ…]
-â”‚
-â”œâ”€â”€ frontend\                   Go
-â”‚   â”œâ”€â”€ cmd\point\              entry point                          [F1 creates]
-â”‚   â””â”€â”€ internal\
-â”‚       â””â”€â”€ array\              item.go, menu.go â€” seed for the shared list widget
-â”‚
-â””â”€â”€ design\                     these docs
+├── CLAUDE.md  VERSION  README.md  makefile  go.mod  go.sum
+├── pyproject.toml  uv.lock  .python-version  .gitignore  .venv\
+├── .point\                     this repo is itself a Point project (gitignored)
+│
+├── backend\                    Python — run from inside this folder
+│   ├── main.py                 transport only: stdin reader thread,
+│   │                           outbox writer, teardown              [B6 ✅]
+│   ├── bootstrap.py            resolve_db_path, run_migrations,
+│   │                           build_runtime, shutdown_runtime      [B6 ✅]
+│   ├── cli.py                  doctor · migrate · session · send ·
+│   │                           tasks · project · attach · detach ·
+│   │                           set-mode · attachments · context ·
+│   │                           agents                               [B6, grown since]
+│   ├── appconfig.py            paths, config.toml, key resolution   [B6 ✅]
+│   ├── logging_setup.py        rotating file + stderr, redaction    [B6 ✅]
+│   ├── lockfile.py             single-instance lock                 [B6 ✅]
+│   │
+│   │                           (no database here — B6 moved it to
+│   │                           %LOCALAPPDATA%\Point\runtime.db. Override with
+│   │                           POINT_DB, then config `database.path`. The old
+│   │                           backend\runtime.db was COPIED, not moved, and
+│   │                           is deliberately still on disk.)
+│   │
+│   ├── runtime\                runtime, dispatcher, task, task_manager,
+│   │                           state, errors                        [B1 ✅]
+│   │                           events.py is envelope v1             [B6 ✅]
+│   │                           scheduler.py — QUEUED + lane caps    [B12 ✅]
+│   ├── managers\               session, session_manager             [B2 ✅]
+│   │                           message, message_history,
+│   │                           message_translator                   [B3 ✅]
+│   │                           project, pathguard, gitignore,
+│   │                           project_manager                      [B7 ✅]
+│   │                           context, attachment                  [B8 ✅]
+│   │                           agent.py (AgentConfig only)          [B9 ✅]
+│   │                           editor_context.py — EditorContext +
+│   │                             resolve_scope (no parser)          [B11 ✅]
+│   │                           memory.py — `Proposal` ONLY, B11's
+│   │                             narrow stopgap over `agent_proposals`.
+│   │                             NOT B13's memory system; B13 owns
+│   │                             memory_records/memory_scopes, which
+│   │                             exist in the schema and are unused. [B11 ✅]
+│   │                           invocation.py — parse_invocation,
+│   │                             one ambiguity rule for every caller [B12 ✅]
+│   │                           attachment_manager.py — the guards,
+│   │                             the estimate, the preview offers    [B12 ✅]
+│   │                           tool.py is DELETED, not filled — see below
+│   ├── agents\                 builtins, registry, executor         [B9 ✅]
+│   ├── tools\                  models, schema, registry, executor,
+│   │                           faults                               [B10 ✅]
+│   │   └── builtins\           filesystem.py (read_file, list_files),
+│   │                           web.py (web_search),
+│   │                           task_results.py (load_task_result)
+│   │                           — grouped by subject, NOT one file
+│   │                             per tool                            [B10 ✅]
+│   ├── database\               connection, session_repository       [B2 ✅]
+│   │                           migrations.py, task_repository.py    [B6 ✅]
+│   │                           project_repository                   [B7 ✅]
+│   │                           attachment_repository                [B8 ✅]
+│   │                           agent_repository                     [B9 ✅]
+│   │                           tool_call_repository                 [B10 ✅]
+│   │                           proposal_repository — agent_proposals,
+│   │                             insert/count/fetch only            [B11 ✅]
+│   ├── providers\              base, bootstrap, errors, models, registry,
+│   │                           __init__.py                          [B6 ✅]
+│   │                           retry.py — backoff + jitter +
+│   │                             Retry-After                        [B10 ✅]
+│   │                           + anthropic\ gemini\ ollama\ openai\ openrouter\  [B4 ✅]
+│   │                           + mock\ (POINT_MOCK=1 only, never in the UI) [B6 ✅]
+│   ├── streaming\              accumulator, adapter, events, manager [B5 ✅]
+│   └── tests\                  manual_*.py and manual_*.ps1 — one or more
+│                               per episode that needed a deterministic
+│                               check (B11, B12, B19, B22, F8 …), plus
+│                               manual_provider_test.py [B4] and
+│                               manual_context_test.py [B8]
+│                               fixtures\ (mock_stream.json, mock_slow.json) [B6 ✅]
+│                               + the seven B10 tool-loop scripts,
+│                                 replayed by `send --script <name>`  [B10 ✅]
+│
+├── frontend\                   Go — ~110 files across 8 internal packages
+│   ├── cmd\point\              main.go, diagnostics.go              [F1 ✅]
+│   └── internal\
+│       ├── app\                the root model: root.go, render.go, focus.go,
+│       │                       overlay.go, popup.go, confirm.go, picker.go,
+│       │                       draft.go, stream.go, tasks.go, actions.go,
+│       │                       box.go, context_expand.go, placeholder.go,
+│       │                       paste.go, workspace.go                [F1→F8]
+│       ├── chat\               the Chat workspace — the largest package:
+│       │                       model, render, entries, cards, input*,
+│       │                       stream*, markdown, scroll, reload*,
+│       │                       attachments, context_overlay,
+│       │                       context_report, picker, providers,
+│       │                       protocol, connection, copy, cache     [F3→F8]
+│       ├── protocol\           client, transport, envelope, spawn*, types,
+│       │                       id — the backend client                [F2 ✅]
+│       ├── layout\             Compute, breakpoints, rects, CardSlot  [F1 ✅]
+│       ├── theme\              theme.go + palettes.go (four palettes) [F1 ✅]
+│       ├── actions\            the action registry                   [F1 ✅]
+│       ├── config\             config.go (ConfigDir/StateDir), state.go [F1 ✅]
+│       └── array\              item.go, menu.go, fuzzy.go — the shared
+│                               scrollable/filterable list, folded into
+│                               Popup by F7                           [F7 ✅]
+│
+└── design\                     these docs
 ```
 
-`memory\` and `schemas\` **do not exist**. B13 and a later episode create what
-they need. `agents\` was created by B9 and `tools\` by B10 â€” both are real.
+`schemas\` **does not exist**; nothing has needed it yet. `memory\` does not
+exist either — B13 creates what it needs, and B11's stopgap lives in
+`managers\memory.py` and one table, deliberately not a package.
 
-`managers\provider.py` **is deleted** â€” superseded by `providers\` (B4). Keeping
+`managers\provider.py` **is deleted** — superseded by `providers\` (B4). Keeping
 a second provider abstraction alive was the whole reason to remove it; do not
 recreate it.
 
-`managers\tool.py` **is deleted too** â€” B10 did not fill it. Same call B9 made
+`managers\tool.py` **is deleted too** — B10 did not fill it. Same call B9 made
 for `managers\agent.py`'s business rules: a registry, an executor, a schema
 checker, and four tools are not one manager, and `agents\` had already
 established the split. `managers\agent.py` kept only the `AgentConfig` data
@@ -258,3 +308,8 @@ model; there is no `managers\tool.py` counterpart because `Tool` and
 added it.** The tree worked as a namespace package regardless, so this was
 cleanup, not a bug fix.
 
+There is **no file-write event anywhere in the backend** — no
+`WriteProjectFile`, no counterpart to `ReadProjectFile`. That is not an
+omission to be filled in passing: it is the first hard rule above, enforced
+structurally. An agent-proposed change reaches disk only through a buffer the
+user saves.

@@ -21,7 +21,6 @@ import (
 	"fmt"
 	"sort"
 	"strings"
-	"time"
 	"unicode"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -167,25 +166,18 @@ func tokenBar(th theme.Theme, used, budget, width int) string {
 // Task card
 // ---------------------------------------------------------------------------
 
-// terminalPriority is the group taskPriority puts everything finished in —
-// completed, failed, cancelled, and any state this build does not
-// recognise. Named because two places branch on it: sortStableTaskRows
-// keys this group on FinishedAt, and capTerminalTail caps only this group.
-const terminalPriority = 2
+// The grouping — running above queued above everything terminal, LAYOUT.md's
+// mockup order — lives in app\tasks.go beside TaskRow itself, because F9's
+// task tray groups by the same rule and two copies of it would drift. These
+// two names are kept as local aliases rather than spelled out at each of the
+// four call sites below, so the diff that moved them is one line per fact
+// rather than one per use.
+//
+// What breaks ties WITHIN each group is still this file's business, and it is
+// deliberately NOT the same as the tray's — see sortStableTaskRows.
+const terminalPriority = app.TerminalPriority
 
-// taskPriority orders running above queued above everything terminal —
-// LAYOUT.md's mockup order. What breaks ties WITHIN each group is
-// sortStableTaskRows's business, and it is not the same key for both.
-func taskPriority(state string) int {
-	switch state {
-	case app.TaskStateRunning:
-		return 0
-	case app.TaskStateQueued:
-		return 1
-	default:
-		return terminalPriority
-	}
-}
+var taskPriority = app.TaskPriority
 
 func (w *Workspace) taskCardLines(width, rows int) []string {
 	th := w.theme
@@ -277,6 +269,16 @@ func capTerminalTail(rows []app.TaskRow, keep int) []app.TaskRow {
 // everything terminal — and orders the terminal group by FinishedAt,
 // newest completion first.
 //
+// NOT app.SortTaskRows, and the difference is deliberate. That one sorts
+// active rows by CreatedAt DESC; this one leaves them in the order they
+// arrived (see the first bullet below). They agree today, because
+// _handle_list_tasks already sorts by created_at DESC — but the tray needs a
+// total order it computes itself (it compares consecutive snapshots to decide
+// whether a re-render is warranted, and an order it merely inherited would
+// make that comparison depend on the backend's stability), while this card
+// deliberately trusts what it was sent. Two policies over one shared
+// grouping, which is why only TaskPriority was collapsed.
+//
 // The two groups are keyed on DIFFERENT times on purpose:
 //
 //   - Active rows keep the order they arrived in, which is the backend's
@@ -318,35 +320,26 @@ func taskLine(th theme.Theme, t app.TaskRow, width int) string {
 	// never the label a user would recognise, so it is the fallback, not
 	// the first choice — the reverse of what shipped originally and
 	// showed "chat" for an @research task.
-	label := t.Agent
-	if label == "" {
-		label = t.Kind
-	}
-	if label == "" {
-		label = "task"
-	}
+	label := app.TaskLabel(t)
 
-	var icon string
-	var role theme.Role
+	// The glyph and its colour come from app\tasks.go — shared with F9's
+	// tray, so the '◌'-not-'⋯' finding recorded there cannot be fixed in
+	// one place and missed in the other.
+	//
+	// The NOTE does not come from there, and should not: this card has 26
+	// columns, so it shows a bare state word where the tray (which has a
+	// full overlay width) shows an error code and a wall duration. Two
+	// different answers to "what fits", over one shared glyph.
+	icon, role := app.TaskGlyph(t.State), app.TaskRole(t.State)
 	var right string
 	switch t.State {
 	case app.TaskStateRunning:
-		icon, role = "⟳", theme.Running
 		right = elapsedSince(t.StartedAt)
 	case app.TaskStateQueued:
-		// "◌", not a new glyph: the same character stream_render.go's
-		// task slot already uses for "◌ queued", proven safe in this
-		// terminal. The '⋯' this used to render as visibly degraded to
-		// three literal dots in testing — one clue among several
-		// (truncated state words, a misaligned Sessions card) that
-		// pointed at an unmeasured glyph, not a math bug in this file.
-		icon, role = "◌", theme.Queued
 		right = "queued"
 	case app.TaskStateFailed, app.TaskStateCancelled:
-		icon, role = "✕", theme.Error
 		right = t.State
 	default: // completed, or anything this build does not recognise
-		icon, role = "✓", theme.Done
 		right = "done"
 	}
 
@@ -358,18 +351,12 @@ func taskLine(th theme.Theme, t app.TaskRow, width int) string {
 // elapsedSince renders a task's own runtime as m:ss — StartedAt is an epoch
 // float second count, the same shape every other wire timestamp in this
 // package uses.
-func elapsedSince(startedAt float64) string {
-	if startedAt <= 0 {
-		return ""
-	}
-	d := time.Since(time.Unix(int64(startedAt), 0))
-	if d < 0 {
-		d = 0
-	}
-	m := int(d.Minutes())
-	s := int(d.Seconds()) % 60
-	return fmt.Sprintf("%d:%02d", m, s)
-}
+//
+// An alias for app.TaskElapsed, which is where the arithmetic now lives
+// (shared with F9's tray). Kept as a name in this package because
+// cards_test.go asserts on it directly and it reads better at its one call
+// site than the qualified form.
+var elapsedSince = app.TaskElapsed
 
 // ---------------------------------------------------------------------------
 // Sessions card

@@ -26,6 +26,51 @@ import (
 // below which overlays refuse outright — so nothing between "too narrow for
 // any overlay" and "fits this one" is left to check separately.
 
+// MaximisedOverlay is an Overlay that wants room rather than a fixed size —
+// the task tray and the result card (F9a), whose content is a list and a body
+// of prose that both get strictly more readable with it.
+//
+// overlayRect treats a plain Overlay's MinSize as its ACTUAL size, shrinking
+// it only when the terminal cannot fit it and never growing it. That is right
+// for the palette and for Confirm, which are fixed-shape controls that would
+// look absurd stretched across 200 columns. It is wrong for a content
+// surface: F9a's tray shipped at LAYOUT.md's "task tray 50×12" and its own
+// footer hint did not fit, while a result card at 60×18 wrapped prose into a
+// column narrower than the pane it was floating over.
+//
+// # What "room" means, precisely
+//
+// The TRANSCRIPT PANE's own rect (layout.Layout.Main) less one cell per side
+// — NOT the terminal's.
+//
+// Those differ, and the difference is the point. `Main` already has the right
+// pane's columns, the header's rows, the status bar's rows and the query
+// box's rows subtracted by Compute. An overlay sized to the terminal covers
+// all of that; one sized to `Main` is the size of the thing a reader is
+// already reading, which is the size their eye is calibrated to. It also
+// tracks pane proportions for free: hide the right pane and `Main` widens,
+// so the overlay widens with it, with no fraction-of-the-screen constant to
+// drift out of step.
+//
+// It is still CENTRED in the whole terminal, not placed over `Main` — so the
+// right pane and the status bar stay visible around it under the scrim.
+// Position and size come from different places on purpose.
+//
+// PreferredSize is asked for that available rect and may return anything;
+// overlayRect clamps the answer to [MinSize, the terminal less a margin], so
+// an overlay can ask for "as much as you have" without knowing any of the
+// rules.
+type MaximisedOverlay interface {
+	Overlay
+	PreferredSize(availW, availH int) (w, h int)
+}
+
+// matchTranscriptPane is MaximisedOverlay's "all of what you offered" answer,
+// shared by the tray and the result card so the two are the same size as each
+// other — they swap back and forth (the card returns to the tray on d/esc)
+// and a size change across that swap reads as the panel jumping.
+func matchTranscriptPane(availW, availH int) (int, int) { return availW, availH }
+
 // newPaletteOverlay is the real command palette (UI-01), reading the F1
 // action registry — the same registry the leader hint bar and the status
 // bar's binding hints already read, so a feature added there needs no

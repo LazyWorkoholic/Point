@@ -1043,37 +1043,123 @@ need the field names to match.
 
 ---
 
-# SESSION 15 — F9 Task Tray, Result Cards, Diff Card
+# SESSION 15 — F9a Task Tray and Result Cards (F9, narrowed)
+
+**F9 is SPLIT, not closed by this session.** It was started with its full
+spec — tray, result cards, and the diff card — and stopped before writing any
+code, per its own "stop and tell me if ambiguous" instruction. Four of its
+eight "Done when" criteria assume things that are not true of this repo. The
+evidence is in `design/completed/frontend/F09a-task-tray-cards.md`; the short
+version:
+
+1. **No Editor workspace exists.** `WorkspaceEditor` is a bare `layout`
+   constant; there is no second `Workspace` implementation. F13 (Session 18)
+   builds it, and F15 (Session 19) depends on both F13 *and* F9. So the diff
+   card's only specified apply target and its only specified trigger both
+   belong to later sessions. There is also no `WriteProjectFile` event, which
+   is correct — so with no buffer, the card has nowhere to apply to at all.
+2. **A task result cannot be attached.** `context_attachments.source_type` is
+   `file`-only and `managers\context.py:564` refuses anything else outright.
+   `a attach full` / `s attach summary` have no wire path. (The spec also
+   names a `summary` mode that does not exist — the three modes are
+   `full | reference | detached` — and its own gate expects `reference`.)
+3. **Nothing writes `memory_records`.** The table exists since migration v2
+   and has exactly the `status`/`source` columns the spec wants, but there is
+   no `MemoryService`, no repository and no `SaveMemory` event. B11's
+   `agent_proposals` stopgap is insert-only with one status, and both its
+   files say `accept`/`reject` is B13's. `m save to memory` has no backend.
+4. **The tray's labels have no wire source.** `ListTasks` returns
+   `id, kind, state, session, agent, created_at, started_at, finished_at,
+   error_code, live` — no topic, no token count. `tasks` has no result
+   column; `usage_records` has tokens but no repository and no wire event.
+   Durations are computable from the timestamps; "Research · tokio vs
+   asyncio · 12.4k tok" is not.
+
+**This session builds Done-when #1 and #8 only** — the global tray, and
+discard-leaves-the-result-retrievable. Both are fully supported today:
+`messages.task_id` exists and is indexed, so a finished task's result text is
+retrievable exactly as B10's `load_task_result` gets it, including for a task
+whose originating view was unloaded.
+
+**Diff computation was cut too, deliberately, and not only for the Editor.**
+There is nothing valid to compute a diff *from*. The Filler's reply is raw
+model text that the prompt *hopes* is JSON, and nothing parses it. Having Go
+parse unvalidated LLM output would be the first break in the
+backend-resolves / frontend-renders split this project has kept through
+`parse_invocation`, `ContextReport` and `ListDirectory` — in the worst place
+for it, since the input is adversarial by nature and the consumer is a
+destructive write path. **Session 17b (B24) fixes that**, and F9's diff-card
+work resumes at Session 18b.
 
 **Paste:**
 ```
 Read CLAUDE.md and design/tasks/frontend/F09-task-tray-cards.md.
 
-The backend returns a rewritten region; Go computes the diff locally.
-`e` opens the proposed RESULT in a scratch buffer, not the patch.
-Attach and save are independent axes.
+Build ONLY Done-when #1 (the global task tray, opening results whose
+originating view has been unloaded) and #8 (discard removes the card
+from view and leaves the task result retrievable from the tray).
+
+Do NOT build: the diff card, any diff computation, any apply path,
+attach-from-a-card, or save-to-memory. Each is blocked on something
+that does not exist -- the Editor workspace (F13), a parsed Filler
+proposal on the wire (B24), a non-file attachment source type (a B12
+extension), and a memory write path (B13). Say explicitly at the end
+which original Done-when items remain deferred and why.
+
+The tray is global because the root owns the task list -- app/tasks.go
+and refreshTasks already exist from F6. Reuse the F7 Popup; do not
+write a second list component.
 
 Stop at the verification gate with PowerShell checks.
 
-If anything in this episode's Build section is ambiguous or seems to
-assume something not true of this repo, stop and tell me before writing
-code.
+If anything in the narrowed scope is still ambiguous, stop and tell me
+before writing code.
 ```
 
-**You do:** check that edit-then-apply lands the *edited* text, not the original.
+**You do:** send `@research <topic>`, let it finish, and open its result from
+the tray. Press `d` -- it must return to the tray's own list (not close
+everything), with your typed filter and your place in the list intact, and the
+same task still listed. Also confirm the tray opens and lists correctly with
+**zero** tasks and while one is still running, and that a running row's m:ss
+clock **advances while you watch it**, without closing and reopening.
+
+**Two scope notes, both decided in-session and both recorded in F9a's
+completed doc rather than changed in F09's spec:**
+
+- The tray lists **background work only** -- research today. F09's "Global"
+  bullet and Done-when #1 both say "tasks from every *workspace*", which is a
+  statement about scope across workspaces and sessions, not a claim that every
+  task record belongs here; and the episode's own Purpose is "where
+  *background* work becomes visible". An inline turn's reply is already in the
+  transcript, where F5's `o` expands it in place. project_idea.md:259 says
+  filler-explainer-from-chat is also a background task, but the CODE gives it
+  `max_steps=1` and the backend's rule is `max_steps > 1`, so it is excluded;
+  per CLAUDE.md the code wins, and changing that is a backend decision.
+- `d`/`esc` on a card return to the tray rather than closing outright. F09's
+  Done-when #8 ("discarding a card leaves the task result retrievable from the
+  tray") is unchanged and is now directly observable instead of needing an F1
+  round trip, so the SPEC needed no edit -- only this gate's wording did.
 
 **Record:**
 ```
-Write design/completed/frontend/F09-task-tray-cards.md following the
-format in design/completed/backend/INDEX.md. Include the bugs we hit and
-how they were fixed, and what the next episode inherits. Add a row to
-design/completed/frontend/INDEX.md's status table.
+Write design/completed/frontend/F09a-task-tray-cards.md following the
+format in design/completed/backend/INDEX.md. Include the bugs we hit
+and how they were fixed, and what the next episode inherits. Add a row
+to design/completed/frontend/INDEX.md's status table, marked SPLIT --
+not complete -- and naming F9b/F9c as the remainder.
 
-Also record exactly how the diff card computes and applies a diff — the
-function signature and what it takes as input, not just the UI
-behaviour. F15 reuses this precise mechanism for the Filler's inline
-diff, so it needs a real function to call, not a description to
-re-implement.
+Record the four blockers with their file:line evidence, so Session 18b
+and Session 23b do not have to re-derive them.
+
+Record exactly how a finished task's result text is retrieved -- the
+event, the payload field, and how task_id maps to messages -- because
+F9b and F15 both read the same path.
+
+Record the result card's plain-text rendering as an explicit FORWARD
+POINTER TO F16, not an open gap: syntax colouring and a box frame for
+code blocks are deferred there by decision (F16-polish.md now has the
+item and the two packaging options). Indentation is preserved; colour
+and framing are not.
 ```
 
 **Then:** commit · `/clear`
@@ -1129,6 +1215,24 @@ Read CLAUDE.md and design/tasks/frontend/F10-settings-first-run.md.
 
 Ollama is detected silently but selected explicitly. Point must never
 rewrite config.toml. Keys are validated with list_models() at entry.
+
+THE FRESH-MACHINE SIMULATION IS THE DANGEROUS CHECK IN THIS EPISODE.
+CLAUDE.md's rename-aside rule names an F10 attempt by number: a
+`Rename-Item ... -ErrorAction SilentlyContinue` silently failed to move
+the real profile aside, and the script's unconditional "restore" step
+then deleted the live profile by name. F10's own task doc has since
+been corrected to the env-var scratch pattern -- use it exactly as
+written there, and do not reconstruct a rename-aside from any other
+doc. B06's and B08's task docs and B20's completed doc still SHOW the
+old pattern as a historical record; they carry superseded banners, and
+copying from them is the specific mistake the banner exists to stop.
+
+F7's shared Popup gained two things in F9a that a settings UI will
+want: PopupConfig.Decor (per-row icon/note computed AT RENDER TIME,
+never baked into the item -- F9a shipped a frozen clock by baking it)
+and Popup.RefreshItems (replace items while preserving the typed
+filter and the selection). Read RowDecor's doc before writing a row
+renderer.
 
 Stop at the verification gate with PowerShell checks, including the
 fresh-machine simulation.
@@ -1214,6 +1318,20 @@ Read CLAUDE.md and design/tasks/frontend/F12-workspace-manager.md.
 Unloading a view must NEVER cancel a task. Startup must NOT auto-load the
 last workspace — show the chooser.
 
+F9a's task tray is now the surface that PROVES the unload rule, and it
+is the easiest way to run this episode's own demo beat: unload a
+workspace with @research running, press F1, and the task is still
+there and still opens its result. Use it.
+
+But the tray is ROOT's, not a workspace's -- deliberately, because the
+task list is global and a task whose originating view is unloaded must
+still appear. So nothing about it belongs in Workspace.Suspend():
+not the open/closed state, not the filter text, and NOT Root's
+backgroundSeen map, which records TaskStarted.background flags seen in
+THIS process and is meaningless once reloaded. Persisting any of it
+would be persisting a view of state the DB already holds, which is the
+thing Suspend's ~2KB budget exists to avoid.
+
 Stop at the verification gate with PowerShell checks.
 
 If anything in this episode's Build section is ambiguous or seems to
@@ -1241,6 +1359,79 @@ match it exactly, method for method.
 
 ---
 
+# SESSION 17b — B24 The Filler's Proposal on the Wire
+
+**Goal:** make "the backend returns a rewritten region" true. B11 asks the
+Filler-Explainer for `{"file","start_line","end_line","replacement","note"}`
+and then throws the structure away. Parse it, validate it against the region
+the model was actually shown, and put it on the wire as its own event.
+
+**Why this episode exists.** F9 (Session 15) was narrowed and stopped before
+writing any diff code. One of its four blockers is that there is nothing valid
+to compute a diff from: the shape is stated only inside a prompt string
+(`managers\context.py:686`), nothing parses it, and `TaskDone` carries an
+empty payload. Letting Go parse raw model output instead would be the first
+exception to the backend-resolves / frontend-renders rule that
+`parse_invocation`, B20 and B23 all established — and the validation that
+matters most (is this line range inside what the model was shown?) is not even
+answerable in Go, because the frontend never learns what the shown region was.
+Full trace in `design/tasks/backend/B24-filler-proposal-event.md`'s "Why this
+episode exists".
+
+**Placed here, before F13**, so that F9's diff-card session (18b) has both its
+dependencies — this event and the Editor — the moment it starts. B24 itself
+has no frontend dependency and could run earlier; it is next to its consumer
+on purpose.
+
+**Paste:**
+```
+Read CLAUDE.md and design/tasks/backend/B24-filler-proposal-event.md.
+
+One parse, one validation set, one envelope type, one push site. The
+proposal is pushed AFTER the terminal TaskDone, never instead of it --
+B6's one-terminal-event-per-task rule holds.
+
+A reply that does not parse is a turn with no proposal: no event, no
+Error, a normal reply, one WARNING log line. The Filler is explicitly
+allowed to refuse in plain text, and B11's one-file refusal takes the
+echo path -- so a refusal surfacing as an error would make correct
+behaviour look broken.
+
+Do NOT write diff logic, an apply path, any UI, or a disk-write event.
+Do NOT persist the proposal. Do NOT change the fill-mode prompt.
+
+Stop at the verification gate with PowerShell checks.
+
+If anything in this episode's Build section is ambiguous or seems to
+assume something not true of this repo, stop and tell me before writing
+code.
+```
+
+**You do:** confirm the `FillProposal` envelope's `seq` is **higher** than the
+`TaskDone`'s for the same task — read the numbers, do not take the ordering on
+trust. Then run the same fill request five times and count how many replies
+parsed.
+
+**Record:**
+```
+Write design/completed/backend/B24-filler-proposal-event.md following
+the format in design/completed/backend/INDEX.md. Include the bugs we
+hit and how they were fixed, and what the next episode inherits. Add a
+row to that INDEX.md's status table.
+
+Record the exact FillProposal payload shape -- every field name,
+including shown_start/shown_end -- and the full list of rejection
+reason slugs. Session 18b is written against these exact names.
+
+Record the MEASURED compliance rate out of five runs, and the model it
+was measured against. That number is unrecoverable after this session
+and it is what tells a later episode whether the prompt needs work.
+```
+
+**Then:** commit · `/clear`
+
+---
+
 # SESSION 18 — F13 Editor Core
 
 **Goal:** the largest frontend episode. **May take two sessions** — if so, stop at
@@ -1253,6 +1444,29 @@ Read CLAUDE.md, design/tasks/frontend/LAYOUT.md, and F13-editor-core.md.
 Auto-indent is Tier 1 only (copy previous line's indentation). Line
 endings detected on open and preserved on save — this matters on Windows.
 Undo must group keystrokes, and an agent-applied diff must be ONE undo.
+
+SETTLE THIS BEFORE WRITING CODE: there is no way to save a file today,
+on either side. The backend has no write event at all -- no
+`WriteProjectFile`, no counterpart to `ReadProjectFile` (confirmed
+during F9a). The frontend writes exactly one file in the whole repo,
+`state.json`, via config\state.go. The only other writes anywhere are
+`project init`'s own `.point\project.toml` and `.gitignore`.
+
+So "save" is an unbuilt path and WHICH SIDE OWNS IT is a real
+decision, not plumbing. It interacts with three things that are
+backend-side today: B7's path guard, the file locks
+(AcquireFileLock/HeartbeatFileLock/ReleaseFileLock/TakeOverFileLock),
+and CheckFileStale -- and F13's own spec leans on all three ("never
+autosave a file held by another lock holder", "record Point's own
+write mtimes", "changed on disk since you opened it"). A Go-side write
+would have to re-ask questions the backend already answers, which is
+the drift B12's bug #2 and B23's ListDirectory decision were both
+about. Note also that CLAUDE.md's first hard rule bans writes from an
+AGENT path specifically; a user saving their own buffer is not that,
+so either answer is permitted -- but pick one deliberately and say
+why.
+
+Raise it and stop if the episode doc assumes a save path exists.
 
 Stop at the verification gate with PowerShell checks.
 
@@ -1283,17 +1497,132 @@ action.
 
 ---
 
+# SESSION 18b — F9b Diff Card (F9 resumed)
+
+**Goal:** the second third of F9. Every agent-proposed change is reviewed,
+editable, and reversible before it touches a buffer.
+
+**Prerequisites, all three mandatory:** F13's editor buffer (Session 18) to
+apply into, B24's `FillProposal` event (Session 17b) to compute a diff from,
+and `CheckFileStale` for the refusal. If any is not landed, this session does
+not start.
+
+**Runs before Session 19 (F15)**, which reuses this card's diff mechanism for
+the Filler's inline diff and needs a real function to call.
+
+**Paste:**
+```
+Read CLAUDE.md, design/tasks/frontend/F09-task-tray-cards.md's "Diff
+card (UI-07)" section, design/completed/backend/B24-filler-proposal-event.md
+for the event shape, and design/completed/frontend/F09a-task-tray-cards.md
+for what the narrowed F9 already built.
+
+Build the diff card only: Done-when #5, #6, #7 of F09's original spec.
+Attach-from-a-card and save-to-memory stay deferred to Session 23b.
+
+Go computes the diff from B24's validated proposal -- never from raw
+model text, and never by asking for a unified diff. `e` opens the
+proposed RESULT in a scratch buffer, not the patch; the diff re-renders
+live against the original as you edit.
+
+Three things the spec does not say and that this episode must get right
+-- all three are lessons B12 and F8 already paid for:
+
+1. APPLY-TIME GUARD ORDER. Resolve the SESSION's scope first, guard
+   against that, and commit nothing until the guard passes. Do not use
+   a path-resolved project: `_resolve_optional_project` walks up from
+   the path to auto-discover one (runtime.py:752), which answers a
+   different question from `_attachment_scope`'s "what will the builder
+   actually use". That drift is B12's bug #2 -- a file priced at ~718
+   tokens under one scope and refused under the other -- and B23
+   explicitly declined to inherit it for ListDirectory. For an estimate
+   the drift costs a wrong number; for a destructive apply it means the
+   write is guarded against whatever `.point\` sits above the file
+   instead of the session's real root. 374baa2 established the
+   corrected order for AttachContext; follow that one, not the
+   original. You may need CheckFileStale to accept a session_id.
+
+2. STALENESS IS A FACT ABOUT A MOMENT. Record the file's (mtime, size)
+   as of region generation, re-stat at apply time, compare. Do not
+   cache a stat and trust it: CheckFileStale takes a caller-supplied
+   mtime and will confirm whatever it is handed. B12's set_mode CLEARS
+   its recorded (mtime, size) pair for exactly this reason, and F8's
+   chip staleness was the same mistake one layer up.
+
+3. THE CARD'S STATE TRANSITION FOLLOWS THE BUFFER EDIT. Mark the card
+   applied only AFTER the buffer edit returns. Marking it optimistically
+   reproduces F8's chip bug precisely: a card that looks applied when it
+   was not. Since every apply goes into an in-memory buffer and never to
+   disk, a failed apply is atomic by construction -- but only if the
+   ordering is this way round.
+
+Never a direct disk write from an agent path, in any phase. There is no
+WriteProjectFile event and this episode does not add one.
+
+Stop at the verification gate with PowerShell checks.
+
+If anything in this episode's Build section is ambiguous or seems to
+assume something not true of this repo, stop and tell me before writing
+code.
+```
+
+**You do:** three things, in this order.
+1. `e`, change a line, `⏎` — confirm the **edited** text landed, not the
+   original. Then `ctrl+z` once and confirm it fully undid.
+2. With a card open, modify the file on disk from a second tab, then `⏎` —
+   confirm it is **refused with a reason** and offers re-generate.
+3. Apply, then check the card's own label. It must not read "applied" if the
+   buffer edit did not happen. Force this by making the apply fail (open the
+   file read-only, or point the card at a path the guard refuses) and watch
+   the card, not the log.
+
+**Record:**
+```
+Write design/completed/frontend/F09b-diff-card.md following the format
+in design/completed/backend/INDEX.md. Include the bugs we hit and how
+they were fixed. Add a row to design/completed/frontend/INDEX.md's
+status table and update F9a's row to say F9c is the only part still
+open.
+
+Record exactly how the diff is computed and applied -- the function
+signature and what it takes as input, not just the UI behaviour. F15
+(Session 19) reuses this precise mechanism for the Filler's inline
+diff, so it needs a real function to call, not a description to
+re-implement.
+
+Record what state the card tracks between being shown and being
+applied, which of it is read fresh at apply time, and what the card
+shows after a failed apply. That is the part most likely to rot.
+```
+
+**Then:** commit · `/clear`
+
+---
+
 # SESSION 19 — F15 Filler-Explainer Integration
 
 **Goal:** v1 feature-complete.
 
 **Paste:**
 ```
-Read CLAUDE.md and design/tasks/frontend/F15-explainer-integration.md.
+Read CLAUDE.md, design/tasks/frontend/F15-explainer-integration.md,
+design/completed/backend/B24-filler-proposal-event.md for the parsed
+proposal's exact payload shape, and
+design/completed/frontend/F09b-diff-card.md for the diff function this
+episode CALLS rather than re-implements.
 
 Explanations render in an overlay panel inside the Editor. Fill produces a
 diff card; applying goes into the UNSAVED buffer so Ctrl+Z undoes it.
 Nothing writes to disk.
+
+F9 was SPLIT during its own session; this episode's dependency is F9b
+(the diff card, Session 18b), not "F9". The fill reply is no longer raw
+model text either: B24 (Session 17b) parses and VALIDATES it in the
+backend into a structured proposal with the shown region attached, and
+F9b computes the diff from that. Do not parse the model's JSON here,
+and do not write a second diff implementation -- F9b's completed doc
+records the function signature precisely so this episode has something
+to call.
 
 Stop at the verification gate with PowerShell checks.
 
@@ -1329,6 +1658,15 @@ Read CLAUDE.md and design/tasks/backend/B15-lifecycle-resources.md.
 
 Unloading a view never cancels a task. The backend refuses to free
 anything a running task holds. Report bounded growth, never freed RSS.
+
+Two states exist now that did not when this was written. B12 added
+TaskState.QUEUED and runtime\scheduler.py: a QUEUED task holds no
+provider connection and no stream, is visible as queued, and is
+cancellable there -- so "refuses to free anything a running task
+holds" has to distinguish QUEUED from RUNNING rather than treat
+is_active() as one thing. B22 added SerializedConnection for the
+concurrent-completion race; anything this episode does to teardown has
+to go through it rather than around it.
 
 Stop at the verification gate with PowerShell checks, including killing
 the Python process mid-stream.
@@ -1366,6 +1704,20 @@ Read CLAUDE.md and design/tasks/backend/B14-usage-limits.md.
 Prices live in config, never hardcoded. Caps refuse BEFORE spending and
 never kill a running task.
 
+`usage_records` already EXISTS (schema v2) and is already written per
+turn. What it does not have is a repository or any wire event, which
+is this episode's actual gap -- not the table. Check what is in it
+before designing anything around it.
+
+There is also already a CONSUMER of per-turn token counts in the UI:
+F9a's result card sums `messages.input_tokens/output_tokens/
+total_tokens` to show "12.4k tok" on a finished task. If this episode
+introduces a second arithmetic for the same number, the two will
+disagree and the UI is where that gets discovered -- B20's rule, for
+B20's reason. Either the card reads this episode's number, or this
+episode's number is derived from the same columns; decide which and
+say so.
+
 Stop at the verification gate with PowerShell checks.
 
 If anything in this episode's Build section is ambiguous or seems to
@@ -1401,6 +1753,14 @@ Read CLAUDE.md and design/tasks/frontend/F14-editor-terminal.md.
 Tier 0 command runner plus a tea.ExecProcess hatch. No PTY, no VT100
 emulator. Backend tasks keep running while the TUI is suspended.
 
+Two tea.Tick loops are live by the time this episode runs: the header
+animation (F1) and F9a's tray clock. Both are generation-counted and
+self-terminating -- they re-arm only while there is a reason to -- so
+check what they do across an ExecProcess suspend and resume rather
+than assuming. F9a's tray is also the easiest proof of the
+"backend tasks keep running while the TUI is suspended" claim: leave
+@research running, suspend, come back, press F1.
+
 Stop at the verification gate with PowerShell checks.
 
 If anything in this episode's Build section is ambiguous or seems to
@@ -1433,7 +1793,38 @@ session and come back later. That is by design.
 
 **Paste:**
 ```
-Read CLAUDE.md and design/tasks/backend/B13-memory-system.md.
+Read CLAUDE.md, design/tasks/backend/B13-memory-system.md, and
+design/completed/backend/B11-three-agents.md's section on the
+`agent_proposals` stopgap.
+
+THREE THINGS SETTLED SINCE THIS WAS WRITTEN.
+
+1. `agent_proposals` (migration v4) exists and is POPULATED -- B11's
+   Research agent writes a row per candidate fact, status `pending`,
+   capped per session by a count. B11's own files say this episode
+   "reads B11's completed doc and decides how its real MemoryRecord
+   type adapts to what already exists here -- it does not get to assume
+   this table was never populated." Decide migrate / ignore / drop
+   deliberately and write down which. `memory_records` and
+   `memory_scopes` have existed unused since schema v2 and are this
+   episode's to activate.
+
+2. F9's result card needs TWO things from here, and only one of them is
+   this episode: a memory write path producing status=accepted,
+   source=user_card (B13's), AND the ability to ATTACH a memory or a
+   task result, which `context_attachments` cannot express --
+   source_type is `file`-only and managers\context.py refuses anything
+   else outright. That attachment-source extension IS NOT YET AN
+   EPISODE, deliberately, because B13's own shape decides what a memory
+   attachment even is. Spec it at the end of this session; F9c
+   (Session 23b) is blocked on both.
+
+3. F11 is the next Popup consumer whose rows CHANGE while it is open.
+   Use PopupConfig.Decor for anything state-derived (computed at render
+   time) and Popup.RefreshItems to replace items without wiping the
+   typed filter or the selection. F9a shipped a clock frozen at 0:00 by
+   baking a render-time value into an array.Item; RowDecor's doc
+   records the whole trace.
 
 The precondition failures I observed are:
 1. <your first observed failure>
@@ -1479,6 +1870,89 @@ the difference.
 
 ---
 
+# SESSION 23b — F9c Result Card Attach and Save (F9 closed)
+
+**Goal:** the last third of F9. Attach and save become independently
+exercisable on a result card, which is what finally closes the episode.
+
+**Prerequisites.** Two, and one of them is **not yet an episode**:
+
+1. **B13's memory write path** (Session 23). `memory_records` has had the
+   right `status`/`source` columns since migration v2 and nothing has ever
+   written them. Saving from a card must produce `status=accepted`,
+   `source=user_card` — the click *is* the approval, not a second pending
+   proposal — and that needs `MemoryService` plus a `SaveMemory` event.
+2. **A B12 attachment-source extension that does not exist.** Today
+   `context_attachments.source_type` only ever holds `file`, and
+   `managers\context.py:564` refuses anything else with
+   `"unsupported source_type (B12)"`. Attaching a task result or a memory
+   needs a new source type, a renderer for it, and a decision about what the
+   guards mean for a source that is not a path. **Spec it when Session 23
+   lands**, not before — B13's own shape determines what a memory attachment
+   even is, and writing it earlier would spec it against a guess. Do not fold
+   it into B13: one is "memory exists", the other is "the context builder can
+   render something that is not a file".
+
+**Also settle the mode-name discrepancy before writing code.** F09's spec
+offers `a attach full` / `s attach summary`, but the three modes are
+`full | reference | detached` and its own gate expects `reference`. Either
+`summary` is a third real mode the builder must implement, or the key is
+mislabelled and means `reference`. Decide it deliberately and write down
+which, in the episode's own words.
+
+**Paste:**
+```
+Read CLAUDE.md, design/tasks/frontend/F09-task-tray-cards.md's "Result
+card (UI-06)" section, design/completed/frontend/F09a-task-tray-cards.md,
+design/completed/backend/B13-memory-system.md, and the completed doc for
+the attachment-source extension this depends on.
+
+Build the result card's attach and save axes only: Done-when #2, #3, #4
+of F09's original spec. The tray, the card's rendering and discard are
+already built (F9a); the diff card is already built (F9b).
+
+Attach and save are INDEPENDENT axes. Attach controls this
+conversation's context; save controls durable memory. Both, either, or
+neither. Attaching writes a reference, never a copy -- so editing the
+memory later must change what the attached reference renders, and that
+is the check that proves it.
+
+Saving from a card creates an ACCEPTED record (source=user_card). The
+click is the approval. It is not a second pending proposal.
+
+Stop at the verification gate with PowerShell checks.
+
+If anything in this episode's Build section is ambiguous or seems to
+assume something not true of this repo, stop and tell me before writing
+code.
+```
+
+**You do:** on one card, attach-summary **and** save-to-project, then verify
+both in the DB:
+```powershell
+sqlite3 "$env:LOCALAPPDATA\Point\runtime.db" "select mode from context_attachments order by rowid desc limit 1;"
+sqlite3 "$env:LOCALAPPDATA\Point\runtime.db" "select status, source from memory_records order by rowid desc limit 1;"
+```
+Then edit that memory and confirm what the attached reference renders
+**changes** — that is Done-when #3 and the only check that distinguishes a
+reference from a copy.
+
+**Record:**
+```
+Write design/completed/frontend/F09c-result-card-axes.md following the
+format in design/completed/backend/INDEX.md. Add a row to
+design/completed/frontend/INDEX.md's status table, and update F9a's and
+F9b's rows -- F9 is CLOSED only once this lands, across all three docs.
+
+Record which way the summary-vs-reference mode question was decided and
+why, and the exact source_type the attachment extension uses for a task
+result.
+```
+
+**Then:** commit · `/clear`
+
+---
+
 # SESSION 24 — B16 SSH
 
 **Drop this if you are at ~3 weeks.**
@@ -1489,6 +1963,14 @@ Read CLAUDE.md and design/tasks/backend/B16-ssh-serving.md.
 
 Topology B: one runtime per connection, shared database. Permissions are
 enforced in the BACKEND, never only in the UI. SSH is off by default.
+
+"Shared database" across concurrent runtimes is no longer unexplored
+ground: B22 found and fixed a real SQLite commit race under concurrent
+task completion and introduced SerializedConnection for it. Read
+design/completed/backend/B22-concurrent-completion-race.md before
+designing the per-connection runtime -- it is the episode that already
+paid for this, and multiplying runtimes is exactly the condition that
+made it visible.
 
 Stop at the verification gate with PowerShell checks. I will test with a
 second terminal on this machine.
@@ -1526,6 +2008,25 @@ Read CLAUDE.md and design/tasks/frontend/F16-polish.md.
 
 Walk every component for empty/loading/error states, audit all nine
 terminal sizes, and QA all four themes.
+
+F16-polish.md now carries a CONCRETE carried-forward item from F9a:
+the result card's code blocks have no syntax colour and no box frame,
+because `chat\markdown.go` is unreachable from `app` (chat imports
+app). Indentation IS preserved. The section names the two packaging
+options and recommends extracting the renderer into
+`internal\markdown\`. This was deferred here by decision, not left
+open.
+
+Two things the responsive audit has to cover that did not exist
+before. F9a's tray and result card size themselves to the TRANSCRIPT
+PANE's rect (layout.Main) less a cell per side, centred in the
+terminal -- so they change shape with the right pane's visibility as
+well as with the terminal, and both need checking at every size. And
+the task-row glyph vocabulary (glyph, colour role, grouping, label,
+durations) now has exactly ONE copy, in app\tasks.go, read by both
+the tray and the right-pane Task card: a glyph that degrades in
+Windows Terminal is now one fix, and the theme QA should confirm the
+two surfaces still agree.
 
 Stop at the verification gate with PowerShell checks. Then write the
 README following the F16 spec, including the honest "what it does not do"

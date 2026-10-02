@@ -270,6 +270,26 @@ Note: `bootstrap.resolve_db_path` copies `backend\runtime.db` into a fresh profi
 that has no database, so the scratch profile starts with the old dev sessions in
 it. That is fine — every step below passes an explicit session id.
 
+> ⚠ **SUPERSEDED SCRIPT BELOW — DO NOT COPY IT.** The verification steps in
+> this section rename or delete `%APPDATA%\Point` / `%LOCALAPPDATA%\Point`
+> **by name**. That pattern is retired. CLAUDE.md's hard rules replace it with
+> an `$env:APPDATA` / `$env:LOCALAPPDATA` override onto a scratch directory,
+> and say so explicitly about docs like this one: *"If any doc — completed,
+> task, or otherwise — still shows the old rename-aside script, it is
+> superseded regardless of where it appears or how old or new it is; do not
+> copy it, even if it is the first example a search turns up."*
+>
+> It is left in place because it is the record of how this episode was
+> actually verified, which rewriting would falsify. It is annotated because
+> a later session grepping for a scratch-profile example will find this
+> before it finds the rule. Two real failures came from this pattern: B7
+> (a later tool call clobbered the real `config.toml`, because shell state
+> does not survive between tool calls) and F10 (a `-ErrorAction
+> SilentlyContinue` rename silently did nothing, and the unconditional
+> "restore" step then deleted the live profile by name). A `Test-Path`
+> guard does not fix it — not naming the real path in a destructive call
+> does.
+
 ```powershell
 $ErrorActionPreference = "Stop"
 Set-Location D:\Projects\Point\backend

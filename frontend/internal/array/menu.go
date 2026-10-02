@@ -214,6 +214,13 @@ func (m *Menu) page(dir int) {
 
 func (m *Menu) Top() {
 	m.selected = m.firstItemRow()
+	// Scroll to the actual TOP, not merely far enough to show the first
+	// selectable item. ensureVisible alone leaves the cursor at
+	// firstItemRow, which is 1 whenever the list opens with a section
+	// header -- so "Top" hid the very first heading, the one row a reader
+	// pressing Home is most likely looking for. Found while testing F9a's
+	// pinned headings; it affects Help too, which is sectioned.
+	m.cursor = 0
 	m.ensureVisible()
 }
 
@@ -280,9 +287,24 @@ func (m *Menu) SelectedOffset() int {
 }
 
 // ClickRow selects the row at `offset` within VisibleRows(), if any. It
-// reports whether the click landed on a selectable row — a click on a header
-// or past the end of the list changes nothing.
+// reports whether the click landed on a selectable row — a click on a header,
+// past the end of the list, or OUTSIDE THE VISIBLE WINDOW changes nothing.
+//
+// The window bound is the important half and it was missing. The check used
+// to be `i >= len(m.rows)` — the whole list — so an offset past the bottom of
+// the window still resolved, as long as the list had more rows further down.
+// A caller that mis-mapped a screen row (F9a's Popup hit-testing its footer
+// as a list row) therefore selected and OPENED a task that was not on screen
+// at all, rather than doing nothing.
+//
+// Bounding it here as well as in the caller is deliberate: this type owns
+// the window, `offset` is documented as an index into VisibleRows(), and a
+// contract that only holds because every caller happens to respect it is the
+// one that breaks when a caller is added.
 func (m *Menu) ClickRow(offset int) bool {
+	if offset < 0 || offset >= len(m.VisibleRows()) {
+		return false
+	}
 	i := m.cursor + offset
 	if i < 0 || i >= len(m.rows) || m.rows[i].Kind != RowItem {
 		return false
@@ -302,6 +324,25 @@ func (m *Menu) ScrollDown() { m.MoveDown() }
 func (m *Menu) Selected() (*Item, bool) {
 	it := m.selectedItem()
 	return it, it != nil
+}
+
+// SelectByID selects the visible item with this id and reports whether it
+// found one, scrolling it into view. Nothing moves when it is absent.
+//
+// By id rather than by offset because the only caller (Popup.RefreshItems,
+// keeping the selection across a live refresh of the same list) is working
+// across a RE-SORT: a task row moving from Running to Finished changes both
+// its index and its section header, so the offset that pointed at it before
+// the refresh points at an unrelated row after it.
+func (m *Menu) SelectByID(id string) bool {
+	for i, r := range m.rows {
+		if r.Kind == RowItem && r.Item != nil && r.Item.GetID() == id {
+			m.selected = i
+			m.ensureVisible()
+			return true
+		}
+	}
+	return false
 }
 
 // Len is the number of SELECTABLE rows after filtering — headers are not

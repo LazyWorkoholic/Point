@@ -84,6 +84,38 @@ Measure, then state numbers **only where measured**.
 Increase after `:` / `{`, dedent on `}` and dedent keywords, from a small
 per-language table. Parked otherwise.
 
+### Result-card code blocks — carried forward from F9a
+
+The result card (UI-06) renders its body as **wrapped plain text**: no syntax
+colouring, and no box frame around a code block. Indentation IS preserved —
+that was fixed in F9a, because losing it makes code read as *different code*
+rather than merely plainer — but a code block in a research result is visually
+indistinguishable from prose.
+
+**Why it was not fixed in F9a, and what the fix actually needs.** The markdown
+renderer is `chat\markdown.go`, and the card lives in `app`. `chat` imports
+`app`, so the card cannot reach the renderer, and the only two ways out were
+both out of scope for a frontend-F9 session: move the renderer into a third
+package (a refactor of F3's shipped code), or move the card into `chat` (which
+contradicts why the tray is Root's at all — F09's Done-when #1 requires a task
+whose originating view has been unloaded to still open its result).
+
+So this is a **packaging** problem, not a rendering one. Pick one:
+
+- extract `chat\markdown.go`'s renderer into `internal\markdown\`, imported
+  by both `chat` and `app`. Cleanest, and F11's memory popup will want it too;
+- or give `app` a minimal code-span/fence renderer of its own. Cheaper, and a
+  second renderer that drifts from the transcript's is exactly the duplication
+  this project has paid for four times (F5's Seq, F6's `taskCardWasVisible`,
+  F8's Bug A, F9a's task-row vocabulary). Prefer the extraction.
+
+Either way the box frame is `box.go`'s existing `CodeBorder`/`CodeText` roles,
+already in every palette and already used by the transcript — so once the card
+can call a renderer, the theming is free.
+
+Confirmed with Aryan during F9a's verification as a deliberate deferral to
+this episode, not an open gap. See `design/completed/frontend/F09a-task-tray-cards.md`.
+
 ### Demo recording
 Record the v1 demo script — **the one in `design/WORKFLOW.md` under "What done
 looks like"**, which covers ghost text, autosave + web preview, per-workspace

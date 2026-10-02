@@ -33,18 +33,27 @@ All printed commands must be **PowerShell**.
 | F6 | Right Pane | P1 | no | F5, F7 | B8, B12 |
 | F7 | Popup Framework | P1 | no | F1 | — |
 | F8 | @ Picker + Attachments | P1 | no | F7 | B7, B12 |
-| F9 | Task Tray, Cards, Diff Card | P1 | no | F7, F8 | B11, B12 |
+| F9a | Task Tray + Result Cards | P1 | no | F7, F8 | B11, B12 |
+| F9b | Diff Card | P1 | no | F9a, F13 | B24 |
+| F9c | Result Card Attach + Save | P1 | no | F9a | B13 + a B12 attachment-source ext (unspecced) |
 | F10 | Settings, Providers, First Run | P1 | no | F7 | B6 |
 | F11 | Memory Popup | P2 | no | F7 | B13 |
 | F12 | Workspace Manager + Lifecycle | P1 | no | F6 | B15 |
 | F13 | Editor Core | P1 | no | F12 | B7 |
 | F14 | Editor Terminal | P2 | no | F13 | — |
-| F15 | Filler-Explainer Integration | P1 | no | F13, F9 | B11 |
-| F16 | Polish | P2 | no | all | — |
+| F15 | Filler-Explainer Integration | P1 | no | F13, F9b | B11, B24 |
+| F16 | Polish | P2 | no | all | — | <!-- also owns F9a's deferred result-card code-block rendering: syntax colour + box frame, blocked on markdown-renderer packaging, see F16-polish.md -->
 | F17 | Web Preview | P2 | no | F14 | — |
 | F18 | windowed history | P1 | no | F5+B18 | B18 |
 
 **F1–F5 can start today** — they need only B1–B5, which are built.
+
+**F9 is split.** F9a (tray + result cards) ships against what exists today;
+F9b needs F13's editor buffer and B24's parsed Filler proposal on the wire;
+F9c needs B13 and an extension to `context_attachments.source_type`, which is
+`file`-only today and has no episode yet. See WORKFLOW.md sessions 15, 17b,
+18b and 23b, and `design/completed/frontend/F09a-task-tray-cards.md` for the
+four blockers with their evidence.
 
 **Ordering:** F1–F5 are strictly serial. F7 before F6 (the right pane's expanded
 context card is a popup). F12 needs F6. F13–F15 are an independent block.

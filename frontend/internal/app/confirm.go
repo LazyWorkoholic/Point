@@ -37,8 +37,38 @@ func NewConfirm(title, body, yes, no string, onConfirm tea.Cmd) *Confirm {
 	return &Confirm{title: title, body: body, yes: yes, no: no, onConfirm: onConfirm}
 }
 
-func (c *Confirm) MinSize() (int, int) { return 40, 7 } // LAYOUT.md's overlay table: "confirm 40×7"
-func (c *Confirm) Title() string       { return c.title }
+// MinSize is LAYOUT.md's "confirm 40×7" as a FLOOR, widened when this
+// confirm's own buttons need more.
+//
+// It used to return a flat 40×7, which silently truncated any button pair
+// wider than the content budget. Found by F9a's cancel confirmation:
+// "Cancel it" / "Leave it running" compose to a 44-cell button row inside a
+// 38-cell budget, so `centre` fell through to `truncateCells` and rendered
+// "[ Leave it run" — and because the focused and unfocused forms carry their
+// escape sequences at different offsets, the cut landed at a different
+// visible column depending on which side had focus, which read as the
+// brackets jumping around while navigating with ←/→.
+//
+// Fixed here rather than by shortening the labels: a widget that truncates
+// its own only-two controls is broken for every future caller, and F11's
+// delete and F9b's apply-anyway are both going to want verbs longer than
+// "Quit". The quit confirm ("Quit" / "Cancel") fits 40 and is unaffected —
+// this can only ever grow a confirm that would not have fitted.
+func (c *Confirm) MinSize() (int, int) {
+	// renderButtons' own geometry: each label gets four cells of box
+	// ("[ " + label + " ]", or two spaces either side), plus buttonGap
+	// between the two.
+	buttons := runewidth.StringWidth(c.yes) + runewidth.StringWidth(c.no) +
+		8 + runewidth.StringWidth(buttonGap) // 4 cells of box per button
+	// +2 for box.go's fitCells padding, +2 for the border: the same
+	// accounting View does in reverse when it computes textW.
+	w := buttons + 4
+	if w < 40 {
+		w = 40
+	}
+	return w, 7
+}
+func (c *Confirm) Title() string { return c.title }
 
 func (c *Confirm) Update(msg tea.Msg) (Overlay, tea.Cmd) {
 	k, ok := msg.(tea.KeyMsg)
@@ -91,35 +121,50 @@ func (c *Confirm) View(th theme.Theme, w, h int) string {
 	return b.String()
 }
 
-// renderButtons pads Yes and No to the SAME width, so the pair reads as one
-// evenly-weighted control rather than two differently-sized labels with an
-// arbitrary gap, and marks focus with turquoise's own accent colour —
-// box.go's OWN convention for "this has focus" (BorderFocus is the same
-// role, and THEME.md's rule 3 is explicit: focused border, active tab and
-// the streaming indicator are the SAME accent) — rather than a filled
+// renderButtons draws the two choices, each hugging its own label with two
+// cells of padding inside its own box, separated by buttonGap and centred as
+// a pair by View.
+//
+// Focus is marked with turquoise's own accent colour — box.go's OWN
+// convention for "this has focus" (BorderFocus is the same role, and
+// THEME.md's rule 3 is explicit: focused border, active tab and the
+// streaming indicator are the SAME accent) — rather than a filled
 // background, which is one extra step of colour math a terminal that has
 // fallen back from truecolor can get wrong in a way a plain accented
 // foreground does not.
+//
+// # Why the two are no longer padded to a SHARED width
+//
+// They were, originally, so the pair would "read as one evenly-weighted
+// control". That works when the labels are close in length ("Quit" /
+// "Cancel") and falls apart when they are not. F9a's "Cancel it" /
+// "Leave it running" differ by seven cells, so the shorter label floated in
+// the middle of a 16-cell field — five spaces of slack on one side, six on
+// the other — directly beside a bracketed box that hugged its own text. The
+// result was a ragged middle and two boxes that looked like different kinds
+// of thing.
+//
+// Hugging each label instead gives every button the same INTERNAL padding
+// (two cells, bracketed or not), which is the property that actually reads
+// as balanced. The focused and unfocused forms are still exactly the same
+// width as each other — "[ " + l + " ]" and "  " + l + "  " are both l+4 —
+// so the row's total width is still invariant under focus, which is what
+// stops the pair shifting as you move between them, and is what
+// TestConfirmButtonsAreEvenlyPadded actually measures.
 func (c *Confirm) renderButtons(th theme.Theme) string {
-	labelW := runewidth.StringWidth(c.yes)
-	if w := runewidth.StringWidth(c.no); w > labelW {
-		labelW = w
-	}
-
 	render := func(label string, focused bool) string {
-		// CENTRED in the shared width, not left-aligned with the slack
-		// dumped on the trailing side: padCells pads right, so "Quit" in
-		// a 6-cell field rendered as "[ Quit   ]" beside "[ Cancel ]" —
-		// same total width, visibly lopsided brackets. Splitting the
-		// slack is what makes the two read as one control.
-		label = centre(label, labelW)
 		if focused {
 			return th.Style(theme.AccentPrimary).Render("[ " + label + " ]")
 		}
 		return th.Style(theme.TextSecondary).Render("  " + label + "  ")
 	}
-	return render(c.yes, c.focusYes) + "    " + render(c.no, !c.focusYes)
+	return render(c.yes, c.focusYes) + buttonGap + render(c.no, !c.focusYes)
 }
+
+// buttonGap separates the two buttons. Four cells: wide enough that the
+// bracketed side reads as one control rather than running into its
+// neighbour, narrow enough that the pair still reads as a pair.
+const buttonGap = "    "
 
 // wrapLine greedily packs words into lines no wider than width display
 // cells. A single word wider than width is placed alone on its own line and
