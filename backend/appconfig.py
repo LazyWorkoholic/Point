@@ -232,10 +232,8 @@ def save_api_key(provider: str, api_key: str) -> Path:
     inherits the user-profile directory's permissions, which is
     acceptable for v1 and is what `doctor` reports.
 
-    Nothing calls this yet: SetProviderApiKey (B4) still registers a
-    provider for the current process only. Persisting from the UI is a
-    behaviour change no episode has asked for -- 12 asks for the writer,
-    not for a new place that writes.
+    Called by Runtime._handle_set_provider_api_key (B25), after the
+    submitted key has already validated via health().
     """
     ensure_dirs()
     target = credentials_path()

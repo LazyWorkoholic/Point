@@ -64,20 +64,87 @@ own definition. No caller anywhere.
 
 ## Build
 
+### Correction found during implementation (read before `list_models()`)
+
+This section originally said to call `list_models()` (or `health()` —
+"pick whichever") on the grounds that the two were interchangeable for
+"does this key work." They are not. `AnthropicProvider.list_models()`
+(`providers/anthropic/provider.py:134-152`) is a hardcoded static list of
+three known model ids — it never touches the network and never looks at
+`self.config.api_key`. A garbage Anthropic key would pass it every time,
+which means Done-when #3 ("a key that fails validation is never written")
+would have been false for Anthropic specifically, the one provider this
+app is built around.
+
+`health()` is the call that actually validates all five providers,
+including Anthropic (it calls `messages.create` and catches
+`anthropic.AuthenticationError`). Its contract is different from
+`list_models()`'s, though: instead of raising on failure, every
+provider's `health()` returns a `ProviderHealth(status, detail)`, with
+`status` one of `HEALTHY` / `UNHEALTHY` / `UNAUTHENTICATED` /
+`UNAVAILABLE` (`providers/models.py:32-42`). So the handler checks
+`health.status` itself rather than just awaiting and letting
+`ProviderError` propagate.
+
+A per-provider special case (list_models() for four, health() only for
+Anthropic) was considered and rejected — it matches each provider's own
+"most truthful" validating call, but leaves a trap for the next provider
+added to the registry: whichever shape it's given, nothing stops its
+`list_models()` from being non-validating like Anthropic's, silently
+reopening this exact gap. Calling `health()` uniformly closes the gap
+structurally rather than per-instance.
+
+### Second correction, found during live manual verification of the above
+
+Switching to `health()` was not sufficient by itself.
+`OpenRouterProvider.health()` called `self._client.models.list()` — the
+exact same call `list_models()` uses — and OpenRouter's `/models`
+endpoint turns out to be **public**: confirmed live, a garbage key got
+back the full 465-model catalog with no auth check at all. Same bug
+shape as Anthropic's `list_models()`, just surfacing through a real HTTP
+200 instead of a hardcoded return, and it shipped past the first version
+of `manual_b25_key_validation.py` because that version only exercised
+Anthropic's garbage-key path and skipped every other provider when no
+real key was configured — exactly the gap in the *test*, not just the
+code, that let this through.
+
+Fixed in `providers/openrouter/provider.py`: `health()` now calls
+OpenRouter's `/auth/key` endpoint directly via `httpx` instead of
+`models.list()`. `/auth/key` is OpenRouter's documented
+key-introspection endpoint and does 401 on an invalid key (confirmed
+live). `list_models()` itself is untouched — it still uses the public
+`/models` endpoint, which is correct for its own job of listing
+available models; the bug was only ever in using that same call to
+answer "is this key valid."
+
+The lesson that generalizes: **`health()` is not a validating call by
+construction, for every provider, just because it has that name.** The
+guarantee has to be checked per provider, against what its `health()`
+actually does over the wire — hardcoded data (Anthropic's old
+`list_models()`), a public endpoint (OpenRouter's old `health()`), or
+local-only checks are all shapes that can look like validation and not
+be it. `manual_b25_key_validation.py` was rewritten to check
+garbage-key rejection unconditionally for every key-based provider
+(anthropic/openai/gemini/openrouter), rather than only for Anthropic and
+only when no real key made the check "skippable" — rejecting a wrong
+key never needed a real key to compare against.
+
 ### Wire persistence into `_handle_set_provider_api_key`
 
 In `runtime.py`'s `_handle_set_provider_api_key`:
 
 1. Validate the key works **before** persisting it. Build a provider
    instance from the submitted `(name, api_key, base_url)` exactly as
-   today, and call `list_models()` (or `health()` — pick whichever the
-   handler can cheaply await; `list_models()` matches what F10's
-   credential-entry flow calls on its own side to get `✓ valid — N models
-   available`, so reusing the same call here means a key this handler
-   accepts is a key the UI's own validation step would also accept).
-   `ProviderError` propagates exactly as it does today — this episode adds
-   no new error path, just moves a disk write to AFTER the existing
-   validation-shaped work.
+   today, and call `health()`. If `health.status != HEALTHY`, raise the
+   `ProviderError` subclass that best matches the status
+   (`UNAUTHENTICATED` → `AuthenticationError`, `UNAVAILABLE` →
+   `ProviderUnavailableError`, `UNHEALTHY` → `ProviderError` itself, there
+   being no closer-fitting subclass) carrying `health.detail` as the
+   message, so a bad key still surfaces the same kind of error a provider
+   that raises on its own would have produced. This episode adds no new
+   *error path* for the client — the client still only ever sees `Error`
+   with a `ProviderError`-shaped message — it adds one `if` that turns a
+   status value into that same shape.
 2. Only once that succeeds, call `appconfig.save_api_key(name, api_key)`.
 3. Register the now-validated instance with `self.providers` as today.
 4. Emit `ProviderApiKeySet` as today — same payload, same shape. This

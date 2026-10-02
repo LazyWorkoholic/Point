@@ -55,8 +55,8 @@ from runtime.task_manager import TaskManager
 from managers.message import AssistantMessage
 from dataclasses import asdict
 from providers.bootstrap import build_registry_from_env, create_provider
-from providers.errors import ProviderError
-from providers.models import ProviderConfig
+from providers.errors import AuthenticationError, ProviderError, ProviderUnavailableError
+from providers.models import ProviderConfig, ProviderHealthStatus
 from streaming.adapter import StreamAdapter
 from streaming.events import StreamEventType
 from streaming.manager import StreamManager
@@ -72,6 +72,19 @@ _log = get_logger("runtime")
 _CORRELATION_LIMIT = 1000
 
 HEARTBEAT_INTERVAL_S = 5.0
+
+# B25: a non-healthy health() result, turned into the ProviderError
+# subclass that best describes why -- so a bad SetProviderApiKey key
+# surfaces the same kind of error a provider would have raised itself
+# had the handler called a method that always raises on failure (every
+# provider's health() returns a ProviderHealth instead; only some of
+# them raise). ProviderError is the fallback for UNHEALTHY, which has
+# no single better-fitting subclass.
+_HEALTH_FAILURE_ERRORS = {
+    ProviderHealthStatus.UNAUTHENTICATED: AuthenticationError,
+    ProviderHealthStatus.UNAVAILABLE: ProviderUnavailableError,
+    ProviderHealthStatus.UNHEALTHY: ProviderError,
+}
 
 
 def _parse_optional_int(value: Any, event_name: str, field_name: str) -> Optional[int]:
@@ -549,6 +562,11 @@ class Runtime:
             raise InvalidEventError("SetProviderApiKey requires 'provider' and 'api_key'")
         config = ProviderConfig(provider=name, api_key=api_key, base_url=base_url)
         instance = create_provider(name, config)
+        health = await instance.health()
+        if health.status != ProviderHealthStatus.HEALTHY:
+            error_cls = _HEALTH_FAILURE_ERRORS.get(health.status, ProviderError)
+            raise error_cls(health.detail or f"{name} key failed validation ({health.status.value})")
+        appconfig.save_api_key(name, api_key)
         self.providers.register(name, instance)
         await self._emit(OutgoingEvent(
             type=OutgoingEventType.PROVIDER_API_KEY_SET,

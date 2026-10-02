@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from typing import AsyncIterator
 
+import httpx
 import openai
 
 from managers.message import TokenUsage
@@ -48,9 +49,10 @@ class OpenRouterProvider(BaseProvider):
 
     def __init__(self, config) -> None:
         super().__init__(config)
+        self._base_url = (config.base_url or _OPENROUTER_BASE_URL).rstrip("/")
         self._client = openai.AsyncOpenAI(
             api_key=config.api_key,
-            base_url=config.base_url or _OPENROUTER_BASE_URL,
+            base_url=self._base_url,
             timeout=config.timeout,
         )
         self._translator = OpenAIMessageTranslator()
@@ -128,14 +130,29 @@ class OpenRouterProvider(BaseProvider):
         ]
 
     async def health(self) -> ProviderHealth:
+        """`models.list()` (what list_models() uses, and what this used to
+        check with too) hits OpenRouter's `/models` endpoint, which is
+        PUBLIC -- it returns the full catalog for any key, garbage or
+        real, with no auth check at all (confirmed live: a garbage key
+        got back all 465 models). That made this the same shape of bug
+        B25 fixed for Anthropic's list_models(), just surfacing through a
+        real HTTP call instead of a hardcoded list. `/auth/key` is
+        OpenRouter's documented endpoint for checking a key itself --
+        it 401s on an invalid key -- so it is the one real network call
+        here that actually answers "does this key work."
+        """
         if not self.config.api_key:
             return ProviderHealth(status=ProviderHealthStatus.UNAUTHENTICATED, detail="No OPENROUTER_API_KEY set")
         try:
-            await self._client.models.list()
-            return ProviderHealth(status=ProviderHealthStatus.HEALTHY)
-        except openai.AuthenticationError:
+            async with httpx.AsyncClient(timeout=self.config.timeout) as client:
+                resp = await client.get(
+                    f"{self._base_url}/auth/key",
+                    headers={"Authorization": f"Bearer {self.config.api_key}"},
+                )
+        except httpx.ConnectError as exc:
+            return ProviderHealth(status=ProviderHealthStatus.UNAVAILABLE, detail=str(exc))
+        if resp.status_code == 401:
             return ProviderHealth(status=ProviderHealthStatus.UNAUTHENTICATED)
-        except openai.APIConnectionError:
-            return ProviderHealth(status=ProviderHealthStatus.UNAVAILABLE)
-        except Exception as exc:  # noqa: BLE001
-            return ProviderHealth(status=ProviderHealthStatus.UNHEALTHY, detail=str(exc))
+        if resp.status_code == 200:
+            return ProviderHealth(status=ProviderHealthStatus.HEALTHY)
+        return ProviderHealth(status=ProviderHealthStatus.UNHEALTHY, detail=f"status {resp.status_code}")
