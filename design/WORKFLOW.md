@@ -1207,14 +1207,114 @@ still holds, and through which mechanism.
 
 ---
 
-# SESSION 16 — F10 Settings, Providers, First Run
+# SESSION 15c — B25 Persist a Validated Provider Key
+
+**Goal:** a key the user enters, sees validated, and moves on from is still
+there the next time the backend starts.
+
+**Why this episode exists.** Session 16 (F10) was started against its full
+spec and stopped before writing any frontend code, per CLAUDE.md's "stop and
+tell me" rule. F10's Build section says "the backend writes
+`%APPDATA%\Point\credentials.toml`... the UI never touches the file" as
+settled fact, but `appconfig.save_api_key()` — the exact writer described —
+has no caller anywhere in the backend; its own docstring says so. Full trace
+in `design/tasks/backend/B25-provider-key-persistence.md`'s "Why this episode
+exists".
 
 **Paste:**
 ```
-Read CLAUDE.md and design/tasks/frontend/F10-settings-first-run.md.
+Read CLAUDE.md and design/tasks/backend/B25-provider-key-persistence.md.
+
+One call site: wire _handle_set_provider_api_key to validate first (the
+same list_models()/health() shape it already partly does), then call
+appconfig.save_api_key(), then register the instance as today. Do NOT
+change SetProviderApiKey's or ProviderApiKeySet's payload shape, and do
+NOT add a rollback path for a key that failed validation -- validating
+before writing makes one unnecessary.
+
+Stop at the verification gate with PowerShell checks. The one that
+matters is #4: restart the backend process (not just re-ask it) and
+confirm the key resolves from credentials.toml alone, with no
+SetProviderApiKey call in the new process.
+
+If anything in this episode's Build section is ambiguous or seems to
+assume something not true of this repo, stop and tell me before writing
+code.
+```
+
+**You do:** the masking check — grep the real key string against the log
+file after the call and confirm it never appears unmasked, and the restart
+check above. Both are the actual point of this episode; a diff that "looks
+right" is not evidence either one holds.
+
+**Record:**
+```
+Write design/completed/backend/B25-provider-key-persistence.md following
+the format in design/completed/backend/INDEX.md. Include the bugs we hit
+and how they were fixed, and what the next episode inherits. Add a row to
+that INDEX.md's status table.
+
+Confirm explicitly, with the actual command output: a wrong key never
+touches credentials.toml, a right key survives a real process restart,
+and the raw key never appears in logs. F10 resumes immediately after
+this, and its credential-entry Done-when items are only honest once
+these three are true.
+```
+
+**Then:** commit · `/clear`
+
+---
+
+# SESSION 16 — F10 Provider Chooser, Credentials, Providers+Appearance (F10, narrowed)
+
+**F10 is SPLIT, not closed by this session.** It was started against its
+full spec — provider chooser, credential entry, the no-provider state, a
+5-tab Settings popup, and demo mode with a fixture library — and stopped
+before writing any code, per its own "stop and tell me if ambiguous"
+instruction. Three of its assumptions do not hold against this repo today;
+the evidence is in `design/tasks/frontend/INDEX.md`'s F10 split note, the
+short version:
+
+1. **Credential persistence was a stated fact, not a built path.**
+   Session 15c (B25) closes this immediately before this session runs.
+2. **`point doctor` has no wire event** — it is a separate CLI subcommand
+   that prints straight to stdout, not reachable from a running app
+   instance. Deferred to **F10b**.
+3. **The Behaviour tab's settings have no live-override path on the
+   backend** — they are real `config.toml`-sourced values with no runtime
+   override layer and no wire event to push one. A Behaviour tab as specced
+   would be cosmetic only. Deferred to **F10b**.
+4. **Demo mode assumes an apply path (F13/F9b) and a provider type that do
+   not exist**, plus a shipped sample project and fixture library that is
+   backend-and-asset work, not a Go frontend change. Deferred to **F10c**,
+   behind a backend episode that is not yet scoped.
+
+**This session builds the provider chooser, credential entry and
+validation, the no-provider state, and the Providers + Appearance tabs of
+Settings only** — everything the wire protocol already supports end to end
+now that B25 has landed.
+
+**Paste:**
+```
+Read CLAUDE.md and design/tasks/frontend/F10-settings-first-run.md, plus
+design/completed/backend/B25-provider-key-persistence.md for what just
+landed under credential entry.
+
+Build ONLY: the provider chooser (first run), credential entry and
+validation (now genuinely durable -- B25 landed), the no-provider state,
+and the Providers + Appearance tabs of the Settings popup.
+
+Do NOT build: the point-doctor action in About, any live effect for the
+Behaviour tab's settings, or demo mode. If you render a Behaviour tab at
+all, it must read and display config.toml's current values PLAINLY AS
+READ-ONLY -- say explicitly that changing them means editing config.toml
+and restarting, the same honest way F6 used dim "--" placeholders for a
+stub rather than a live-looking control that silently does nothing. Do
+NOT build an About tab control that calls `point doctor` -- there is no
+wire event for it yet.
 
 Ollama is detected silently but selected explicitly. Point must never
-rewrite config.toml. Keys are validated with list_models() at entry.
+rewrite config.toml.
 
 THE FRESH-MACHINE SIMULATION IS THE DANGEROUS CHECK IN THIS EPISODE.
 CLAUDE.md's rename-aside rule names an F10 attempt by number: a
@@ -1237,9 +1337,12 @@ renderer.
 Stop at the verification gate with PowerShell checks, including the
 fresh-machine simulation.
 
-If anything in this episode's Build section is ambiguous or seems to
-assume something not true of this repo, stop and tell me before writing
-code.
+Say explicitly at the end which original Done-when items remain
+deferred and why -- the doctor action, Behaviour's real effect, and
+demo mode -- each blocked on a backend episode that does not exist yet.
+
+If anything in the narrowed scope is still ambiguous, stop and tell me
+before writing code.
 ```
 
 **You do:** the config.toml byte-identical check. If Point rewrote it, stop.
@@ -1249,15 +1352,111 @@ code.
 Write design/completed/frontend/F10-settings-first-run.md following the
 format in design/completed/backend/INDEX.md. Include the bugs we hit and
 how they were fixed, and what the next episode inherits. Add a row to
-design/completed/frontend/INDEX.md's status table.
+design/completed/frontend/INDEX.md's status table, marked SPLIT -- not
+complete -- and naming F10b/F10c as the remainder.
 
 Also record the Settings popup's tab structure and how a new tab gets
-registered. F11 adds a Memory tab to this same popup later and should be
-able to do it without touching F10's code — write down what makes that
-true.
+registered. F11 adds a Memory tab to this same popup later, and F10b
+adds real behaviour to the Behaviour tab without touching this session's
+code -- write down what makes both true.
+
+Record the three deferred items with their file:line evidence, so
+whichever session scopes the backend work behind F10b/F10c does not have
+to re-derive any of it.
 ```
 
 **Then:** commit · `/clear`
+
+---
+
+# SESSION 16c — F10b Settings: Behaviour Overrides + `doctor` in About
+
+**Goal:** the Behaviour tab stops being a read-only mirror of `config.toml`
+and the About tab's `point doctor` action has something to call.
+
+**Prerequisites:** a backend episode that does not exist yet — a runtime
+override layer the scheduler, path guard, and project manager can consult
+ahead of `config.toml` (so `chat.queue_depth`, `limits.max_concurrent_tasks`,
+`project.allow_outside_project`, `index.respect_gitignore`, and
+`stale_after_days` can change without writing the user's file), plus a
+`doctor` wire event so the report `cli.py doctor` prints can reach a running
+app instance instead of only a separate process's stdout. **Scope and write
+that backend episode's task doc before this session starts** — the same
+shape S13d used when a task doc could not be written accurately before its
+prerequisite's shape was known.
+
+**Paste:**
+```
+Read CLAUDE.md, design/tasks/frontend/F10-settings-first-run.md's
+"Behaviour" and "About" bullets under Settings popup (UI-03), and
+<the backend episode's completed doc, once it exists>.
+
+FIRST, before any code: write design/tasks/frontend/F10b-settings-
+behaviour-doctor.md, in the same shape as F9a/B23's task docs. Scope,
+and nothing beyond it: wiring the Behaviour tab's controls to the
+backend's runtime-override event, and a doctor action in About that
+renders the backend's report in a scrollable card.
+
+Do NOT redesign the Settings popup's tab structure or touch the
+Providers/Appearance tabs F10 already shipped.
+
+Then show me the task doc and stop before writing code.
+```
+
+**Then:** commit · `/clear` once built and verified, following that doc's
+own Record step.
+
+---
+
+# SESSION 16d — F10c Settings: Demo Mode
+
+**Goal:** a presentation with dead wifi and no local model still has
+something real to show, end to end — chat, queueing, cancellation, a
+research run, the filler-explainer, and an error case, all on recorded
+fixtures with plausible timing.
+
+**Prerequisites:** a backend episode that does not exist yet, and unlike
+F10b's, this one has **no existing hook to anchor to** — not B15 (lifecycle
+and crash recovery, tagged demo-critical for a different reason: the
+crash-recovery beat, not a fixture-driven provider), not `MockProvider`
+(test-only, `POINT_MOCK=1`, must stay invisible in the UI per F10's own
+Do-NOT list). It needs, from scratch: a new selectable provider type
+distinct from `MockProvider`, a fixture library covering every row in
+F10's own fixture-coverage table (chat reply, queued turn, cancellation,
+`@research`'s 4-step tool loop, `@filler-explainer`'s EXPLANATION and FILL
+modes, usage events, one error case), timed replay rather than instant
+completion, and a shipped sample project for the fixtures to act on.
+
+**The filler-explainer fixture cannot ship complete until F9b/F13 land** —
+it is specced to "yield an applicable diff," and F09a's completed doc
+already established there is no Editor workspace and no apply path in this
+repo. Scope that fixture's own Done-when around whichever of F9b/F13 has
+landed by the time this session starts, and say explicitly in the backend
+episode's doc if it has not.
+
+**Scope and write the backend episode's task doc before this session
+starts**, the same as F10b.
+
+**Paste:**
+```
+Read CLAUDE.md, design/tasks/frontend/F10-settings-first-run.md's "Demo
+mode" section in full, and <the backend episode's completed doc, once it
+exists>.
+
+FIRST, before any code: write design/tasks/frontend/F10c-settings-demo-
+mode.md, in the same shape as F9a/B23's task docs. Scope, and nothing
+beyond it: selecting Demo mode from the provider chooser/Settings, the
+persistent DEMO badge, and wiring each fixture the backend episode
+shipped to its correct UI surface.
+
+Confirm whether F9b/F13 have landed; if not, scope the filler-explainer
+fixture's Done-when around what is actually buildable today and say so.
+
+Then show me the task doc and stop before writing code.
+```
+
+**Then:** commit · `/clear` once built and verified, following that doc's
+own Record step.
 
 ---
 

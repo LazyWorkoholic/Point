@@ -47,6 +47,7 @@ fix this table.
 | B22 | Concurrent Task Completion Race | P1 | no | B12 | ✅ built |
 | B23 | Agent + Directory Listing on the Wire | P1 | no | B7, B9 | ✅ built |
 | B24 | The Filler's Proposal on the Wire | P1 | no | B11, B8, B12 | not started — unblocks F9's diff card (WORKFLOW.md session 17b) |
+| B25 | Persist a Validated Provider Key | P1 | no | B6, B4 | not started — unblocks F10's credential-entry Done-when #4-6 (WORKFLOW.md session 15c) |
 
 **B1–B5 are frozen.** Additive changes only — new columns, new optional fields.
 Never refactors.

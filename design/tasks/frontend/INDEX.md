@@ -36,7 +36,9 @@ All printed commands must be **PowerShell**.
 | F9a | Task Tray + Result Cards | P1 | no | F7, F8 | B11, B12 |
 | F9b | Diff Card | P1 | no | F9a, F13 | B24 |
 | F9c | Result Card Attach + Save | P1 | no | F9a | B13 + a B12 attachment-source ext (unspecced) |
-| F10 | Settings, Providers, First Run | P1 | no | F7 | B6 |
+| F10 | Provider Chooser, Credentials, Providers+Appearance Tabs (F10, narrowed) | P1 | no | F7 | B6, B25 |
+| F10b | Settings — Behaviour Overrides + `doctor` in About | P1 | no | F10 | a not-yet-scoped backend episode (runtime override layer + a `doctor` wire event) |
+| F10c | Settings — Demo Mode | P1 | no | F10 | a not-yet-scoped backend episode (new provider type + fixture library + sample project) |
 | F11 | Memory Popup | P2 | no | F7 | B13 |
 | F12 | Workspace Manager + Lifecycle | P1 | no | F6 | B15 |
 | F13 | Editor Core | P1 | no | F12 | B7 |
@@ -54,6 +56,51 @@ F9c needs B13 and an extension to `context_attachments.source_type`, which is
 `file`-only today and has no episode yet. See WORKFLOW.md sessions 15, 17b,
 18b and 23b, and `design/completed/frontend/F09a-task-tray-cards.md` for the
 four blockers with their evidence.
+
+**F10 is split, the same shape as F9, stopped before any code was written.**
+Session 16 started against F10's full spec (`F10-settings-first-run.md`) and
+stopped once three of its assumptions turned out not to hold:
+
+1. **A validated key does not survive a restart.** `SetProviderApiKey`
+   (`backend\runtime\runtime.py:544`) only registers a provider in memory;
+   `appconfig.save_api_key()` (`backend\appconfig.py:226`, which does the
+   temp-file-then-rename write F10 describes) has no caller anywhere in the
+   backend — its own docstring says so. **B25** closes this one, narrowly,
+   with its own restart-across-process verification gate. F10 (narrowed,
+   this row) cannot honestly claim Done-when #4–#6 until B25 lands.
+2. **`point doctor` has no wire event.** It is a separate CLI subcommand
+   (`backend\cli.py:1194`) that prints straight to stdout — a different
+   process invocation, not an event over the JSON-lines protocol the
+   running app actually speaks. The About tab's `point doctor` action has
+   nothing to call. Deferred to **F10b**, behind a backend episode that does
+   not exist yet.
+3. **The Behaviour tab's settings have no live-override path.** Queue
+   depth, concurrency caps, `allow_outside_project`, `index.respect_
+   gitignore`, `stale_after_days` are real `config.toml`-sourced values
+   (e.g. `chat.queue_depth` read live via `appconfig.config_value()` in
+   `backend\runtime\scheduler.py:269`), with no in-memory override layer and
+   no wire event to push one, and the frontend's `state.json` is a Go-only
+   file the backend process never reads. Given "Settings never writes
+   `config.toml`," a Behaviour tab as specced would be cosmetic only.
+   Deferred to **F10b** alongside the `doctor` gap, since both need the same
+   kind of new backend surface (a runtime-override/reporting layer).
+4. **Demo mode's fixture set assumes an apply path that does not exist.**
+   The `@filler-explainer` fixture requires "an applicable diff" — but
+   `design/completed/frontend/F09a-task-tray-cards.md` already established,
+   with evidence, that there is no Editor workspace and no apply target
+   anywhere in this repo yet (F13/F9b's job). Demo mode also needs a new
+   provider type in the backend registry (distinct from the test-only
+   `MockProvider`, `backend\providers\mock\provider.py:87`), a shipped
+   sample project, and a real fixture library. Deferred to **F10c**, behind
+   a backend episode that does not exist yet — there is no existing hook
+   for it the way B15 or B24 are hooks for other deferred frontend work.
+
+**This row (F10) is narrowed to:** the provider chooser (first run),
+credential entry and validation, the no-provider state, and the
+Providers + Appearance tabs of Settings — everything the wire protocol
+already supports end to end once B25 lands. See WORKFLOW.md sessions 15c
+(B25) and 16, and `design/tasks/backend/B25-provider-key-persistence.md`'s
+Handoff for the full account.
 
 **Ordering:** F1–F5 are strictly serial. F7 before F6 (the right pane's expanded
 context card is a popup). F12 needs F6. F13–F15 are an independent block.

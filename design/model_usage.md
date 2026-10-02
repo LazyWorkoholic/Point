@@ -47,7 +47,45 @@ SESSION  EPISODE                          MODEL         WHY
                                                        was for the WHOLE episode and
                                                        was never spent on it.
 15b      B19 Silence-Based Agent Timeout (done)
-16       F10 settings, first run          Sonnet high   forms and flows
+15c      B25 persist provider key         Sonnet high   SPLIT OUT of session 16 --
+                                                        stopped before writing code
+                                                        once F10's "backend writes
+                                                        credentials.toml" turned out
+                                                        to have no caller anywhere.
+                                                        One call site over a writer
+                                                        that already exists and is
+                                                        already correct; the real
+                                                        work is the restart-across-
+                                                        process verification, not
+                                                        the diff.
+16       F10 settings, first run          Sonnet high   forms and flows --
+                                                        NARROWED, same shape as F9a.
+                                                        Stopped once before writing
+                                                        code: credential persistence
+                                                        (now B25/15c), the doctor
+                                                        action, Behaviour's live
+                                                        effect, and demo mode all
+                                                        assumed backend surface this
+                                                        repo does not have. This
+                                                        session builds the provider
+                                                        chooser, credential entry,
+                                                        no-provider state, and the
+                                                        Providers+Appearance tabs
+                                                        only.
+16c      F10b behaviour overrides +       Sonnet high   plumbing once its own
+         doctor in About                                backend episode exists --
+                                                        same shape as B20/S13d.
+                                                        Escalate only if the runtime
+                                                        override layer turns out to
+                                                        interact with the scheduler's
+                                                        concurrency gate.
+16d      F10c demo mode                   Opus medium   fixture design + timed
+                                                        replay is product judgment,
+                                                        not plumbing -- and the
+                                                        filler-explainer fixture is
+                                                        blocked on F9b/F13, so this
+                                                        row may need re-splitting
+                                                        again once scoped.
 16b      F18 windowed history             Opus high
 17       F12 workspace lifecycle          Opus high     Suspend/Resume + timers;
                                                         wrong here breaks silently
