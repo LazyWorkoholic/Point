@@ -100,6 +100,13 @@ class IncomingEventType(str, Enum):
     # cached file tree -- this lists one folder's immediate children,
     # with or without a project, live.
     LIST_DIRECTORY = "ListDirectory"
+    # B26: Settings-tab writes for values with no in-memory layer before
+    # this episode. Payload mirrors DetachContext's shape -- same key,
+    # presence of 'value' changes the verb (set vs. clear) -- rather than
+    # a second event type for clearing one override.
+    SET_BEHAVIOUR_OVERRIDE = "SetBehaviourOverride"
+    # B26: the About tab's `point doctor` action, as data instead of stdout.
+    GET_DOCTOR_REPORT = "GetDoctorReport"
 
 
 @dataclass(frozen=True)
@@ -211,6 +218,12 @@ class OutgoingEventType(str, Enum):
     # B23: reply to ListAgents / ListDirectory.
     AGENT_LIST = "AgentList"
     DIRECTORY_LIST = "DirectoryList"
+    # B26: reply to SetBehaviourOverride -- carries the full current
+    # override map, not just the key just changed, matching
+    # ProviderApiKeySet's precedent of echoing back resulting state.
+    BEHAVIOUR_OVERRIDE_SET = "BehaviourOverrideSet"
+    # B26: reply to GetDoctorReport. build_doctor_report()'s dict verbatim.
+    DOCTOR_REPORT = "DoctorReport"
     # Connection-level, caused by no request: corr_id is null on both.
     HELLO = "hello"
     PING = "ping"

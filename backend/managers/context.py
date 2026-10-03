@@ -42,6 +42,7 @@ from pathlib import Path
 from typing import Any, Optional, Protocol
 
 import appconfig
+import appconfig_overrides
 from database.attachment_repository import AttachmentRepository
 from database.project_repository import ProjectRepository
 from database.session_repository import SessionRepository
@@ -839,7 +840,7 @@ async def build(
     # on -- which is the correct default, and shows up in the log as a
     # refusal rather than as a silently missing attachment.
     project = await memory.project(request.session_id)
-    allow_outside = bool(appconfig.config_value("project.allow_outside_project", False))
+    allow_outside = bool(appconfig_overrides.config_value_live("project.allow_outside_project", False))
 
     attachment_messages: list[Message] = []
     for attachment in await memory.attachments(request.session_id):

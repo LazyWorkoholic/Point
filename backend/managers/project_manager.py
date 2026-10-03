@@ -24,6 +24,7 @@ from typing import Optional
 import aiosqlite
 
 import appconfig
+import appconfig_overrides
 from database.project_repository import ProjectRepository
 from logging_setup import get_logger
 from managers import gitignore
@@ -201,7 +202,7 @@ class ProjectManager:
     @staticmethod
     def _build_index(project: Project) -> list[str]:
         root = Path(project.root_path)
-        respect_gitignore = appconfig.config_value("index.respect_gitignore", True)
+        respect_gitignore = appconfig_overrides.config_value_live("index.respect_gitignore", True)
         max_kb = appconfig.config_value("index.max_file_kb", 100)
 
         rules: list[gitignore.IgnoreRule] = []

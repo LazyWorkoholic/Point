@@ -50,7 +50,7 @@ from __future__ import annotations
 import asyncio
 from typing import Callable, Iterable
 
-import appconfig
+import appconfig_overrides
 from logging_setup import get_logger
 from runtime.task import Task, TaskState
 
@@ -84,8 +84,8 @@ def provider_capacity(provider: str) -> int:
     honest instead of pretending three requests are progressing. A
     hosted provider has no such constraint.
     """
-    specific = appconfig.config_value(f"limits.{provider}.max_concurrent_tasks", None)
-    general = appconfig.config_value("limits.max_concurrent_tasks", DEFAULT_MAX_CONCURRENT)
+    specific = appconfig_overrides.config_value_live(f"limits.{provider}.max_concurrent_tasks", None)
+    general = appconfig_overrides.config_value_live("limits.max_concurrent_tasks", DEFAULT_MAX_CONCURRENT)
     for value, source in ((specific, f"limits.{provider}"), (general, "limits")):
         if value is None:
             continue
@@ -266,7 +266,7 @@ def turn_queue_depth() -> int:
     refused with `queue_full`. It is not the number that may run --
     that is fixed at one per session by `TURN_LANE_CAPACITY`.
     """
-    value = appconfig.config_value("chat.queue_depth", 1)
+    value = appconfig_overrides.config_value_live("chat.queue_depth", 1)
     try:
         parsed = int(value)
     except (TypeError, ValueError):

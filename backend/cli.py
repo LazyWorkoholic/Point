@@ -1,7 +1,9 @@
 r"""The backend's own command line, so every later episode can be
 verified without Go (B6 14).
 
-    uv run python cli.py doctor
+    uv run python cli.py doctor [--via-wire]
+    uv run python cli.py behaviour set <key> <value>
+    uv run python cli.py behaviour clear <key>
     uv run python cli.py migrate
     uv run python cli.py session new [title]
     uv run python cli.py session list
@@ -54,6 +56,7 @@ from pathlib import Path
 from typing import Any, Callable, Optional
 
 import appconfig
+import appconfig_overrides
 from bootstrap import (
     AlreadyRunningError,
     LEGACY_DB_PATH,
@@ -108,6 +111,8 @@ _EXPECTED_REPLY: dict[str, set[str]] = {
     "GetContextReport": {"ContextReport"},
     "ListAgents": {"AgentList"},
     "ListDirectory": {"DirectoryList"},
+    "GetDoctorReport": {"DoctorReport"},
+    "SetBehaviourOverride": {"BehaviourOverrideSet"},
 }
 
 _TASK_TERMINAL = {"TaskDone", "TaskFailed", "TaskCancelled"}
@@ -1194,63 +1199,171 @@ def cmd_migrate(args: argparse.Namespace) -> int:
 # doctor
 # ---------------------------------------------------------------------------
 
-def cmd_doctor(args: argparse.Namespace) -> int:
-    """Must run and exit 0 on a machine with no config at all. Every line
-    is either a fact or an explicit 'unknown' -- never a guess."""
-    print("Point doctor")
-    print("-" * 60)
+async def build_doctor_report() -> dict[str, Any]:
+    """Every fact `cmd_doctor` prints, as data. No `print()` calls live
+    here -- `cmd_doctor` formats this dict to stdout, and the
+    `GetDoctorReport` wire handler ships it verbatim; both read the same
+    facts once.
 
+    Must succeed on a machine with no config at all. Every field is
+    either a fact or an explicit "unknown"/"missing" -- never a guess.
+    """
     version_file = _repo_root() / "VERSION"
     version = version_file.read_text(encoding="utf-8").strip() if version_file.exists() else "(missing)"
-    print(f"VERSION file        {version}  ({version_file})")
-    print(f"backend version     {version}  (read from the same file)")
-    print(f"go frontend         {_go_binary_status()}")
-    print(f"protocol envelope   v{ENVELOPE_VERSION}")
-    print(f"python              {sys.version.split()[0]}  ({sys.executable})")
-
-    print("dependencies       ", _dependency_report())
 
     db_path = resolve_db_path()
     if db_path.exists():
         version_now = current_version(db_path)
-        state = f"schema v{version_now} (expected v{SCHEMA_VERSION})"
+        database_state = f"schema v{version_now} (expected v{SCHEMA_VERSION})"
         if version_now < SCHEMA_VERSION:
-            state += "  -- run: uv run python cli.py migrate"
+            database_state += "  -- run: uv run python cli.py migrate"
     else:
-        state = "does not exist yet -- run: uv run python cli.py migrate"
-    print(f"database            {db_path}")
-    print(f"                    {state}")
-    if LEGACY_DB_PATH.exists():
-        print(f"                    legacy copy still present: {LEGACY_DB_PATH}")
+        database_state = "does not exist yet -- run: uv run python cli.py migrate"
 
     config = appconfig.config_path()
     creds = appconfig.credentials_path()
-    print(f"config              {config}  {_exists(config)}")
-    error = appconfig.config_error()
-    if error:
-        print(f"                    UNREADABLE: {error}")
-    print(f"credentials         {creds}  {_exists(creds)}")
-    if creds.exists() and sys.platform == "win32":
-        print("                    permissions inherited from the user profile directory")
-    print(f"state               {appconfig.state_path()}  {_exists(appconfig.state_path())}")
-    print(f"logs                {appconfig.log_path()}  {_exists(appconfig.log_path())}")
 
-    print("providers")
+    providers = []
     configured = 0
     for name in appconfig.known_providers():
         source = appconfig.key_source(name)
         if source:
             configured += 1
             key = appconfig.resolve_api_key(name)
-            print(f"  {name:<12}key from {source}  ({appconfig.mask_secret(key)})")
+            providers.append({
+                "name": name, "configured": True,
+                "source": source, "masked_key": appconfig.mask_secret(key),
+            })
         else:
-            print(f"  {name:<12}no credentials")
-    print(f"  ollama      {_ollama_report()}")
-    print(f"  mock        {'enabled (POINT_MOCK=1)' if mock_provider.is_enabled() else 'not enabled'}")
-    if configured == 0:
+            providers.append({"name": name, "configured": False})
+
+    # Correction (B26): _ollama_report()'s asyncio.run() cannot be
+    # reused here -- this coroutine runs inside the wire handler's
+    # already-running event loop. _ollama_probe() is the same probe,
+    # extracted; the exception handling _ollama_report() used to do
+    # around asyncio.run() moves here, so both callers get identical
+    # failure text.
+    try:
+        ollama_report = await _ollama_probe()
+    except Exception as exc:  # noqa: BLE001
+        ollama_report = f"not reachable ({exc})"
+
+    return {
+        "version_file": str(version_file),
+        "version": version,
+        "go_frontend_status": _go_binary_status(),
+        "envelope_version": ENVELOPE_VERSION,
+        "python_version": sys.version.split()[0],
+        "python_executable": sys.executable,
+        "dependency_report": _dependency_report(),
+        "database_path": str(db_path),
+        "database_state": database_state,
+        "legacy_db_path": str(LEGACY_DB_PATH) if LEGACY_DB_PATH.exists() else None,
+        "config_path": str(config),
+        "config_exists": config.exists(),
+        "config_error": appconfig.config_error(),
+        "credentials_path": str(creds),
+        "credentials_exists": creds.exists(),
+        "credentials_permissions_inherited": creds.exists() and sys.platform == "win32",
+        "state_path": str(appconfig.state_path()),
+        "state_exists": appconfig.state_path().exists(),
+        "log_path": str(appconfig.log_path()),
+        "log_exists": appconfig.log_path().exists(),
+        "providers": providers,
+        "providers_configured_count": configured,
+        "ollama_report": ollama_report,
+        "mock_enabled": mock_provider.is_enabled(),
+        "behaviour_overrides": appconfig_overrides.all_overrides(),
+    }
+
+
+def _print_doctor_report(report: dict[str, Any]) -> None:
+    """Reproduces `cmd_doctor`'s exact pre-B26 stdout output, reading
+    from the dict instead of calling each helper inline. Byte-identical
+    on purpose -- see B26's Done-when #4."""
+    print("Point doctor")
+    print("-" * 60)
+    print(f"VERSION file        {report['version']}  ({report['version_file']})")
+    print(f"backend version     {report['version']}  (read from the same file)")
+    print(f"go frontend         {report['go_frontend_status']}")
+    print(f"protocol envelope   v{report['envelope_version']}")
+    print(f"python              {report['python_version']}  ({report['python_executable']})")
+
+    print("dependencies       ", report["dependency_report"])
+
+    print(f"database            {report['database_path']}")
+    print(f"                    {report['database_state']}")
+    if report["legacy_db_path"]:
+        print(f"                    legacy copy still present: {report['legacy_db_path']}")
+
+    print(f"config              {report['config_path']}  {_exists_text(report['config_exists'])}")
+    if report["config_error"]:
+        print(f"                    UNREADABLE: {report['config_error']}")
+    print(f"credentials         {report['credentials_path']}  {_exists_text(report['credentials_exists'])}")
+    if report["credentials_permissions_inherited"]:
+        print("                    permissions inherited from the user profile directory")
+    print(f"state               {report['state_path']}  {_exists_text(report['state_exists'])}")
+    print(f"logs                {report['log_path']}  {_exists_text(report['log_exists'])}")
+
+    print("providers")
+    for provider in report["providers"]:
+        if provider["configured"]:
+            print(f"  {provider['name']:<12}key from {provider['source']}  ({provider['masked_key']})")
+        else:
+            print(f"  {provider['name']:<12}no credentials")
+    print(f"  ollama      {report['ollama_report']}")
+    print(f"  mock        {'enabled (POINT_MOCK=1)' if report['mock_enabled'] else 'not enabled'}")
+    if report["providers_configured_count"] == 0:
         print("\nNo cloud provider is configured. Point still runs: use ollama, or")
         print("set a key in the environment or in credentials.toml above.")
+
+
+def cmd_doctor(args: argparse.Namespace) -> int:
+    report = asyncio.run(build_doctor_report())
+    _print_doctor_report(report)
     return EXIT_OK
+
+
+async def cmd_doctor_via_wire(runtime: Runtime, args: argparse.Namespace) -> int:
+    """B26 verification: drives GetDoctorReport through the same `call()`
+    every other event-backed command uses, so the wire reply can be
+    diffed against `cmd_doctor`'s own direct numbers."""
+    envelopes = await call(runtime, "GetDoctorReport")
+    _print_errors(envelopes)
+    if _failed(envelopes):
+        return EXIT_FAILED
+    report_envelope = next(e for e in envelopes if e["type"] == "DoctorReport")
+    print(json.dumps(report_envelope["payload"], indent=2))
+    return EXIT_OK
+
+
+async def cmd_behaviour_set(runtime: Runtime, args: argparse.Namespace) -> int:
+    envelopes = await call(runtime, "SetBehaviourOverride", key=args.key, value=_parse_cli_value(args.value))
+    _print_errors(envelopes)
+    if _failed(envelopes):
+        return EXIT_FAILED
+    result = next(e for e in envelopes if e["type"] == "BehaviourOverrideSet")
+    print(json.dumps(result["payload"], indent=2))
+    return EXIT_OK
+
+
+async def cmd_behaviour_clear(runtime: Runtime, args: argparse.Namespace) -> int:
+    envelopes = await call(runtime, "SetBehaviourOverride", key=args.key)
+    _print_errors(envelopes)
+    if _failed(envelopes):
+        return EXIT_FAILED
+    result = next(e for e in envelopes if e["type"] == "BehaviourOverrideSet")
+    print(json.dumps(result["payload"], indent=2))
+    return EXIT_OK
+
+
+def _parse_cli_value(raw: str) -> Any:
+    """JSON when it parses (so `0`, `true`, `"a string"` all work as a
+    shell would type them without a --json flag), else the raw string."""
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        return raw
 
 
 def _repo_root():
@@ -1258,8 +1371,8 @@ def _repo_root():
     return Path(__file__).resolve().parent.parent
 
 
-def _exists(path) -> str:
-    return "(exists)" if path.exists() else "(missing)"
+def _exists_text(exists: bool) -> str:
+    return "(exists)" if exists else "(missing)"
 
 
 def _go_binary_status() -> str:
@@ -1299,19 +1412,23 @@ def _dependency_report() -> str:
     return ", ".join(parts)
 
 
-def _ollama_report() -> str:
-    async def probe() -> str:
-        from providers.ollama.provider import OllamaProvider
-        provider = OllamaProvider(ProviderConfig.from_env("ollama"))
-        health = await provider.health()
-        if health.status != ProviderHealthStatus.HEALTHY:
-            return f"not reachable ({health.detail or health.status.value})"
-        models = await provider.list_models()
-        names = ", ".join(m.id for m in models[:5]) or "no models pulled"
-        return f"reachable, {len(models)} model(s): {names}"
+async def _ollama_probe() -> str:
+    from providers.ollama.provider import OllamaProvider
+    provider = OllamaProvider(ProviderConfig.from_env("ollama"))
+    health = await provider.health()
+    if health.status != ProviderHealthStatus.HEALTHY:
+        return f"not reachable ({health.detail or health.status.value})"
+    models = await provider.list_models()
+    names = ", ".join(m.id for m in models[:5]) or "no models pulled"
+    return f"reachable, {len(models)} model(s): {names}"
 
+
+def _ollama_report() -> str:
+    """CLI-only: owns the event loop, so it may create one. Not called
+    from build_doctor_report() -- that awaits _ollama_probe() directly,
+    since it already runs inside a running event loop."""
     try:
-        return asyncio.run(probe())
+        return asyncio.run(_ollama_probe())
     except Exception as exc:  # noqa: BLE001
         return f"not reachable ({exc})"
 
@@ -1355,7 +1472,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser.set_defaults(verbose=False)
     sub = parser.add_subparsers(dest="command", required=True)
 
-    sub.add_parser("doctor", help="report versions, paths, database, providers", parents=[common])
+    doctor = sub.add_parser("doctor", help="report versions, paths, database, providers", parents=[common])
+    doctor.add_argument(
+        "--via-wire", action="store_true",
+        help="drive GetDoctorReport over the event pipe instead of calling "
+             "build_doctor_report() directly (B26 verification: proves the "
+             "wire reply matches this command's own numbers). Always prints JSON.",
+    )
     sub.add_parser("migrate", help="bring the database up to the current schema version", parents=[common])
 
     session = sub.add_parser("session", help="session operations", parents=[common]).add_subparsers(
@@ -1608,6 +1731,18 @@ def build_parser() -> argparse.ArgumentParser:
         help="root for a relative TARGET when no project is given (default: this process's own cwd)",
     )
 
+    # Behaviour overrides (B26). No non-wire path exists for this feature
+    # at all (unlike doctor, which has one) -- this is the only CLI
+    # surface, not a parity check.
+    behaviour = sub.add_parser(
+        "behaviour", help="runtime overrides for Settings-tab values", parents=[common]
+    ).add_subparsers(dest="behaviour_command", required=True)
+    behaviour_set = behaviour.add_parser("set", help="set an override", parents=[common])
+    behaviour_set.add_argument("key")
+    behaviour_set.add_argument("value", help="parsed as JSON if it parses, else a raw string")
+    behaviour_clear = behaviour.add_parser("clear", help="clear an override", parents=[common])
+    behaviour_clear.add_argument("key")
+
     return parser
 
 
@@ -1633,6 +1768,8 @@ def main(argv: Optional[list[str]] = None) -> int:
         os.environ["POINT_MOCK_FIXTURE"] = str(fixture)
 
     if args.command == "doctor":
+        if getattr(args, "via_wire", False):
+            return asyncio.run(_with_runtime(cmd_doctor_via_wire, args))
         return cmd_doctor(args)
     if args.command == "migrate":
         return cmd_migrate(args)
@@ -1661,6 +1798,8 @@ def main(argv: Optional[list[str]] = None) -> int:
         ("set-mode", None): cmd_set_mode,
         ("attachments", "list"): cmd_attachments_list,
         ("task", "cancel"): cmd_task_cancel,
+        ("behaviour", "set"): cmd_behaviour_set,
+        ("behaviour", "clear"): cmd_behaviour_clear,
     }
     # "project lock <verb>" is a third level of subcommand, one deeper
     # than the (command, X_command) shape every other tree uses.

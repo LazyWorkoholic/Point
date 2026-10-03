@@ -12,6 +12,7 @@ from typing import Any, Optional, Union
 import aiosqlite
 
 import appconfig
+import appconfig_overrides
 from agents.executor import AgentExecutor, BoundsOverride
 from agents.registry import AgentRegistry
 from database.connection import open_database
@@ -315,6 +316,8 @@ class Runtime:
         self.dispatcher.register(IncomingEventType.CHECK_FILE_STALE, self._handle_check_file_stale)
         self.dispatcher.register(IncomingEventType.LIST_AGENTS, self._handle_list_agents)
         self.dispatcher.register(IncomingEventType.LIST_DIRECTORY, self._handle_list_directory)
+        self.dispatcher.register(IncomingEventType.SET_BEHAVIOUR_OVERRIDE, self._handle_set_behaviour_override)
+        self.dispatcher.register(IncomingEventType.GET_DOCTOR_REPORT, self._handle_get_doctor_report)
 
     async def receive(self, raw: dict[str, Any]) -> None:
         try:
@@ -589,6 +592,40 @@ class Runtime:
             type=OutgoingEventType.PROVIDER_API_KEY_SET,
             request_id=event.request_id,
             payload={"provider": name},
+        ))
+
+    async def _handle_set_behaviour_override(self, event: IncomingEvent) -> None:
+        """B26: the Behaviour tab's write path. Same key, presence of
+        'value' changes the verb -- DetachContext's shape, not a second
+        event type for clearing one override."""
+        key = event.payload.get("key")
+        if not key:
+            raise InvalidEventError("SetBehaviourOverride requires 'key'")
+        if "value" in event.payload:
+            try:
+                appconfig_overrides.set_override(key, event.payload["value"])
+            except ValueError as exc:
+                raise InvalidEventError(str(exc)) from exc
+        else:
+            appconfig_overrides.clear_override(key)
+        await self._emit(OutgoingEvent(
+            type=OutgoingEventType.BEHAVIOUR_OVERRIDE_SET,
+            request_id=event.request_id,
+            payload={"key": key, "overrides": appconfig_overrides.all_overrides()},
+        ))
+
+    async def _handle_get_doctor_report(self, event: IncomingEvent) -> None:
+        """B26: `point doctor`'s own report, as data. Deferred import --
+        `cli.py` imports `Runtime` from this module, so importing `cli`
+        at module level here would be circular; by the time this handler
+        runs, both modules are already fully loaded."""
+        import cli
+
+        report = await cli.build_doctor_report()
+        await self._emit(OutgoingEvent(
+            type=OutgoingEventType.DOCTOR_REPORT,
+            request_id=event.request_id,
+            payload=report,
         ))
 
     async def _handle_set_session_provider(self, event: IncomingEvent) -> None:
@@ -978,7 +1015,7 @@ class Runtime:
         if not matches:
             return None
 
-        stale_after_days = appconfig.config_value("research.stale_after_days", 7)
+        stale_after_days = appconfig_overrides.config_value_live("research.stale_after_days", 7)
         now = time.time()
         lines = [f"Past {agent.name} results in this session (most recent first):"]
         for row in matches[:5]:
@@ -1346,7 +1383,7 @@ class Runtime:
         the reason and the user can still do something about it.
         """
         project = await self.memory.project(session_id)
-        allow_outside = bool(appconfig.config_value("project.allow_outside_project", False))
+        allow_outside = bool(appconfig_overrides.config_value_live("project.allow_outside_project", False))
         return project, allow_outside
 
     async def _require_session(self, payload: dict[str, Any]) -> tuple[str, Session]:

@@ -32,6 +32,7 @@ it passed.
 | B22 | Concurrent Task Completion Race (`SerializedConnection`) | ✅ built + manually verified | `B22-concurrent-completion-race.md` |
 | B23 | Agent and Directory Listing on the Wire | ✅ built + manually verified | `B23-agent-and-directory-listing.md` |
 | B25 | Persist a Validated Provider Key | ✅ built + manually verified | `B25-provider-key-persistence.md` |
+| B26 | Behaviour Overrides + `doctor` on the Wire | ✅ built + manually verified | `B26-behaviour-overrides-doctor-wire.md` |
 
 ## Verified file structure — end of Episode 11
 

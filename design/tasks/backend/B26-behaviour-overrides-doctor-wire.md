@@ -367,10 +367,13 @@ allow_outside_project true` both work from a shell without a `--json` flag.
    `0`, not whatever `config.toml` says — observable via
    `turn_queue_depth()`'s actual refusal behavior (a second queued send
    gets `queue_full` immediately where it would have queued before).
+   **Requires one long-lived process** (`tests\manual_b26_behaviour_overrides.py`)
+   — see "Verification gate" below for why a sequence of separate `cli.py`
+   calls cannot observe this.
 2. `SetBehaviourOverride` with `{"key": "chat.queue_depth"}` (no `value`)
    clears the override; the next lookup falls back to `config.toml`
    (or the hardcoded default if `config.toml` has no `chat.queue_depth`
-   either).
+   either). **Requires one long-lived process**, same reason as #1.
 3. `SetBehaviourOverride` with an unlisted key (e.g. `"database.path"`)
    is rejected with `Error`, and no override is recorded for it.
 4. `cli.py doctor` (no `--via-wire`) prints **exactly** what it printed
@@ -383,7 +386,9 @@ allow_outside_project true` both work from a shell without a `--json` flag.
    called from a running event loop` — proof that the Correction above was
    actually applied, not just acknowledged.
 7. After at least one `SetBehaviourOverride` call, `GetDoctorReport`'s
-   payload includes it under `behaviour_overrides`.
+   payload includes it under `behaviour_overrides`. **Requires one
+   long-lived process**, same reason as #1 — a `SetBehaviourOverride` from
+   one `cli.py` invocation is invisible to a `GetDoctorReport` from another.
 8. Every `config_value()` call site **not** in this episode's seven-item
    list is provably untouched — `git diff` shows no change to
    `bootstrap.py`, `agents\executor.py`, `attachment_manager.py`'s
@@ -397,10 +402,35 @@ allow_outside_project true` both work from a shell without a `--json` flag.
 
 ## Verification gate (PowerShell, scratch profile)
 
-Per CLAUDE.md: one combined script, `$env:APPDATA`/`$env:LOCALAPPDATA`
-pointed at a scratch directory for the whole duration, nothing under the
-real `%APPDATA%\Point` / `%LOCALAPPDATA%\Point` ever named. The rename-aside
+**Two scripts, not one, and that split is load-bearing.** `cli.py` builds a
+brand-new `Runtime` on every invocation (`build_runtime(single_instance=False,
+...)` inside `_with_runtime`) — a second `uv run python cli.py ...` call is a
+second process with its own empty in-memory state, not a second request to
+the first one. A behaviour override lives exactly as long as the process
+that set it (Do-NOT #3, by design), and `runtime\scheduler.py`'s turn-queue
+occupancy is exactly as process-local — that file's own docstring already
+says so: "driving three sends through three CLI processes bypasses the
+scheduler entirely." Concretely: `cli.py behaviour set chat.queue_depth 0`
+followed by a *separate* `cli.py doctor --via-wire` call will **not** show
+that override. The two are different processes; nothing carries over.
+
+So:
+- Done-when **#3, #4, #5, #6, #8, #9** are each self-contained within one
+  invocation, or deliberately test what a fresh process (a restart) sees —
+  the **PowerShell script** below checks these.
+- Done-when **#1, #2, #7** each require setting an override and then
+  observing its effect *in the same process* — the **long-lived-process
+  script**, `tests\manual_b26_behaviour_overrides.py`, checks these, in the
+  same convention B11/B12/B19/B22/F8 already established for exactly this
+  class of check (see `manual_b12_concurrency.py`'s own docstring for the
+  identical argument about the provider-lane cap).
+
+Per CLAUDE.md: both scripts point `$env:APPDATA`/`$env:LOCALAPPDATA` at a
+scratch directory for their whole duration, nothing under the real
+`%APPDATA%\Point` / `%LOCALAPPDATA%\Point` ever named. The rename-aside
 pattern is retired; do not reconstruct it even from an older doc.
+
+### PowerShell script (Done-when #3, #4, #5, #6, #8, #9)
 
 ```powershell
 $ErrorActionPreference = "Stop"
@@ -423,33 +453,17 @@ try {
     Get-Content "$scratch\doctor-wire.json"
     # EXPECT: valid JSON, no traceback, same facts as doctor-before.txt
 
-    $sid = (uv run python cli.py session new "b26").Split(" ")[0]
-
-    # --- 1: set an override, prove it governs real behaviour
-    uv run python cli.py behaviour set chat.queue_depth 0
-    uv run python cli.py send "first" --session $sid
-    uv run python cli.py send "second" --session $sid
-    # EXPECT: the second send is refused with queue_full while the first
-    # is still in flight -- depth 0 means nothing may wait.
-
     # --- 3: an unlisted key is rejected
     uv run python cli.py behaviour set database.path "C:\nope"
     # EXPECT: Error, not BehaviourOverrideSet
-
-    # --- 7: doctor reflects the override
-    uv run python cli.py doctor --via-wire | Select-String "chat.queue_depth"
-    # EXPECT: present under behaviour_overrides with value 0
-
-    # --- 2: clear it
-    uv run python cli.py behaviour clear chat.queue_depth
-    uv run python cli.py doctor --via-wire | Select-String "chat.queue_depth"
-    # EXPECT: absent from behaviour_overrides
 
     # --- 9: restart clears overrides that were never cleared explicitly
     uv run python cli.py behaviour set chat.queue_depth 7
     # (new process, same scratch profile, nothing re-sent)
     uv run python cli.py doctor --via-wire | Select-String "chat.queue_depth"
     # EXPECT: absent -- the override lived only in the process that set it
+    # (this is the SAME fact that makes #1/#2/#7 need the other script --
+    # here it is the thing being tested, there it is the obstacle)
 
     # --- 8: confirm the untouched call sites really are untouched
     git diff --stat -- backend\bootstrap.py backend\agents\executor.py `
@@ -467,6 +481,35 @@ finally {
 episode's changes (or against the formatted text embedded in
 `doctor-wire.json` once reconstructed) to confirm Done-when #4 by actual
 comparison, not by reading the refactor and assuming it preserved output.
+
+### Long-lived-process script (Done-when #1, #2, #7)
+
+```powershell
+$ErrorActionPreference = "Stop"
+$realAppData = $env:APPDATA
+$realLocalAppData = $env:LOCALAPPDATA
+$scratch = Join-Path $env:TEMP "point-scratch-b26-manual"
+New-Item -ItemType Directory -Force $scratch | Out-Null
+try {
+    $env:APPDATA      = $scratch
+    $env:LOCALAPPDATA = $scratch
+    cd D:\Projects\Point\backend
+    uv run python cli.py migrate | Out-Null
+    uv run python tests\manual_b26_behaviour_overrides.py
+}
+finally {
+    $env:APPDATA      = $realAppData
+    $env:LOCALAPPDATA = $realLocalAppData
+    Remove-Item -LiteralPath $scratch -Recurse -Force -ErrorAction SilentlyContinue
+}
+```
+
+EXPECT: `ALL CHECKS PASSED` and exit code 0. The script builds one `Runtime`
+and, inside that single process, sets `chat.queue_depth=0`, sends two turns
+back to back and confirms the second gets `queue_full` immediately (#1),
+clears the override and confirms a second turn now queues instead (#2), and
+sets a second override that `GetDoctorReport` — called in that same process
+— reports under `behaviour_overrides` (#7).
 
 ---
 
@@ -491,3 +534,19 @@ comparison, not by reading the refactor and assuming it preserved output.
   deliberately did not create.
 - **Demo mode (F10c) is unaffected** — a new provider type, fixture
   library, and sample project, none of which this episode touches.
+- **CLI invocations cannot observe each other's overrides, by design — and
+  this will not bite F10b.** `cli.py` builds a fresh `Runtime` per
+  invocation, so a behaviour override set by one `cli.py behaviour set` call
+  is invisible to the next `cli.py` call; only a script holding one `Runtime`
+  for multiple operations (`tests\manual_b26_behaviour_overrides.py`) can see
+  its own override take effect. This is not a gap: F10b's frontend drives
+  `SetBehaviourOverride` and `GetDoctorReport` through the one long-lived
+  backend connection the real app always has, so it will never hit this.
+  It matters only for a human re-verifying this episode by hand with
+  sequential CLI commands — exactly the trap the first attempt at this
+  episode's own verification gate fell into. If a future episode's doc
+  proposes proving backend state across two separate `cli.py` calls, check
+  first whether the state in question is in-memory-only (like this one) or
+  DB-backed (like sessions/tasks, which do survive across `cli.py`
+  invocations via the shared SQLite file) — only the latter can actually be
+  tested that way.
