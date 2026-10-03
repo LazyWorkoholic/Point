@@ -72,13 +72,24 @@ SESSION  EPISODE                          MODEL         WHY
                                                         no-provider state, and the
                                                         Providers+Appearance tabs
                                                         only.
-16c      F10b behaviour overrides +       Sonnet high   plumbing once its own
-         doctor in About                                backend episode exists --
-                                                        same shape as B20/S13d.
-                                                        Escalate only if the runtime
-                                                        override layer turns out to
-                                                        interact with the scheduler's
-                                                        concurrency gate.
+16a      B26 behaviour overrides +         Sonnet high   plumbing over seven existing
+         doctor wire (backend)                          config_value() call sites and
+                                                        cmd_doctor's own print
+                                                        sequence -- same shape as
+                                                        B20/B25. The one real catch
+                                                        (asyncio.run() inside the wire
+                                                        handler's already-running
+                                                        event loop) is already found
+                                                        and documented in the task
+                                                        doc, not something to
+                                                        discover mid-session.
+16c      F10b behaviour overrides +       Sonnet high   plumbing now that B26 (16a)
+         doctor in About                                has landed -- same shape as
+                                                        B20/S13d. Escalate only if
+                                                        the runtime override layer
+                                                        turns out to interact with
+                                                        the scheduler's concurrency
+                                                        gate.
 16d      F10c demo mode                   Opus medium   fixture design + timed
                                                         replay is product judgment,
                                                         not plumbing -- and the

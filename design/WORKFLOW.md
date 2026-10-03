@@ -1369,27 +1369,91 @@ to re-derive any of it.
 
 ---
 
+# SESSION 16a — B26 Behaviour Overrides + `doctor` on the Wire
+
+**Goal:** the Behaviour tab's settings get an in-memory override layer the
+scheduler and two managers can consult ahead of `config.toml`, and `point
+doctor`'s report becomes reachable from a running app instance instead of
+only a separate process's stdout.
+
+**Why this episode exists.** Session 16 (F10) was narrowed before this
+session ran, on the grounds that the Behaviour tab's live-override path and
+the About tab's `doctor` action both assumed backend surface this repo does
+not have — `chat.queue_depth`, `limits.*.max_concurrent_tasks`,
+`project.allow_outside_project`, `index.respect_gitignore`, and
+`research.stale_after_days` are all read with `appconfig.config_value()`,
+which only ever looks at `config.toml`; `point doctor` is a synchronous CLI
+subcommand (`cli.py:1197`) that prints straight to stdout, with no function
+anywhere that returns its report as data. Full trace in
+`design/tasks/backend/B26-behaviour-overrides-doctor-wire.md`'s "Why this
+episode exists".
+
+**Paste:**
+```
+Read CLAUDE.md and design/tasks/backend/B26-behaviour-overrides-doctor-wire.md.
+
+Two things, nothing beyond them: (1) appconfig_overrides.py's in-memory
+layer plus SetBehaviourOverride/BehaviourOverrideSet, wired into the seven
+named config_value() call sites via config_value_live(); (2)
+build_doctor_report() extracted from cmd_doctor, plus
+GetDoctorReport/DoctorReport reusing it verbatim.
+
+Read the "Correction before you start" section before touching cli.py --
+_ollama_report()'s asyncio.run() will raise if called from inside the
+wire handler's already-running event loop. Extract the coroutine as the
+doc describes; do not rewrite the probe logic.
+
+Do NOT add a scrollback or idle-unload-timeout key -- neither has a
+backend concept to override yet (idle-unload belongs to the still-unbuilt
+B15). Do NOT widen the override layer beyond the named ALLOWED_KEYS.
+
+Stop at the verification gate with PowerShell checks. Done-when #4 (doctor's
+printed output byte-identical to before this episode) must be diffed, not
+eyeballed.
+
+If anything in this episode's Build section is ambiguous or seems to
+assume something not true of this repo, stop and tell me before writing
+code.
+```
+
+**You do:** diff `cli.py doctor`'s output against a pre-episode capture
+(Done-when #4), and confirm `GetDoctorReport` does not raise the
+running-loop `RuntimeError` (Done-when #6) — both are the actual point of
+this episode; a diff that "looks right" is not evidence either one holds.
+
+**Record:**
+```
+Write design/completed/backend/B26-behaviour-overrides-doctor-wire.md
+following the format in design/completed/backend/INDEX.md. Include the
+bugs we hit and how they were fixed, and what the next episode inherits.
+Add a row to that INDEX.md's status table.
+
+Confirm explicitly, with actual command output: an override changes real
+scheduler/guard behaviour, an unlisted key is rejected, an override does
+not survive a process restart, and cli.py doctor's non-wire output is
+unchanged. F10b resumes immediately after this, scoped to wiring its
+Behaviour tab and About card to these two events.
+```
+
+**Then:** commit · `/clear`
+
+---
+
 # SESSION 16c — F10b Settings: Behaviour Overrides + `doctor` in About
 
 **Goal:** the Behaviour tab stops being a read-only mirror of `config.toml`
 and the About tab's `point doctor` action has something to call.
 
-**Prerequisites:** a backend episode that does not exist yet — a runtime
-override layer the scheduler, path guard, and project manager can consult
-ahead of `config.toml` (so `chat.queue_depth`, `limits.max_concurrent_tasks`,
-`project.allow_outside_project`, `index.respect_gitignore`, and
-`stale_after_days` can change without writing the user's file), plus a
-`doctor` wire event so the report `cli.py doctor` prints can reach a running
-app instance instead of only a separate process's stdout. **Scope and write
-that backend episode's task doc before this session starts** — the same
-shape S13d used when a task doc could not be written accurately before its
-prerequisite's shape was known.
+**Prerequisites:** Session 16a (B26) — `SetBehaviourOverride`/
+`BehaviourOverrideSet` and `GetDoctorReport`/`DoctorReport` — must have
+landed. See `design/completed/backend/B26-behaviour-overrides-doctor-wire.md`
+for the events' exact shapes once that session records it.
 
 **Paste:**
 ```
 Read CLAUDE.md, design/tasks/frontend/F10-settings-first-run.md's
 "Behaviour" and "About" bullets under Settings popup (UI-03), and
-<the backend episode's completed doc, once it exists>.
+design/completed/backend/B26-behaviour-overrides-doctor-wire.md.
 
 FIRST, before any code: write design/tasks/frontend/F10b-settings-
 behaviour-doctor.md, in the same shape as F9a/B23's task docs. Scope,
