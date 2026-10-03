@@ -47,6 +47,13 @@ const (
 	// from ListProjectFiles' indexed/gitignore-aware/cached file tree.
 	CmdListAgents    = "ListAgents"
 	CmdListDirectory = "ListDirectory"
+	// F10b's Behaviour tab and About tab (B26). SetBehaviourOverride's
+	// payload is {"key": str, "value": any} to set, or {"key": str} with
+	// no "value" field to clear -- the same "same key, presence of a field
+	// changes the verb" shape DetachContext already uses, mirrored here
+	// rather than invented twice.
+	CmdSetBehaviourOverride = "SetBehaviourOverride"
+	CmdGetDoctorReport      = "GetDoctorReport"
 )
 
 // Events — Python to Go (OutgoingEventType).
@@ -109,6 +116,13 @@ const (
 	// F8's @ picker (B23): the replies to ListAgents / ListDirectory.
 	EvAgentList     = "AgentList"
 	EvDirectoryList = "DirectoryList"
+
+	// F10b's Behaviour tab and About tab (B26). BehaviourOverrideSet
+	// echoes back the FULL current override map on every change, not just
+	// the key just touched -- matching ProviderApiKeySet's own precedent.
+	// DoctorReport's payload is build_doctor_report()'s dict verbatim.
+	EvBehaviourOverrideSet = "BehaviourOverrideSet"
+	EvDoctorReport         = "DoctorReport"
 )
 
 // Client-side pseudo-events. These never appear on the wire; the client

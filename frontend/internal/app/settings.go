@@ -25,6 +25,8 @@ import (
 const (
 	providersTabIndex  = 0
 	appearanceTabIndex = 1
+	behaviourTabIndex  = 2
+	aboutTabIndex      = 3
 )
 
 // providerCatalogEntry is one row the chooser can ever offer.
@@ -143,6 +145,17 @@ type settingsState struct {
 	// hang; see settingsSend's doc). retrySettingsIfAwaiting, called from
 	// Root's ConnectedMsg case, is what gives it a second chance.
 	awaitingConnection bool
+
+	// behaviourReqID is F10b's own map, keyed by the Behaviour key a
+	// SetBehaviourOverride request was sent for — plural, unlike
+	// providersReqID/setKeyReqID, because a bool toggle and a numeric
+	// prompt's submit can each be in flight for a DIFFERENT key at once
+	// (e.g. toggling "Allow outside project" while a numeric prompt for
+	// "Stale after (days)" is still open from a moment ago).
+	behaviourReqID map[string]string
+
+	// doctorReqID is the in-flight GetDoctorReport request, if any.
+	doctorReqID string
 }
 
 // openSettingsPopup builds and opens the Settings popup, then asks for the
@@ -168,6 +181,8 @@ func newSettingsPopup(r *Root) *Popup {
 		Tabs: []PopupTab{
 			{Label: "Providers", Items: newProvidersTabItems(r)},
 			{Label: "Appearance", Items: newAppearanceTabItems(r)},
+			{Label: "Behaviour", Items: newBehaviourTabItems(r)},
+			{Label: "About", Items: newAboutTabItems(r)},
 		},
 		// 74x16: the palette/Help/picker's established 70x16 (overlay.go's
 		// doc: raised twice during verification, landing on
@@ -203,6 +218,22 @@ func newSettingsPopup(r *Root) *Popup {
 				Run: func(it *array.Item) tea.Cmd {
 					id, _ := strings.CutPrefix(it.GetID(), "provider:")
 					return r.openCredentialPrompt(id)
+				},
+			},
+			{
+				Key:   "ctrl+x",
+				Label: "clear override",
+				When: func(it *array.Item) bool {
+					key, ok := strings.CutPrefix(it.GetID(), "behaviour:")
+					if !ok {
+						return false
+					}
+					_, overridden := r.behaviourOverrides[key]
+					return overridden
+				},
+				Run: func(it *array.Item) tea.Cmd {
+					key, _ := strings.CutPrefix(it.GetID(), "behaviour:")
+					return r.clearBehaviourOverride(key)
 				},
 			},
 		},
@@ -303,6 +334,9 @@ func (r *Root) settingsDecor(it *array.Item) RowDecor {
 		return r.backgroundRowDecor(mode)
 	case id == "mouse":
 		return r.mouseRowDecor()
+	case strings.HasPrefix(id, "behaviour:"):
+		key, _ := strings.CutPrefix(id, "behaviour:")
+		return r.behaviourRowDecor(key)
 	}
 	return RowDecor{}
 }
@@ -317,6 +351,17 @@ func (r *Root) settingsDecor(it *array.Item) RowDecor {
 // no way to tell "about to resolve" from "never going to" apart — it
 // disappears the moment r.settings.health is populated, even partially.
 func (r *Root) settingsHint() string {
+	// The Queue depth row's own "⚠ · inert" decor (behaviour.go) flags
+	// that it is not yet reachable, but a glyph and a note-column suffix
+	// cannot carry the WHY — this is the one line that does, the moment
+	// that specific row is actually selected. Checked first and
+	// unconditionally: it has nothing to do with whether providers have
+	// answered yet, and must not be hidden behind that unrelated wait.
+	if p := r.settings.popup; p != nil {
+		if it, ok := p.menu.Selected(); ok && behaviourInertKeys[strings.TrimPrefix(it.GetID(), "behaviour:")] {
+			return "not yet enforced for plain chat sends (see F10b's Decision 4)"
+		}
+	}
 	if r.settings.providersReqID == "" && r.settings.health == nil {
 		// Never asked (e.g. no backend) — nothing to explain a wait for.
 		return ""
@@ -481,6 +526,11 @@ func (r *Root) onSettingsSelect(it *array.Item) (tea.Cmd, bool) {
 		return r.toggleMouse(), false
 	case id == "effort":
 		return r.cycleEffort(), false
+	case strings.HasPrefix(id, "behaviour:"):
+		key, _ := strings.CutPrefix(id, "behaviour:")
+		return r.onBehaviourSelect(key), false
+	case id == "about:doctor":
+		return r.onAboutSelect(), false
 	}
 	return nil, false
 }
@@ -509,6 +559,31 @@ func (r *Root) selectProvider(id string) tea.Cmd {
 	// what collapses whichever one was expanded before.
 	r.settings.expandedProvider = id
 	r.rebuildSettingsProvidersTab()
+
+	// Already the active default: Enter here means "show me its models",
+	// not "pick one for me". Falling through to finalizeProviderSelection
+	// unconditionally would re-run applyProviderChoice's quick pick
+	// (always the alphabetically-first model, by its own doc) and PERSIST
+	// that as a new choice — silently reverting whatever SPECIFIC model
+	// selectSpecificModel had set, the moment the user re-opens Settings
+	// and expands the row to check what is active. Found via a live
+	// report of exactly this symptom (model reverted to
+	// alphabetically-first after restart) and confirmed NOT cosmetic: the
+	// revert happens in r.activeProvider itself and is emitted as a real
+	// ProviderDefaultSetMsg, which chat.Workspace persists to state.json
+	// — the bug was never in restart/replay, it was in this row's own
+	// Enter handler treating "look" and "choose" as the same action.
+	//
+	// Still fetches if the models genuinely are not cached yet (a race
+	// with onSettingsProviderList's own eager fetch for the active
+	// default), but WITHOUT finalizing — so a fetch landing afterward
+	// shows the list without also overwriting the already-correct choice.
+	if r.activeProvider != nil && r.activeProvider.Provider == id {
+		if _, cached := r.settings.models[id]; !cached {
+			return r.settingsFetchModels(id)
+		}
+		return nil
+	}
 	return r.finalizeProviderSelection(id)
 }
 
@@ -766,6 +841,16 @@ func (r *Root) handleSettingsEnvelope(env protocol.Envelope) tea.Cmd {
 	if env.CorrID == r.settings.setKeyReqID {
 		r.settings.setKeyReqID = ""
 		return r.onSettingsKeySet(env)
+	}
+	for key, reqID := range r.settings.behaviourReqID {
+		if env.CorrID == reqID {
+			delete(r.settings.behaviourReqID, key)
+			return r.onBehaviourOverrideSet(key, env)
+		}
+	}
+	if env.CorrID == r.settings.doctorReqID {
+		r.settings.doctorReqID = ""
+		return r.onDoctorReport(env)
 	}
 	return nil
 }

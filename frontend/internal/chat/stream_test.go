@@ -152,6 +152,100 @@ func TestCancelFiresTheQueuedMessage(t *testing.T) {
 	wantReplies(t, w, 2, "after cancel drained the queue")
 }
 
+// TestInputFullyRecoversAfterDiscard is a live-testing report's exact
+// sequence: set queue_depth=N, send "hi one", immediately send "hi
+// two" while "hi one" is still streaming, confirm the input locks,
+// confirm esc's own mechanism (discardPending) actually frees it, and
+// — crucially, which TestDiscardAndEditReleaseTheLock did not check —
+// confirm a REAL subsequent keystroke, run through handleInputKey
+// itself rather than the typeInput test shortcut, is actually
+// inserted, and that Enter afterward actually sends again.
+//
+// CONFIRMED ROOT CAUSE, not a bug (Aryan's explicit call,
+// F10b-settings-behaviour-doctor.md's Decision 4): what "queue_full"
+// names here is F5's own LOCAL one-slot compose-ahead queue (w.queued,
+// a single *queuedSend, capacity exactly 1 by design — "a queue that
+// cannot hold two cannot be indexed wrong", this file's own
+// queuedSend doc). It predates B26/F10b entirely, from when the
+// backend's own queue depth was a hardcoded 1 — so one local slot was
+// a correct match for the backend's capacity at the time. B26 made
+// the backend's depth configurable; NOTHING connects that live value
+// to this local queue's own capacity, which is still exactly 1
+// regardless of what chat.queue_depth is set to. A second rapid send
+// NEVER reaches the wire at all — onSend()'s own check
+// (`w.activeTurn() != nil`) catches it locally — so at ANY configured
+// depth (2, 5, whatever), typing a third message while the second
+// sits in this one local slot reproduces the "every other send
+// refused" symptom, indefinitely, by design. This is NOT the same
+// mechanism as the backend's real admission (B26/F10b's own
+// regression coverage, backend\tests\manual_b26_behaviour_overrides.py's
+// #1b/#1c, which DOES correctly move the refusal point with depth —
+// that refusal only fires for a turn that actually reaches the wire,
+// which a second rapid UI send never does).
+//
+// Decided explicitly: left as is. Checked directly, not assumed: this
+// key has NO reachable, observable path through the shipped app at
+// ANY configured value, not merely a harder-to-see one. @research is
+// NOT an alternative way to observe it — @research is exempt from
+// _check_turn_queue entirely (runtime.py:894/921-922, is_bounded_loop)
+// and never even takes a turn-lane slot (runtime.py:931,
+// executor.py:525-529), so it exercises limits.max_concurrent_tasks,
+// a different key behind a different check, and proves nothing about
+// this one. The ONLY thing that currently exercises chat.queue_depth
+// at all is backend\tests\manual_b26_behaviour_overrides.py's #1b,
+// which calls Runtime.receive() directly, deliberately bypassing this
+// very gate. Resizing this local queue to match the live depth, or
+// removing it in favor of letting every send hit the backend's own
+// (already correct) admission directly, were both considered and
+// explicitly declined for this episode — see the task doc's Decision 4
+// for the tradeoffs and the full, corrected writeup.
+//
+// This test exists to pin the ACTUAL behavior (capacity 1, recoverable
+// via esc, fully functional afterward) so nobody mistakes "every
+// second send locks" for a regression later.
+func TestInputFullyRecoversAfterDiscard(t *testing.T) {
+	w := newStreamWorkspace(t)
+
+	typeInput(w, "first")
+	w.onSend()
+	if w.activeTurn() == nil {
+		t.Fatal("first send did not occupy the turn lane")
+	}
+
+	typeInput(w, "second")
+	w.onSend()
+	if !w.inputLocked() {
+		t.Fatal("second send while first is active should have locked the input")
+	}
+	if got := w.input.buf.text(); got != "" {
+		t.Fatalf("input box has leftover text %q right after queuing -- should be cleared", got)
+	}
+
+	w.discardPending()
+	if w.inputLocked() {
+		t.Fatal("discardPending did not unlock the input")
+	}
+
+	// Through the REAL handler, not the typeInput shortcut -- this is
+	// what a live keystroke actually calls.
+	for _, r := range "third" {
+		w.handleInputKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+	}
+	if got := w.input.buf.text(); got != "third" {
+		t.Fatalf("typing after discard produced %q, want %q -- input did not actually recover", got, "third")
+	}
+
+	// The turn lane is still occupied by "first", so Enter here should
+	// queue again, cleanly -- not error, not leave text stuck.
+	w.handleInputKey(tea.KeyMsg{Type: tea.KeyEnter})
+	if w.queued == nil {
+		t.Fatal("Enter after recovery did not queue the new message -- send is still broken")
+	}
+	if got := w.input.buf.text(); got != "" {
+		t.Fatalf("input box has leftover text %q after the second send -- should be cleared", got)
+	}
+}
+
 func TestDiscardAndEditReleaseTheLock(t *testing.T) {
 	w := newStreamWorkspace(t)
 	typeInput(w, "first")

@@ -175,3 +175,21 @@ func (w *Workspace) applyUIOverride(patch config.UIOverride) {
 		w.log.Warn("saving the appearance override", "err", err)
 	}
 }
+
+// applyBehaviourOverrides is app.BehaviourOverridesSetMsg's handler (F10b)
+// — the same immediate-persist rule applyProviderDefault/applyUIOverride
+// use, but a full REPLACE rather than a merge: unlike UIOverrideSetMsg
+// (one field at a time, because theme/background/mouse are independent
+// choices), BehaviourOverrideSet's own wire reply already IS the complete
+// resulting override map (B26 §1b echoes it back whole on every change),
+// so there is nothing to merge — whatever Root just received from the
+// backend is, by definition, every override currently active.
+func (w *Workspace) applyBehaviourOverrides(overrides map[string]any) {
+	w.state.BehaviourOverrides = overrides
+	if w.saveStateFn == nil {
+		return
+	}
+	if err := w.saveStateFn(w.state); err != nil {
+		w.log.Warn("saving the behaviour overrides", "err", err)
+	}
+}

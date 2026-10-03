@@ -66,6 +66,28 @@ type State struct {
 	// governs" — main.go applies this on top of config.Load()'s result
 	// before building the theme or the Bubble Tea program's mouse option.
 	UI *UIOverride `json:"ui,omitempty"`
+
+	// BehaviourOverrides is F10b's Behaviour tab: the keys B26's
+	// SetBehaviourOverride accepts (chat.queue_depth,
+	// limits.max_concurrent_tasks, project.allow_outside_project,
+	// index.respect_gitignore, research.stale_after_days), each mapped to
+	// whatever value the user last set it to. This is NOT a cache of what
+	// config.toml holds — Go never reads that table, and B26 deliberately
+	// built no way to ask the backend what it is either (see F10b's own
+	// Decision 2) — it exists for exactly one reason: the backend's own
+	// override layer is process-lifetime-only BY DESIGN
+	// (appconfig_overrides.py), so a restart of either process loses it on
+	// the backend side, and this is what lets the frontend re-send every
+	// entry via SetBehaviourOverride the moment a connection comes back up
+	// (app\root.go's replayBehaviourOverrides, fired from every
+	// protocol.ConnectedMsg — first launch and every later reconnect
+	// alike) rather than silently leaving an override reverted.
+	//
+	// nil/empty means nothing has ever been overridden through Point's own
+	// UI — there is nothing to replay, and the Behaviour tab's rows all
+	// read "default" (F10b's Decision 2: never a guessed config.toml
+	// value, only override state this process actually set itself).
+	BehaviourOverrides map[string]any `json:"behaviour_overrides,omitempty"`
 }
 
 // ProviderDefault is the active provider+model Point's own UI will pass on

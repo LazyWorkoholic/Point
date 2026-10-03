@@ -567,6 +567,8 @@ func (w *Workspace) Update(msg tea.Msg) (app.Workspace, tea.Cmd) {
 		w.applyProviderDefault(m.Default)
 	case app.UIOverrideSetMsg:
 		w.applyUIOverride(m.Override)
+	case app.BehaviourOverridesSetMsg:
+		w.applyBehaviourOverrides(m.Overrides)
 	case tea.KeyMsg:
 		if w.input.focused {
 			return w, w.handleInputKey(m)

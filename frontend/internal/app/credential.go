@@ -1,6 +1,7 @@
 package app
 
 import (
+	"strconv"
 	"strings"
 	"time"
 
@@ -13,13 +14,33 @@ import (
 // own section): a masked, single-line key field for a provider that needs
 // one, validated by the backend before anything is kept.
 //
+// F10b (the Behaviour tab's three numeric rows — chat.queue_depth,
+// limits.max_concurrent_tasks, research.stale_after_days) generalizes this
+// rather than building a second input overlay: this codebase has exactly
+// one text-entry mechanism, and a credential and a whole number differ only
+// in whether the typed text is masked and in which message submit() ends up
+// sending. behaviourKey set (instead of provider) is what selects the
+// Behaviour-entry half of every branch below.
+//
 // It is a bespoke Overlay rather than a Popup, for the same reason Confirm
 // is: a single input field with a status line is not a filterable list, and
 // bending Popup's own filter box into a credential field would fight its
 // "the filter is always live" rule (popup.go) rather than use it.
 type CredentialPrompt struct {
 	provider string // e.g. "openai" — never shown to the user; label is
-	label    string // "OpenAI"
+	label    string // "OpenAI", or a Behaviour row's own label ("Queue depth")
+
+	// behaviourKey set (provider left "") means this prompt is a Behaviour
+	// numeric entry, not a credential: submit() parses the typed text as an
+	// int and sends submitBehaviourValueMsg instead of submitCredentialMsg,
+	// and the field renders unmasked (see unmasked's own doc).
+	behaviourKey string
+
+	// unmasked renders the typed text plainly instead of as bullets. Always
+	// true together with behaviourKey != "" — a queue depth is not a
+	// secret, and F10's "never echoed" rule is about credentials
+	// specifically, not every field this type will ever grow.
+	unmasked bool
 
 	runes  []rune
 	cursor int
@@ -58,8 +79,26 @@ func newCredentialPrompt(provider, label string, returnTo *Popup) *CredentialPro
 	return &CredentialPrompt{provider: provider, label: label, returnTo: returnTo}
 }
 
+// newBehaviourValuePrompt opens the unmasked variant for one of the
+// Behaviour tab's three numeric rows. prefill is the digits to start the
+// field with — the current override's own value when one is already
+// active, "" otherwise (F10b's Decision 2: never a guessed config.toml
+// value, so there is nothing to prefill with when there is no override).
+func newBehaviourValuePrompt(key, label, prefill string, returnTo *Popup) *CredentialPrompt {
+	return &CredentialPrompt{
+		behaviourKey: key, label: label, returnTo: returnTo, unmasked: true,
+		runes: []rune(prefill), cursor: len([]rune(prefill)),
+	}
+}
+
 func (c *CredentialPrompt) MinSize() (int, int) { return 56, 9 }
-func (c *CredentialPrompt) Title() string       { return c.label + " API Key" }
+
+func (c *CredentialPrompt) Title() string {
+	if c.behaviourKey != "" {
+		return c.label
+	}
+	return c.label + " API Key"
+}
 
 func (c *CredentialPrompt) backCmd() tea.Cmd {
 	rt := c.returnTo
@@ -149,22 +188,40 @@ func (c *CredentialPrompt) insert(s string) {
 // protocol.EnvelopeMsg directly (root.go routes every envelope to the
 // active WORKSPACE only), so something outside this type has to carry the
 // reply back to it.
+//
+// The Behaviour branch (behaviourKey != "") validates the typed text as a
+// whole number BEFORE anything is sent — F10b Done-when #5: a round trip
+// for "a" is a wasted request the backend would reject anyway via its own
+// set_override shape check, not a case this field needs the network to
+// catch.
 func (c *CredentialPrompt) submit() (Overlay, tea.Cmd) {
-	key := strings.TrimSpace(string(c.runes))
-	if key == "" {
-		c.status, c.statusRole = "enter a key first", theme.Warning
+	text := strings.TrimSpace(string(c.runes))
+	if text == "" {
+		c.status, c.statusRole = "enter a value first", theme.Warning
 		return c, nil
+	}
+	if c.behaviourKey != "" {
+		n, err := strconv.Atoi(text)
+		if err != nil {
+			c.status, c.statusRole = "enter a whole number", theme.Warning
+			return c, nil
+		}
+		c.validating = true
+		c.status, c.statusRole = "setting…", theme.TextDim
+		key := c.behaviourKey
+		return c, func() tea.Msg { return submitBehaviourValueMsg{key: key, value: n} }
 	}
 	c.validating = true
 	c.status, c.statusRole = "validating…", theme.TextDim
 	provider := c.provider
-	return c, func() tea.Msg { return submitCredentialMsg{provider: provider, key: key} }
+	return c, func() tea.Msg { return submitCredentialMsg{provider: provider, key: text} }
 }
 
-// applyResult is settings.go's own hook once the SetProviderApiKey reply
-// lands — called directly on this instance (Root still holds the pointer
-// via settingsState.credential), never through Update, since the message
-// that carries the reply is protocol.EnvelopeMsg, routed to the ACTIVE
+// applyResult is settings.go's own hook once the SetProviderApiKey (or, for
+// a Behaviour row, the SetBehaviourOverride) reply lands — called directly
+// on this instance (Root still holds the pointer via
+// settingsState.credential), never through Update, since the message that
+// carries the reply is protocol.EnvelopeMsg, routed to the ACTIVE
 // WORKSPACE, not to this overlay.
 func (c *CredentialPrompt) applyResult(ok bool, detail string) {
 	c.validating = false
@@ -181,20 +238,34 @@ func (c *CredentialPrompt) View(th theme.Theme, w, h int) string {
 		textW = 1
 	}
 
+	prompt := "Paste or type the " + c.label + " API key. Never echoed."
+	fieldLabel := "key: "
+	footerHint := "⏎ validate   esc back"
+	if c.behaviourKey != "" {
+		prompt = "Enter a whole number for " + c.label + "."
+		fieldLabel = "value: "
+		footerHint = "⏎ set   esc back"
+	}
+
 	var b strings.Builder
-	b.WriteString(th.Style(theme.TextSecondary).Render(padCells(
-		"Paste or type the "+c.label+" API key. Never echoed.", textW)))
+	b.WriteString(th.Style(theme.TextSecondary).Render(padCells(prompt, textW)))
 	b.WriteByte('\n')
 	b.WriteByte('\n')
 
 	// Masked entirely while composing — F10: "never echoed; only the last 4
 	// shown after saving", and saving only ever happens inside Root, after
 	// a HEALTHY reply, at which point this overlay is already closed. There
-	// is therefore no state in THIS type that ever earns anything but a
-	// bullet per rune.
-	mask := strings.Repeat("•", len(c.runes))
-	label := th.Style(theme.TextDim).Render("key: ")
-	field := th.Style(theme.TextPrimary).Render(mask + "▏")
+	// is therefore no state in a CREDENTIAL prompt that ever earns anything
+	// but a bullet per rune. A Behaviour row (unmasked) is not a secret —
+	// rendered plainly, so the value just typed is actually readable.
+	var text string
+	if c.unmasked {
+		text = string(c.runes)
+	} else {
+		text = strings.Repeat("•", len(c.runes))
+	}
+	label := th.Style(theme.TextDim).Render(fieldLabel)
+	field := th.Style(theme.TextPrimary).Render(text + "▏")
 	b.WriteString(padCells(label+field, textW))
 	b.WriteByte('\n')
 	b.WriteByte('\n')
@@ -209,7 +280,7 @@ func (c *CredentialPrompt) View(th theme.Theme, w, h int) string {
 	} else {
 		b.WriteByte('\n')
 	}
-	b.WriteString(th.Style(theme.TextDim).Render(padCells("⏎ validate   esc back", textW)))
+	b.WriteString(th.Style(theme.TextDim).Render(padCells(footerHint, textW)))
 	return b.String()
 }
 
@@ -219,6 +290,15 @@ func (c *CredentialPrompt) View(th theme.Theme, w, h int) string {
 type submitCredentialMsg struct {
 	provider string
 	key      string
+}
+
+// submitBehaviourValueMsg is submit()'s Behaviour-row counterpart to
+// submitCredentialMsg — same reason, same shape: this type cannot reach
+// protocol.Client itself, so Root (behaviour.go) runs the actual
+// SetBehaviourOverride round trip once this message reaches it.
+type submitBehaviourValueMsg struct {
+	key   string
+	value int
 }
 
 var _ Overlay = (*CredentialPrompt)(nil)

@@ -27,8 +27,8 @@ it passed.
 | **F9a** | **Task Tray + Result Cards (F9, SPLIT)** | 🟡 **built + manually verified — F9 NOT complete; F9b + F9c are the remainder** | `F09a-task-tray-cards.md` |
 | F9b | Diff Card | not started — blocked on F13 + B24 | — |
 | F9c | Result Card Attach + Save | not started — blocked on B13 + an unspecced B12 attachment-source extension | — |
-| **F10** | **Settings, Providers, First Run (F10, narrowed)** | 🟡 **built + manually verified — F10 NOT complete; F10b + F10c are the remainder** | `F10-settings-first-run.md` |
-| F10b | Settings — Behaviour Overrides + `doctor` in About | not started — blocked on a not-yet-scoped backend episode (runtime override layer + a `doctor` wire event) | — |
+| **F10** | **Settings, Providers, First Run (F10, narrowed)** | 🟡 **built + manually verified — F10 NOT complete; F10c is the remainder** | `F10-settings-first-run.md` |
+| F10b | Settings — Behaviour Overrides + `doctor` in About | ✅ built + manually verified | `F10b-settings-behaviour-doctor.md` |
 | F10c | Settings — Demo Mode | not started — blocked on a not-yet-scoped backend episode (new provider type + fixture library + sample project) | — |
 | F11–F18 | — | not started | — |
 

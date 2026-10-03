@@ -84,12 +84,46 @@ SESSION  EPISODE                          MODEL         WHY
                                                         doc, not something to
                                                         discover mid-session.
 16c      F10b behaviour overrides +       Sonnet high   plumbing now that B26 (16a)
-         doctor in About                                has landed -- same shape as
+         doctor in About (done)                         has landed -- same shape as
                                                         B20/S13d. Escalate only if
                                                         the runtime override layer
                                                         turns out to interact with
                                                         the scheduler's concurrency
                                                         gate.
+                                                        -- IT DID, and the estimate's
+                                                        own escalation trigger was
+                                                        never needed: four live-
+                                                        verification rounds surfaced
+                                                        a real correctness bug
+                                                        (provider re-expand silently
+                                                        reverting a specific model
+                                                        choice), a genuine
+                                                        chat.queue_depth/scheduler
+                                                        interaction (the frontend's
+                                                        OWN unrelated local queue, not
+                                                        the override layer, gates
+                                                        every plain-chat send to one
+                                                        slot regardless of configured
+                                                        depth -- found by direct
+                                                        file:line trace, not guessed),
+                                                        a self-caught correction on
+                                                        this episode's own first
+                                                        write-up of that finding
+                                                        (claimed "@research proves it
+                                                        works" without checking --
+                                                        @research reads a DIFFERENT
+                                                        key entirely), and three
+                                                        rendering bugs in one new row
+                                                        -- all handled on Sonnet high,
+                                                        no escalation. The pattern each
+                                                        time: render/trace the REAL
+                                                        thing (Popup.View at real
+                                                        width, the actual call chain
+                                                        with line numbers) rather than
+                                                        reasoning from a mental model
+                                                        of it -- every wrong claim in
+                                                        this session was a mental
+                                                        shortcut standing in for that.
 16d      F10c demo mode                   Opus medium   fixture design + timed
                                                         replay is product judgment,
                                                         not plumbing -- and the
@@ -97,6 +131,20 @@ SESSION  EPISODE                          MODEL         WHY
                                                         blocked on F9b/F13, so this
                                                         row may need re-splitting
                                                         again once scoped.
+16e      B27 doctor resolved behaviour     Sonnet high   plumbing over two functions
+         values                                         that already exist
+                                                        (config_value,
+                                                        get_override) -- same shape
+                                                        as B20/B25/B26. The one real
+                                                        discipline is Done-when #4:
+                                                        resolved must stay the
+                                                        config.toml/fallback value
+                                                        even while an override is
+                                                        active, or the field is just
+                                                        config_value_live() renamed
+                                                        -- test that explicitly,
+                                                        don't assume it from the
+                                                        diff.
 16b      F18 windowed history             Opus high
 17       F12 workspace lifecycle          Opus high     Suspend/Resume + timers;
                                                         wrong here breaks silently

@@ -116,6 +116,50 @@ can call a renderer, the theming is free.
 Confirmed with Aryan during F9a's verification as a deliberate deferral to
 this episode, not an open gap. See `design/completed/frontend/F09a-task-tray-cards.md`.
 
+### The @ picker's refusal notice is treated as a filterable row — found during F10b
+
+`pickerShowRefusal` (`app\picker.go`) renders an attach refusal (e.g. a
+binary file, or — once F10b's Behaviour tab exists — an outside-project
+path with the override off) by prepending synthetic
+`array.NewItem(fmt.Sprintf("__refused__%d", i), line).SetDisabled(true)`
+rows ahead of the real agent/directory items, then calling
+`r.picker.popup.SetItems(combined)`.
+
+`.SetDisabled(true)` correctly makes Enter on that row a no-op (the same
+behaviour F8's "no background tasks" placeholder row already has) — that
+part is not the bug. The bug is that `array.Menu`/`Popup` treat this
+notice row as ordinary DATA for two purposes it should never participate
+in:
+
+1. **It counts.** The footer's `n/total` indicator (`popup.go`) counts
+   every item `Menu.Len()` sees, notice rows included — so a directory
+   with 7 real entries and one refusal notice reads `8/8`, which is a
+   count of something that is not an entry.
+2. **It filters.** The notice is an ordinary row in the same filterable
+   list, so typing a path segment (e.g. `..` to navigate up, in browse
+   mode) runs the SAME fuzzy/prefix match against the notice's own text
+   as it does against real entries — it can be filtered in or out
+   alongside directories and files it has nothing to do with, and
+   because it is also disabled, a user who manages to filter it
+   in and presses Enter on it gets the silent no-op described above
+   with no indication why.
+
+**Exact repro:** attach a file the backend refuses (a binary file is the
+easiest — B12's own existing, correct guard), then in the SAME picker
+session type `..` into the filter to browse up a directory. The refusal
+notice line is filtered in or out exactly like a real directory entry
+would be, and if it survives the filter and is selected, Enter does
+nothing.
+
+**Not this episode's fix.** The real fix is a way to mark a row as
+*chrome* — excluded from both `Menu.Len()`'s count and `Filter()`'s
+matching, shown unconditionally at a fixed position — which
+`array.Item`/`Popup`/`array.Menu` have no concept of today. F8's
+disabled placeholder rows (`"no background tasks"`, `"Loading…"`) have
+the same shape and would likely want the same mechanism once it exists,
+so this is a small, narrow addition to `array`'s own API, not a
+picker-local patch.
+
 ### Demo recording
 Record the v1 demo script — **the one in `design/WORKFLOW.md` under "What done
 looks like"**, which covers ghost text, autosave + web preview, per-workspace

@@ -227,6 +227,35 @@ func TestApplyProviderDefaultSkipsRetrofitWithNoOpenSession(t *testing.T) {
 	}
 }
 
+// TestApplyBehaviourOverridesReplacesRatherThanMerges is F10b's own
+// precedent, exercised at the persistence boundary: BehaviourOverrideSet's
+// wire reply already carries the FULL resulting override map (B26 §1b), so
+// applyBehaviourOverrides must replace w.state.BehaviourOverrides wholesale
+// — unlike applyUIOverride's PATCH semantics (theme/background/mouse are
+// independent fields), there is nothing here to merge.
+func TestApplyBehaviourOverridesReplacesRatherThanMerges(t *testing.T) {
+	w := newTestWorkspace(t)
+	w.state.BehaviourOverrides = map[string]any{"chat.queue_depth": float64(9)} // stale
+	var saved config.State
+	saveCalls := 0
+	w.saveStateFn = func(s config.State) error { saved = s; saveCalls++; return nil }
+
+	w.applyBehaviourOverrides(map[string]any{"project.allow_outside_project": true})
+
+	if saveCalls != 1 {
+		t.Fatalf("saveStateFn called %d times, want 1", saveCalls)
+	}
+	if len(saved.BehaviourOverrides) != 1 {
+		t.Fatalf("persisted overrides = %v, want exactly the new map", saved.BehaviourOverrides)
+	}
+	if v, _ := saved.BehaviourOverrides["project.allow_outside_project"].(bool); !v {
+		t.Errorf("project.allow_outside_project = %v, want true", saved.BehaviourOverrides["project.allow_outside_project"])
+	}
+	if _, stale := saved.BehaviourOverrides["chat.queue_depth"]; stale {
+		t.Error("the stale queue_depth entry survived — applyBehaviourOverrides must replace, not merge")
+	}
+}
+
 // TestOnSessionProviderUpdatedRefreshesTheStatusCard confirms the reply
 // actually reaches cards.go's own read of this workspace's state, and that
 // a reply for a DIFFERENT session (the active session changed while the

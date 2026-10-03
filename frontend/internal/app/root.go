@@ -147,6 +147,19 @@ type Root struct {
 	// comment for why an overlay cannot open any earlier than that.
 	needsProviderSetup bool
 
+	// behaviourOverrides is F10b's own copy of the Behaviour tab's active
+	// overrides -- what behaviourRowDecor renders (behaviour.go) and what
+	// replayBehaviourOverrides resends on every protocol.ConnectedMsg.
+	// Seeded at New() from opts.State.BehaviourOverrides (chat.Workspace is
+	// the sole state.json writer of its own copy, same rule activeProvider
+	// already follows -- see config\state.go's own doc on
+	// BehaviourOverrides and chat\providers.go's applyBehaviourOverrides),
+	// then kept current from each SetBehaviourOverride reply's own echoed
+	// map (behaviour.go's onBehaviourOverrideSet) -- never written here
+	// optimistically, so this field only ever holds what the backend has
+	// actually confirmed (F10b's Decision 2).
+	behaviourOverrides map[string]any
+
 	// mouseEnabled mirrors whatever mouse option main.go actually gave
 	// tea.NewProgram, the one piece of runtime state this package cannot
 	// read back from Bubble Tea itself -- Settings' Appearance tab (F10)
@@ -258,6 +271,7 @@ func New(opts Options) (*Root, error) {
 		activeProvider:     opts.State.Provider,
 		needsProviderSetup: opts.State.Provider == nil,
 		mouseEnabled:       opts.MouseEnabled,
+		behaviourOverrides: opts.State.BehaviourOverrides,
 	}
 	r.ListTasksFn = r.sendListTasks
 	r.SettingsSendFn = r.settingsSend
@@ -493,7 +507,16 @@ func (r *Root) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		ws, wsCmd := r.current().Update(m)
 		r.workspaces[r.active] = ws
 		r.refreshTasks()
-		return r, tea.Batch(r.afterBackend(), wsCmd, r.retryPickerIfAwaiting(), r.retrySettingsIfAwaiting())
+		// F10b Decision 1: every connect AND every later reconnect --
+		// including one caused by the BACKEND restarting while this
+		// process keeps running -- replays every currently-confirmed
+		// Behaviour override, since B26's own override layer forgets them
+		// on that side by design. See replayBehaviourOverrides' own doc
+		// for why resending r.behaviourOverrides wholesale here is also
+		// what makes a reconnect with MULTIPLE active overrides correct,
+		// not just the most recently changed one.
+		return r, tea.Batch(r.afterBackend(), wsCmd, r.retryPickerIfAwaiting(),
+			r.retrySettingsIfAwaiting(), r.replayBehaviourOverrides())
 
 	case protocol.VersionMismatchMsg:
 		// Refuse, with BOTH versions named. This is the envelope version from
@@ -587,6 +610,11 @@ func (r *Root) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// CredentialPrompt's own Update cannot reach protocol.Client —
 		// see credential.go's doc on submitCredentialMsg.
 		return r, r.settingsSubmitKey(m.provider, m.key)
+
+	case submitBehaviourValueMsg:
+		// Same reason, the Behaviour tab's numeric-entry counterpart — see
+		// credential.go's doc on submitBehaviourValueMsg.
+		return r, r.settingsSubmitBehaviourValue(m.key, m.value)
 
 	case OpenAttachmentPickerMsg:
 		// F8's @ picker — see picker.go. Root, not the workspace, opens

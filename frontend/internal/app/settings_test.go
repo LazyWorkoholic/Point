@@ -235,6 +235,77 @@ func TestSelectingAProviderExpandsItAndCollapsesWhicheverWasExpanded(t *testing.
 	}
 }
 
+// TestReExpandingTheActiveProviderDoesNotRevertASpecificModelChoice is the
+// fix for a real bug found via a live-testing report during F10b: after
+// selectSpecificModel sets a NON-alphabetically-first model as the active
+// default (restored correctly from state.json after a restart,
+// independently of this bug), simply pressing Enter on the provider row
+// to RE-EXPAND it and look at the model list — the only way this tab lets
+// you see them — used to unconditionally re-run applyProviderChoice's
+// quick pick (always models[0]) and PERSIST that as a new choice via a
+// real ProviderDefaultSetMsg. The active model reverting to
+// alphabetically-first was never cosmetic and was never a restart/replay
+// bug: it was this row's own Enter handler treating "look" and "choose"
+// as the same action. selectProvider must leave an ALREADY-active
+// provider's model choice untouched; only choosing a DIFFERENT provider
+// (or this one for the first time) should apply the quick pick.
+func TestReExpandingTheActiveProviderDoesNotRevertASpecificModelChoice(t *testing.T) {
+	r := newRoot(t)
+	r.settings.health = map[string]providerHealthInfo{"ollama": {status: "healthy"}}
+	r.settings.models = map[string][]providerModelInfo{
+		"ollama": {
+			{id: "llama3.2:3b"},      // sorts first -- the quick pick's own default
+			{id: "qwen2.5-coder:3b"}, // the user's actual, specific choice
+		},
+	}
+	r.activeProvider = &config.ProviderDefault{Provider: "ollama", Model: "qwen2.5-coder:3b"}
+
+	cmd := r.selectProvider("ollama") // Enter on the provider row, to re-expand and look
+
+	if r.activeProvider.Model != "qwen2.5-coder:3b" {
+		t.Fatalf("re-expanding reverted the active model: got %q, want qwen2.5-coder:3b (unchanged)",
+			r.activeProvider.Model)
+	}
+	// Stronger than "if cmd fires a message, that message isn't
+	// ProviderDefaultSetMsg": expanding an already-active provider whose
+	// models are already cached has NOTHING to do, so the command itself
+	// must be nil. ProviderDefaultSetMsg is the ONLY thing that reaches
+	// chat.Workspace.applyProviderDefault, which is the ONLY thing that
+	// sends SetSessionProvider (chat\providers.go) -- a nil cmd here is
+	// what proves neither ever fires, not just that this ONE message type
+	// didn't.
+	if cmd != nil {
+		t.Fatalf("re-expanding an already-active, already-cached provider produced a "+
+			"command (%v) -- there is nothing to persist or send, nothing changed", cmd())
+	}
+	// The row is still expanded, same as before this fix.
+	if r.settings.expandedProvider != "ollama" {
+		t.Fatalf("expandedProvider = %q, want ollama", r.settings.expandedProvider)
+	}
+}
+
+// TestSelectingADifferentProviderStillAppliesTheQuickPick is this fix's
+// other half: the guard above must not swallow the ordinary "choosing a
+// provider for the first time, or switching to a different one" case,
+// which still needs applyProviderChoice's quick pick.
+func TestSelectingADifferentProviderStillAppliesTheQuickPick(t *testing.T) {
+	r := newRoot(t)
+	r.settings.health = map[string]providerHealthInfo{
+		"ollama": {status: "healthy"}, "openai": {status: "healthy"},
+	}
+	r.settings.models = map[string][]providerModelInfo{
+		"ollama": {{id: "llama3.2:3b"}},
+		"openai": {{id: "gpt-5"}},
+	}
+	r.activeProvider = &config.ProviderDefault{Provider: "ollama", Model: "llama3.2:3b"}
+
+	r.selectProvider("openai")
+
+	if r.activeProvider == nil || r.activeProvider.Provider != "openai" || r.activeProvider.Model != "gpt-5" {
+		t.Fatalf("switching to a different provider did not apply its quick pick: %+v", r.activeProvider)
+	}
+}
+
 // TestProviderRowShowsALoadingIndicatorWhileFetchingModels is the other
 // half of a verification question ("is switching providers slow, or is
 // there just no indicator?") — ListProviderModels genuinely is a network

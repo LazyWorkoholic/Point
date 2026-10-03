@@ -1524,6 +1524,62 @@ own Record step.
 
 ---
 
+# SESSION 16e — B27 Doctor Resolved Behaviour Values
+
+**Goal:** `GetDoctorReport` gains one new field — `behaviour_resolved` —
+so a human or a future frontend pass can see what each Behaviour key's
+`config.toml`/fallback value actually is, independent of any override.
+
+**Why this episode exists.** Found live during F10b's own verification
+(session 16c): the Behaviour tab's rows read `default`/`overridden → X`
+and can never show what `default` numerically means, because Go's
+`config.Load()` parses only the `[ui]` table and B26 deliberately did not
+add a `GetBehaviourOverrides` pull event (two ways to learn the same fact
+disagree eventually). The task doc already exists — this session reads
+it rather than writing it.
+
+**Paste:**
+```
+Read CLAUDE.md and
+design/tasks/backend/B27-doctor-resolved-behaviour-values.md.
+
+One new field only: RESOLVED_DEFAULTS + resolved_behaviour_settings() in
+appconfig_overrides.py, and one new line inside build_doctor_report()'s
+returned dict in cli.py. No new wire event, no CLI-output change
+(_print_doctor_report stays untouched), no per-provider cap family, no
+frontend code.
+
+The one check that actually proves this is not config_value_live()
+wearing a new name: with an override active for a key, `resolved` must
+still show config.toml's/fallback's value, never the override's own
+value.
+
+Stop at the verification gate with PowerShell checks. Done-when #5
+(cli.py doctor's printed output byte-identical to before this episode)
+must be diffed, not eyeballed.
+
+If anything in this episode's Build section is ambiguous or seems to
+assume something not true of this repo, stop and tell me before writing
+code.
+```
+
+**Record:**
+```
+Write design/completed/backend/B27-doctor-resolved-behaviour-values.md
+following the format in design/completed/backend/INDEX.md. Include the
+bugs we hit and how they were fixed, and what the next episode inherits.
+Add a row to that INDEX.md's status table.
+
+Confirm explicitly, with actual command output: an override active for a
+key does NOT change behaviour_resolved's own `resolved` value for it, a
+key with no config.toml value and no override reports its hardcoded
+fallback, and cli.py doctor's non-wire output is unchanged.
+```
+
+**Then:** commit · `/clear`
+
+---
+
 # SESSION 16b — F18 Windowed History
 
 **Goal:** history obeys the same bounded-memory rule as workspace unload —
