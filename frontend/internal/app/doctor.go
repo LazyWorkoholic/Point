@@ -106,9 +106,6 @@ func formatDoctorReport(r map[string]any) string {
 	line("")
 	line("database            " + str("database_path"))
 	line("                    " + str("database_state"))
-	if legacy := str("legacy_db_path"); legacy != "" {
-		line("                    legacy copy still present: " + legacy)
-	}
 	line("")
 	line(fmt.Sprintf("config              %s  %s", str("config_path"), existsText(boolv("config_exists"))))
 	if cfgErr := str("config_error"); cfgErr != "" {

@@ -23,7 +23,6 @@ func sampleDoctorReport() map[string]any {
 		"dependency_report":                 "all present",
 		"database_path":                     "/profile/runtime.db",
 		"database_state":                    "schema v7 (expected v7)",
-		"legacy_db_path":                    nil,
 		"config_path":                       "/profile/config.toml",
 		"config_exists":                     true,
 		"config_error":                      "",

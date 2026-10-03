@@ -742,8 +742,8 @@ a running backend's tasks from a second process would be worse than the problem.
 
 ### D96 — The database left the source tree, and migrations are forward-only
 `backend\runtime.db` became `%LOCALAPPDATA%\Point\runtime.db` (override:
-`POINT_DB`, then config `database.path`). The old file is **copied, not moved** —
-removing it is a human's call once the move is proven.
+`POINT_DB`, then config `database.path`). The old file was **copied, not
+moved** — removing it was left as a human's call once the move was proven.
 Migrations are versioned, forward-only, recorded in `schema_migrations`, and run
 automatically on startup. **There is no `down`:** a rollback is restoring the
 copy the runner takes before every migration, as `runtime.db.bak-<version>`.
@@ -753,6 +753,18 @@ file copy can miss everything still in the `-wal` file, which is the difference
 between a backup and a file that looks like one.
 The rebuild in v2 runs with `foreign_keys=OFF` and `legacy_alter_table=ON`: with
 foreign keys on, `DROP TABLE sessions` would have cascade-deleted every message.
+
+**B29 made the removal call.** Found live during F10c's verification: a
+brand-new scratch profile's "fresh" database already had 12 real sessions,
+because `resolve_db_path()`'s `migrate_legacy` default silently copied
+`backend\runtime.db` into it — and grep showed every caller in this
+codebase, including four scratch-profile manual test scripts (B12, B19,
+B26, B28), called it with no arguments, so the opt-out had a 0% adoption
+rate in practice, not just in theory. The move itself had been proven for
+this repo's entire visible history (its very first commit is titled
+"B1-B6 already done"); `backend\runtime.db` was gone and the copy-forward
+mechanism removed outright, not merely defaulted off, so there is nothing
+left for a future caller to forget to disable.
 
 ### D97 — A stopgap type gets its own name, never the future episode's real one
 **Alternatives:** build the later episode's real thing early, scoped down; wait

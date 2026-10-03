@@ -203,9 +203,15 @@ D:\Projects\Point\
 │   │
 │   │                           (no database here — B6 moved it to
 │   │                           %LOCALAPPDATA%\Point\runtime.db. Override with
-│   │                           POINT_DB, then config `database.path`. The old
-│   │                           backend\runtime.db was COPIED, not moved, and
-│   │                           is deliberately still on disk.)
+│   │                           POINT_DB, then config `database.path`. The
+│   │                           pre-B6 backend\runtime.db this used to be
+│   │                           copied from is GONE — B29 removed it, and the
+│   │                           silent copy-into-any-fresh-profile mechanism
+│   │                           with it, once it was confirmed every scratch-
+│   │                           profile script in this repo had been getting
+│   │                           a non-empty "fresh" database with no signal
+│   │                           that it happened. Nothing resolves a database
+│   │                           path from anywhere but these two env vars now.)
 │   │
 │   ├── runtime\                runtime, dispatcher, task, task_manager,
 │   │                           state, errors                        [B1 ✅]

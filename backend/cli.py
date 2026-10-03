@@ -59,7 +59,6 @@ import appconfig
 import appconfig_overrides
 from bootstrap import (
     AlreadyRunningError,
-    LEGACY_DB_PATH,
     SCHEMA_VERSION,
     build_runtime,
     current_version,
@@ -1258,7 +1257,6 @@ async def build_doctor_report() -> dict[str, Any]:
         "dependency_report": _dependency_report(),
         "database_path": str(db_path),
         "database_state": database_state,
-        "legacy_db_path": str(LEGACY_DB_PATH) if LEGACY_DB_PATH.exists() else None,
         "config_path": str(config),
         "config_exists": config.exists(),
         "config_error": appconfig.config_error(),
@@ -1293,8 +1291,6 @@ def _print_doctor_report(report: dict[str, Any]) -> None:
 
     print(f"database            {report['database_path']}")
     print(f"                    {report['database_state']}")
-    if report["legacy_db_path"]:
-        print(f"                    legacy copy still present: {report['legacy_db_path']}")
 
     print(f"config              {report['config_path']}  {_exists_text(report['config_exists'])}")
     if report["config_error"]:

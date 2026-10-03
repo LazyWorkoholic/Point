@@ -21,7 +21,6 @@ purpose -- `doctor` has to report on a missing or broken database, and
 from __future__ import annotations
 
 import os
-import shutil
 from pathlib import Path
 from typing import Optional
 
@@ -34,12 +33,6 @@ from runtime.runtime import Runtime
 
 _log = get_logger("bootstrap")
 
-# Where the database lived before B6: inside the source tree, where it
-# would be committed by accident and would break the moment the app was
-# packaged. Copied out once, never deleted -- removing it is Aryan's call
-# once he is satisfied the move worked.
-LEGACY_DB_PATH = Path(__file__).resolve().parent / "runtime.db"
-
 _lock: Optional[SingleInstanceLock] = None
 
 
@@ -51,13 +44,8 @@ class BootstrapError(RuntimeError):
 # Database location
 # ---------------------------------------------------------------------------
 
-def resolve_db_path(migrate_legacy: bool = True) -> Path:
-    """POINT_DB -> config `database.path` -> %LOCALAPPDATA%\\Point\\runtime.db.
-
-    Also performs the one-time copy out of the source tree: if the chosen
-    location has no database and `backend\\runtime.db` does, it is copied
-    across and the move is logged. The old file is left where it is.
-    """
+def resolve_db_path() -> Path:
+    """POINT_DB -> config `database.path` -> %LOCALAPPDATA%\\Point\\runtime.db."""
     override = os.environ.get("POINT_DB")
     if override:
         path = Path(override).expanduser()
@@ -66,26 +54,7 @@ def resolve_db_path(migrate_legacy: bool = True) -> Path:
         path = Path(configured).expanduser() if configured else appconfig.default_db_path()
 
     path.parent.mkdir(parents=True, exist_ok=True)
-
-    if migrate_legacy and not path.exists() and LEGACY_DB_PATH.exists():
-        _copy_legacy_database(path)
     return path
-
-
-def _copy_legacy_database(target: Path) -> None:
-    shutil.copy2(LEGACY_DB_PATH, target)
-    # A -wal/-shm pair beside the old file would hold writes the main file
-    # does not. The pre-B6 database ran in journal_mode=delete so there
-    # should not be one, but copying a database without them is how you
-    # lose the last session you had open.
-    for suffix in ("-wal", "-shm"):
-        sidecar = LEGACY_DB_PATH.with_name(LEGACY_DB_PATH.name + suffix)
-        if sidecar.exists():
-            shutil.copy2(sidecar, target.with_name(target.name + suffix))
-    _log.info(
-        "Moved database out of the source tree: %s -> %s (original left in place)",
-        LEGACY_DB_PATH, target,
-    )
 
 
 # ---------------------------------------------------------------------------

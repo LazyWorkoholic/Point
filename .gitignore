@@ -15,7 +15,6 @@ wheels/
 # Nothing to ignore here — if either ever appears at the repo root,
 # something wrote it to the wrong place. Fix that, do not ignore it.
 
-backend/runtime.db
 *.db-wal
 *.db-shm
 .point/
