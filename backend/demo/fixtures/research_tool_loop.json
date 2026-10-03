@@ -1,0 +1,30 @@
+{
+  "model": "point-demo-v1",
+  "steps": [
+    {
+      "delay": 0.5,
+      "tool_call": {"name": "list_files", "arguments": {"prefix": ""}}
+    },
+    {
+      "delay": 0.4,
+      "tool_call": {"name": "read_file", "arguments": {"path": "README.md"}}
+    },
+    {
+      "delay": 0.4,
+      "tool_call": {"name": "read_file", "arguments": {"path": "utils.py"}}
+    },
+    {
+      "text_chunks": [
+        {"text": "The sample project is small and deliberately boring:", "delay": 0.5},
+        {"text": " a two-function app.py, a two-function utils.py, and a plain static page under web/.", "delay": 0.7},
+        {"text": " Nothing in it does anything useful on its own -- its README says so directly.", "delay": 0.6},
+        {"text": " That is consistent with what the file listing and both reads actually showed: no hidden dependencies, no build step, no network calls anywhere in this project.", "delay": 0.9}
+      ],
+      "usage": {"input_tokens": 612, "output_tokens": 184}
+    }
+  ],
+  "proposals": [
+    "The sample project ships with Point's Demo mode and is deliberately minimal -- two tiny modules and a static page.",
+    "Nothing in the sample project performs network calls or has a build step."
+  ]
+}

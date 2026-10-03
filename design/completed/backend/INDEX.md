@@ -33,6 +33,7 @@ it passed.
 | B23 | Agent and Directory Listing on the Wire | ✅ built + manually verified | `B23-agent-and-directory-listing.md` |
 | B25 | Persist a Validated Provider Key | ✅ built + manually verified | `B25-provider-key-persistence.md` |
 | B26 | Behaviour Overrides + `doctor` on the Wire | ✅ built + manually verified | `B26-behaviour-overrides-doctor-wire.md` |
+| B28 | Demo Mode: Provider, Fixture Library, Sample Project | ✅ built + manually verified | `B28-demo-mode-provider-fixtures.md` |
 
 ## Verified file structure — end of Episode 11
 
@@ -524,6 +525,42 @@ backend\
                                            OperationalError/IntegrityError
                                            on stderr                       [B22]
 ```
+
+## Delta — Episode 28
+
+Two new top-level directories, neither nested under an existing package.
+Full reasoning in `B28-demo-mode-provider-fixtures.md`.
+
+```
+backend\
+├── providers\
+│   ├── demo\                 NEW package -- selectable, always
+│   │   ├── __init__.py       registered (no env var), structurally
+│   │   └── provider.py       independent of providers\mock\ on purpose
+│   │                         (DemoProvider: _classify/_play/_research_step/
+│   │                          _forbid_web_search)                         [B28]
+│   └── bootstrap.py          + "demo" branch in create_provider();
+│                              + unconditional registry.register("demo", ...)
+│                              in build_registry_from_env()                [B28]
+├── demo\                     NEW -- shipped assets, not test fixtures
+│   ├── fixtures\             chat_turns.json, cancellation.json,
+│   │                         error_case.json, research_tool_loop.json,
+│   │                         filler_explain.json, filler_fill.json         [B28]
+│   └── sample_project\       app.py, utils.py, README.md,
+│                             web\index.html, web\style.css --
+│                             app.py's line numbers are load-bearing for
+│                             filler_explain.json/filler_fill.json          [B28]
+└── tests\
+    └── manual_b28_demo_mode.py   NEW -- one long-lived Runtime (same
+                                  construction as manual_b26_behaviour_
+                                  overrides.py, for the same reason);
+                                  kept in the repo as regression coverage   [B28]
+```
+
+`backend\demo\sample_project\.point\` exists on disk after this episode's
+own verification (real `project_manager.init()` run against the real
+path) but is covered by the repo's root `.gitignore` (`.point/`) and was
+never a tracked file.
 
 ## ⚠ One inaccuracy inherited from the original log
 

@@ -1,0 +1,20 @@
+{
+  "model": "point-demo-v1",
+  "chunks": [
+    {
+      "type": "text",
+      "text": "{\"file\": \"app.py\", \"start_line\": 4, \"end_line\": 8, \"replacement\": \"def greet(name):\\n    # Return a friendly greeting for name.\\n    if not isinstance(n",
+      "delay": 0.5
+    },
+    {
+      "type": "text",
+      "text": "ame, str) or not name:\\n        name = \\\"friend\\\"\\n    return f\\\"Hello, {name}!\\\"\", \"note\": \"Added a type check alongside the existing emptiness check.\"}",
+      "delay": 0.6
+    },
+    {
+      "type": "usage",
+      "input_tokens": 410,
+      "output_tokens": 58
+    }
+  ]
+}

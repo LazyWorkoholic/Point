@@ -33,6 +33,9 @@ def create_provider(name: str, config: ProviderConfig) -> BaseProvider:
     if name == "mock":
         from providers.mock.provider import MockProvider
         return MockProvider(config)
+    if name == "demo":
+        from providers.demo.provider import DemoProvider
+        return DemoProvider(config)
     raise ValueError(f"Unknown provider: {name!r}")
 
 
@@ -52,5 +55,12 @@ def build_registry_from_env() -> ProviderRegistry:
     # eventually answer a real question with a fixture.
     if mock_provider.is_enabled():
         registry.register("mock", create_provider("mock", ProviderConfig(provider="mock")))
+
+    # Demo mode (B28): always registered, no env var -- the opposite of
+    # Mock's gate above, and for the opposite reason. Mock must never be
+    # reachable from the UI; Demo is meant to be (F10's provider chooser,
+    # D55's visible badge), so it is selectable the same way any real
+    # provider is, not behind a developer-only flag.
+    registry.register("demo", create_provider("demo", ProviderConfig(provider="demo")))
 
     return registry

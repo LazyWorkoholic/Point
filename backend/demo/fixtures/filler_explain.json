@@ -1,0 +1,10 @@
+{
+  "model": "point-demo-v1",
+  "chunks": [
+    {"type": "text", "text": "`add(a, b)` does exactly what its name says:", "delay": 0.5},
+    {"type": "text", "text": " it takes two values and returns their sum via Python's built-in `+`.", "delay": 0.7},
+    {"type": "text", "text": " There is no validation of `a` or `b` -- whatever supports `+` (two numbers, or even two strings) will work;", "delay": 0.7},
+    {"type": "text", "text": " anything else raises a `TypeError` at the `return` line, which is the correct behaviour for a function this small.", "delay": 0.7},
+    {"type": "usage", "input_tokens": 268, "output_tokens": 71}
+  ]
+}

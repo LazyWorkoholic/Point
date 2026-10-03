@@ -1,0 +1,14 @@
+{
+  "model": "point-demo-v1",
+  "chunks": [
+    {"type": "text", "text": "This reply is paced slowly on purpose, one full sentence per chunk.", "delay": 1.2},
+    {"type": "text", "text": " Cancel it whenever you like -- hit cancel now, or wait a few more sentences.", "delay": 1.2},
+    {"type": "text", "text": " Because every chunk below is a complete sentence, whatever has streamed so far always reads as a finished thought, never a word cut in half.", "delay": 1.2},
+    {"type": "text", "text": " That is deliberate: a demo presenter decides the moment, not the fixture.", "delay": 1.2},
+    {"type": "text", "text": " A few more sentences exist after this one, in case nobody cancels early.", "delay": 1.2},
+    {"type": "text", "text": " This is the middle of the reply, still streaming, still one sentence at a time.", "delay": 1.2},
+    {"type": "text", "text": " Getting close to the end now, for whoever let it run all the way through.", "delay": 1.2},
+    {"type": "text", "text": " And that is the end of this reply -- nothing was cancelled this time.", "delay": 1.2},
+    {"type": "usage", "input_tokens": 64, "output_tokens": 112}
+  ]
+}

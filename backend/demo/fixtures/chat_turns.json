@@ -1,0 +1,22 @@
+{
+  "model": "point-demo-v1",
+  "turns": [
+    [
+      {"type": "text", "text": "Point is a local-first terminal AI workspace.", "delay": 0.6},
+      {"type": "text", "text": " The frontend is Go and Bubble Tea; the backend is Python, talking JSON-lines over stdin/stdout.", "delay": 0.8},
+      {"type": "text", "text": " Nothing about that boundary is incidental --", "delay": 0.6},
+      {"type": "text", "text": " it is what lets the backend run headless under a test script exactly as it runs under the real TUI.", "delay": 0.9},
+      {"type": "text", "text": "\n\nHere is the shape of one send, end to end:\n\n", "delay": 0.4},
+      {"type": "text", "text": "```python\nsession = create_session(provider=\"demo\")\nsend(session, \"tell me about this project\")\n# streams TextDelta events, then one terminal TaskDone\n```", "delay": 1.1},
+      {"type": "text", "text": "\n\nEverything you are watching right now -- the pacing, the queueing, the ability to cancel --", "delay": 0.7},
+      {"type": "text", "text": " is the real streaming and scheduling machinery. Only the words are scripted.", "delay": 0.6},
+      {"type": "usage", "input_tokens": 142, "output_tokens": 96}
+    ],
+    [
+      {"type": "text", "text": "This is the second reply --", "delay": 0.5},
+      {"type": "text", "text": " the one that was waiting in the queue while the first was still streaming.", "delay": 0.7},
+      {"type": "text", "text": " `chat.queue_depth` decided it could wait instead of being refused.", "delay": 0.6},
+      {"type": "usage", "input_tokens": 58, "output_tokens": 34}
+    ]
+  ]
+}

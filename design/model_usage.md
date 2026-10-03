@@ -124,13 +124,33 @@ SESSION  EPISODE                          MODEL         WHY
                                                         of it -- every wrong claim in
                                                         this session was a mental
                                                         shortcut standing in for that.
-16d      F10c demo mode                   Opus medium   fixture design + timed
-                                                        replay is product judgment,
-                                                        not plumbing -- and the
-                                                        filler-explainer fixture is
-                                                        blocked on F9b/F13, so this
-                                                        row may need re-splitting
-                                                        again once scoped.
+16f      B28 demo mode provider +         Sonnet high   one new provider class kept
+         fixtures (backend)                            structurally separate from
+                                                        MockProvider, a fixture
+                                                        library whose line numbers
+                                                        and timing have to be
+                                                        actually correct, and one
+                                                        non-obvious read
+                                                        (_maybe_propose) before
+                                                        assuming the proposal count
+                                                        is free. Not a new
+                                                        algorithm, but several
+                                                        places where copying
+                                                        something that looks right
+                                                        would be wrong -- same
+                                                        discipline as B20/B24.
+16d      F10c demo mode                   Sonnet high   now that B28 (16f) has
+                                                        scoped and shipped the
+                                                        fixture design and timed
+                                                        replay, this row is wiring
+                                                        a provider chooser row, a
+                                                        badge, and fixtures to UI
+                                                        surfaces -- same shape as
+                                                        F10b. The filler-explainer
+                                                        fixture renders as a plain
+                                                        reply, not a diff card, so
+                                                        there is no apply-path risk
+                                                        in this row either.
 16e      B27 doctor resolved behaviour     Sonnet high   plumbing over two functions
          values                                         that already exist
                                                         (config_value,

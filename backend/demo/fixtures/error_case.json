@@ -1,0 +1,8 @@
+{
+  "model": "point-demo-v1",
+  "chunks": [
+    {"type": "text", "text": "Let me check that.", "delay": 0.5},
+    {"type": "text", "text": " One moment --", "delay": 0.7},
+    {"type": "error", "error": "demo: scripted failure -- Point's error path, exercised on purpose, no real provider was involved"}
+  ]
+}

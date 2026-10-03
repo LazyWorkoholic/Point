@@ -1472,6 +1472,103 @@ own Record step.
 
 ---
 
+# SESSION 16f — B28 Demo Mode: Provider, Fixture Library, Sample Project
+
+**Goal:** a new, always-selectable `demo` provider, a shipped fixture
+library covering every row of F10's fixture-coverage table, and a shipped
+sample project for the fixtures to act on — the backend-and-asset half of
+Demo mode, so Session 16d (F10c) has a real provider and real fixtures to
+wire into the UI instead of a placeholder.
+
+**Why this episode exists, and why it's scoped the way it is.** Session
+16d, as originally written, found Demo mode had no backend to anchor
+to at all — not B15, not `MockProvider` (test-only, must stay invisible in
+the UI). Checked live before writing the task doc: F9b and F13 have **not**
+landed (no completed docs past F10b), and neither has B24 — grepping
+`OutgoingEventType` turns up no `FillProposal` member and `cli.py` has no
+`--json-proposal` flag. That last fact is the one the original framing
+didn't anticipate: an applicable diff isn't just blocked by F9b/F13's
+missing Editor, it's blocked by a backend event (B24) that doesn't exist
+either. The task doc narrows `@filler-explainer`'s FILL-mode fixture to
+what today's real backend actually does on a fill turn — a plausible
+JSON-shaped text reply, no `FillProposal` event, no apply path — because
+replaying a capability Point doesn't have yet would be exactly the
+theater D55 exists to rule out. Full account in
+`design/tasks/backend/B28-demo-mode-provider-fixtures.md`'s "Why this
+episode exists".
+
+**Paste:**
+```
+Read CLAUDE.md and
+design/tasks/backend/B28-demo-mode-provider-fixtures.md in full.
+
+Build exactly as specced, with two additions:
+
+1. Done-when #5's "exactly 2 agent_proposals rows" must come from
+   actually running _maybe_propose's real code path -- read it first
+   (executor.py:913-972) to learn whether it issues its own provider
+   call or parses the final reply directly, and give research_tool_
+   loop.json whatever that requires. Do NOT insert rows directly into
+   the database to force the count. If the real mechanism produces a
+   different number than 2, say so and adjust Done-when #5 to match
+   reality rather than engineering around it.
+
+2. Confirm cancellation.json's chunk pacing produces a sensible
+   partial sentence at ANY reasonable cancellation timing, not only
+   at one precisely-tuned moment -- a real demo presenter cancels
+   whenever they choose, not at a scripted instant.
+
+Otherwise build exactly as specced -- the new DemoProvider (selectable,
+unconditionally registered, structurally separate from MockProvider),
+the fixture library under backend\demo\fixtures\, the shipped sample
+project under backend\demo\sample_project\, and the web_search guard
+at fixture-load time.
+
+Do NOT touch providers\mock\ or backend\tests\fixtures\. Do NOT add a
+FillProposal event, any apply/diff wire surface, or a task.queued
+event -- none of those are this episode's to build (see the task
+doc's Do NOT section).
+
+Stop at the verification gate, with real evidence for all ten
+Done-when items -- especially #5 (state the _maybe_propose answer
+plainly, not just encoded in the fixture), #6 (prove the web_search
+guard by deliberately violating it once, then removing the
+violation), and #10 (git diff confirming providers\mock\ and
+backend\tests\fixtures\ are genuinely untouched). Record the exact
+commands used for checks 3 and 4 in the completed doc, as the task
+doc's own verification gate asks.
+
+If anything in the Build section is ambiguous or seems to assume
+something not true of this repo, stop and tell me before writing
+more code.
+```
+
+**You do:** read the `_maybe_propose` finding yourself before accepting
+Done-when #5 — confirm the stated mechanism against `executor.py:913-972`
+directly, don't take the session's summary on faith. Also eyeball the git
+diff for Done-when #10 and the web-search-guard proof for #6; both are
+one-line-of-evidence checks that are cheap to verify and expensive to get
+wrong (a quiet `web_search` fixture call, or a Mock-provider edit, both
+only surface later).
+
+**Record:**
+```
+Write design/completed/backend/B28-demo-mode-provider-fixtures.md
+following the format in design/completed/backend/INDEX.md. Include the
+bugs we hit and how they were fixed, and what the next episode (Session
+16d, F10c) inherits. Add a row to that INDEX.md's status table.
+
+State plainly, in its own paragraph: what _maybe_propose actually does
+(second provider call, or direct parse of the final reply), the exact
+resulting agent_proposals count if it differs from 2, and the exact
+commands used for the queued-turn (Done-when #3) and cancellation
+(Done-when #4) checks.
+```
+
+**Then:** commit · `/clear`
+
+---
+
 # SESSION 16d — F10c Settings: Demo Mode
 
 **Goal:** a presentation with dead wifi and no local model still has
@@ -1479,42 +1576,33 @@ something real to show, end to end — chat, queueing, cancellation, a
 research run, the filler-explainer, and an error case, all on recorded
 fixtures with plausible timing.
 
-**Prerequisites:** a backend episode that does not exist yet, and unlike
-F10b's, this one has **no existing hook to anchor to** — not B15 (lifecycle
-and crash recovery, tagged demo-critical for a different reason: the
-crash-recovery beat, not a fixture-driven provider), not `MockProvider`
-(test-only, `POINT_MOCK=1`, must stay invisible in the UI per F10's own
-Do-NOT list). It needs, from scratch: a new selectable provider type
-distinct from `MockProvider`, a fixture library covering every row in
-F10's own fixture-coverage table (chat reply, queued turn, cancellation,
-`@research`'s 4-step tool loop, `@filler-explainer`'s EXPLANATION and FILL
-modes, usage events, one error case), timed replay rather than instant
-completion, and a shipped sample project for the fixtures to act on.
+**Prerequisites:** Session 16f (B28) must have landed —
+`design/completed/backend/B28-demo-mode-provider-fixtures.md` is this
+session's source for the provider id, the fixture set, and the shipped
+sample project's path.
 
-**The filler-explainer fixture cannot ship complete until F9b/F13 land** —
-it is specced to "yield an applicable diff," and F09a's completed doc
-already established there is no Editor workspace and no apply path in this
-repo. Scope that fixture's own Done-when around whichever of F9b/F13 has
-landed by the time this session starts, and say explicitly in the backend
-episode's doc if it has not.
-
-**Scope and write the backend episode's task doc before this session
-starts**, the same as F10b.
+**The filler-explainer fixture ships incomplete by design, not by
+accident.** B28 narrowed it to a plain JSON-shaped text reply with no
+`FillProposal` event, because B24/F9b/F13 all remain unbuilt — read B28's
+"Why this episode exists" before assuming this session can render a diff
+card for it. This session renders whatever B28's fixture actually produces
+(a plain reply), nothing more.
 
 **Paste:**
 ```
 Read CLAUDE.md, design/tasks/frontend/F10-settings-first-run.md's "Demo
-mode" section in full, and <the backend episode's completed doc, once it
-exists>.
+mode" section in full, and
+design/completed/backend/B28-demo-mode-provider-fixtures.md.
 
 FIRST, before any code: write design/tasks/frontend/F10c-settings-demo-
 mode.md, in the same shape as F9a/B23's task docs. Scope, and nothing
 beyond it: selecting Demo mode from the provider chooser/Settings, the
-persistent DEMO badge, and wiring each fixture the backend episode
-shipped to its correct UI surface.
+persistent DEMO badge, and wiring each fixture B28 shipped to its correct
+UI surface.
 
-Confirm whether F9b/F13 have landed; if not, scope the filler-explainer
-fixture's Done-when around what is actually buildable today and say so.
+B24/F9b/F13 are still unbuilt. The filler-explainer fixture is a plain
+text reply, not a parsed proposal -- do not build a diff-card rendering
+for it; render it exactly like the chat-reply and explain-mode fixtures.
 
 Then show me the task doc and stop before writing code.
 ```
