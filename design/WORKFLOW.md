@@ -1581,6 +1581,30 @@ fixtures with plausible timing.
 session's source for the provider id, the fixture set, and the shipped
 sample project's path.
 
+**⚠ Status: this session started, found a real binding bug live, and
+now cannot CLOSE until Session 16g (B30) lands.** B28 landed and this
+session's own build and most of its verification ran — Done-when #1,
+#2, #5, #7-9, #11-12 of `design/tasks/frontend/F10c-settings-demo-
+mode.md` are confirmed. But Done-when #3 (fresh-profile project
+binding) and #4 (the retrofit-without-binding status line) do not pass
+today: live testing found the task doc's own Decision 1 never actually
+had a working mechanism (see that doc's own corrected note at the top
+of its Decisions section, and `design/tasks/backend/B30-set-session-
+project.md`'s full trace). Done-when #6 (`@research`) is deliberately
+untested — it resolves tool calls against `session.project_id` with no
+fallback if empty, so testing it before #3 is fixed would not prove
+anything. **Resume this session only after Session 16g (B30) has landed**
+— re-verify #3/#4 with the exact repro already on record (fresh
+profile, first-run chooser, Demo mode, direct DB query), then #6, then
+close.
+
+Also found and already closed separately, same session, same discipline
+as every other mid-episode backend need: Session 16g-adjacent
+`design/tasks/backend/B29-remove-legacy-runtime-db.md`, built and
+committed on its own (a stale `backend\runtime.db` was silently copied
+into every fresh scratch profile, including this session's own
+verification attempts, until B29 removed it).
+
 **The filler-explainer fixture ships incomplete by design, not by
 accident.** B28 narrowed it to a plain JSON-shaped text reply with no
 `FillProposal` event, because B24/F9b/F13 all remain unbuilt — read B28's
@@ -1609,6 +1633,87 @@ Then show me the task doc and stop before writing code.
 
 **Then:** commit · `/clear` once built and verified, following that doc's
 own Record step.
+
+---
+
+# SESSION 16g — B30 Let `SetSessionProvider` Also Bind a Session's Project
+
+**Goal:** a session can be told its own project id after it already
+exists, the same way it can already be told its provider/model — one
+optional field through the existing `SetSessionProvider` event, reusing
+`session_manager.set_project()` (already built for B12, never exposed
+until now). Unblocks Session 16d (F10c)'s own Done-when #3/#4 and its
+`@research` fixture check.
+
+**Why this episode exists.** Found live during Session 16d's (F10c)
+own verification, traced with real evidence rather than reasoned about:
+F10c's original design assumed a fresh session's `CreateSession` payload
+could carry a human-chosen Demo project id, if `ProjectInit`'s reply
+resolved it in time. It never does — `chat\providers.go`'s own comment,
+written back in Session 16 (F10), already proves why: a first-run
+session "was created before this choice existed," true for every
+provider, because bootstrap's own `CreateSession` needs two fully
+automatic round trips with zero human action, while the chooser cannot
+even become clickable until the first of those same two round trips has
+already landed. A human cannot win that race. The only mechanism that
+can ever work is retrofitting an already-created session — exactly what
+`SetSessionProvider`'s existing call already does for provider/model,
+extended here to also carry `project_id`. Full trace in
+`design/tasks/backend/B30-set-session-project.md`'s "Why this episode
+exists" — the task doc already exists; this session reads it rather
+than writing it.
+
+**Paste:**
+```
+Read CLAUDE.md and design/tasks/backend/B30-set-session-project.md.
+
+One optional field through one existing event: `project_id` added to
+SetSessionProvider's payload/handler (runtime.py), calling
+session_manager.set_project() (already built for B12, already tested)
+when present, and the reply always echoes the session's real, current
+project_id -- re-read after the write, never the raw input parroted
+back. No new wire event, no new reply type. The matching Go-side change
+is two call sites only: applyProviderDefault (providers.go) forwards
+project_id when set, onSessionProviderUpdated (protocol.go) reads it
+back into w.projectID.
+
+Do NOT add a SetSessionProject-only event, touch AttachContext/
+_adoptable_project_for/_commit_adoption, build anything Demo-mode-
+specific, or change any F10c frontend file beyond the two call sites
+named above.
+
+Stop at the verification gate with real evidence for all six
+Done-when items -- especially #2/#3 (an existing project_id survives a
+provider-only retrofit, and the reply echoes it even when the request
+never sent one) and #4 (go test ./frontend/internal/chat/... passes
+unmodified with the new field).
+
+If anything in this episode's Build section is ambiguous or seems to
+assume something not true of this repo, stop and tell me before
+writing code.
+```
+
+**You do:** confirm Done-when #2 yourself against the actual manual
+script output — this is the one check that would silently pass even if
+`set_project` were wrongly called unconditionally in a way that clobbers
+an existing binding; read the asserted "UNCHANGED from step 1" line
+directly rather than trusting the summary.
+
+**Record:**
+```
+Write design/completed/backend/B30-set-session-project.md following the
+format in design/completed/backend/INDEX.md. Include the bugs we hit and
+how they were fixed, and that this unblocks Session 16d (F10c)'s own
+Done-when #3/#4 and its @research fixture check. Add a row to that
+INDEX.md's status table.
+
+Confirm explicitly, with actual command output: an existing project_id
+survives a provider-only retrofit, and SetSessionProvider's reply
+carries the session's real project_id even on a request that never sent
+one.
+```
+
+**Then:** commit · `/clear`
 
 ---
 
