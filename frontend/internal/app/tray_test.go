@@ -489,7 +489,7 @@ func mkMsg(taskID, role, text string, total int) trayMessage {
 // all read the one registry, so a tray wired to a key without an entry here
 // would be invisible in three of the four.
 func TestTrayActionIsRegisteredAndBound(t *testing.T) {
-	r, err := New(Options{Theme: theme.New("turquoise", theme.BackgroundTransparent)})
+	r, err := New(Options{Theme: theme.New("turquoise", theme.BackgroundTransparent), State: testProviderDefault})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -537,7 +537,7 @@ func TestTrayActionAvailableWithNoTasks(t *testing.T) {
 
 func trayActionFrom(t *testing.T) actions.Action[*Root] {
 	t.Helper()
-	r, err := New(Options{Theme: theme.New("turquoise", theme.BackgroundTransparent)})
+	r, err := New(Options{Theme: theme.New("turquoise", theme.BackgroundTransparent), State: testProviderDefault})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -827,7 +827,7 @@ func TestMaximisedOverlaysMatchTheTranscriptPane(t *testing.T) {
 	// A plain Overlay is untouched: the palette would look absurd stretched
 	// across 160 columns, which is why this is opt-in. Built through New()
 	// because the palette reads the action registry.
-	real, err := New(Options{Theme: theme.New("turquoise", theme.BackgroundTransparent)})
+	real, err := New(Options{Theme: theme.New("turquoise", theme.BackgroundTransparent), State: testProviderDefault})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -985,7 +985,7 @@ func TestShortLabelledConfirmKeepsTheLayoutFloor(t *testing.T) {
 // and the point is to observe actual elapsed wall time rather than to
 // simulate it.
 func TestTrayClockAdvancesInTheRenderedFrame(t *testing.T) {
-	r, err := New(Options{Theme: theme.New("turquoise", theme.BackgroundTransparent)})
+	r, err := New(Options{Theme: theme.New("turquoise", theme.BackgroundTransparent), State: testProviderDefault})
 	if err != nil {
 		t.Fatal(err)
 	}

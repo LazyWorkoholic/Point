@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"testing"
 
+	"github.com/lazyworkoholic/point/frontend/internal/config"
 	"github.com/lazyworkoholic/point/frontend/internal/protocol"
 )
 
@@ -184,5 +185,78 @@ func TestARefusedProviderListStillOpensASession(t *testing.T) {
 	}
 	if got := lastQuery(*sent); got.kind != queryListSessions {
 		t.Fatalf("the session list was never asked for: %+v", got)
+	}
+}
+
+// TestApplyProviderDefaultRetrofitsTheOpenSession is the fix for a
+// verification finding: the right pane's Status card ("provider · model",
+// cards.go) never moved no matter what was picked in Settings, because
+// persisting the default (state.json) only ever changes what a FUTURE
+// session is created with — the session already open keeps whatever NULL
+// provider it was given at ITS OWN creation. applyProviderDefault must also
+// retrofit the session that is actually open right now.
+func TestApplyProviderDefaultRetrofitsTheOpenSession(t *testing.T) {
+	w, sent := recordingWorkspace(t)
+	w.sessionID = "s1"
+
+	w.applyProviderDefault(config.ProviderDefault{Provider: "ollama", Model: "qwen2.5-coder:3b"})
+
+	got := lastQuery(*sent)
+	if got.kind != querySetSessionProvider {
+		t.Fatalf("SetSessionProvider was never sent: %+v", got)
+	}
+	if got.payload["session_id"] != "s1" || got.payload["provider"] != "ollama" ||
+		got.payload["model"] != "qwen2.5-coder:3b" {
+		t.Errorf("wrong payload: %+v", got.payload)
+	}
+}
+
+// TestApplyProviderDefaultSkipsRetrofitWithNoOpenSession: mid-bootstrap,
+// before the first GetSession/SessionCreated reply has landed, there is no
+// session yet to retrofit — onSessionList's own CreateSession payload picks
+// the default up a moment later regardless, so this must be a silent no-op,
+// not a request naming an empty session_id.
+func TestApplyProviderDefaultSkipsRetrofitWithNoOpenSession(t *testing.T) {
+	w, sent := recordingWorkspace(t)
+	w.sessionID = ""
+
+	w.applyProviderDefault(config.ProviderDefault{Provider: "ollama", Model: "qwen3:8b"})
+
+	if len(*sent) != 0 {
+		t.Fatalf("SetSessionProvider was sent with no open session: %+v", *sent)
+	}
+}
+
+// TestOnSessionProviderUpdatedRefreshesTheStatusCard confirms the reply
+// actually reaches cards.go's own read of this workspace's state, and that
+// a reply for a DIFFERENT session (the active session changed while the
+// request was in flight) is dropped rather than relabelling the wrong card.
+func TestOnSessionProviderUpdatedRefreshesTheStatusCard(t *testing.T) {
+	w := newTestWorkspace(t)
+	w.sessionID = "s1"
+
+	raw, err := json.Marshal(map[string]any{
+		"session_id": "s1", "provider": "ollama", "model": "qwen2.5-coder:3b",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	w.onSessionProviderUpdated(protocol.Envelope{Payload: raw})
+
+	if w.sessionProvider != "ollama" || w.sessionModel != "qwen2.5-coder:3b" {
+		t.Fatalf("Status card fields not updated: provider=%q model=%q", w.sessionProvider, w.sessionModel)
+	}
+
+	stale, err := json.Marshal(map[string]any{
+		"session_id": "s0-no-longer-open", "provider": "openai", "model": "gpt-5",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	w.onSessionProviderUpdated(protocol.Envelope{Payload: stale})
+
+	if w.sessionProvider != "ollama" || w.sessionModel != "qwen2.5-coder:3b" {
+		t.Fatalf("a reply for a session that is no longer open overwrote the card: provider=%q model=%q",
+			w.sessionProvider, w.sessionModel)
 	}
 }

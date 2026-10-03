@@ -58,7 +58,8 @@ func (w *Workspace) renderLive(e *liveEntry, width int, focused bool) []string {
 		e.renderedFrame == w.frame &&
 		e.servedVersion == e.version &&
 		e.renderedWidth == width &&
-		e.renderedFocused == focused
+		e.renderedFocused == focused &&
+		e.renderedThemeGen == w.themeGen
 	if sameFrame {
 		return e.rendered
 	}
@@ -68,6 +69,7 @@ func (w *Workspace) renderLive(e *liveEntry, width int, focused bool) []string {
 		e.renderedVersion == e.version &&
 		e.renderedWidth == width &&
 		e.renderedFocused == focused &&
+		e.renderedThemeGen == w.themeGen &&
 		(e.status.terminal() || e.renderedSecond == second)
 	if fresh {
 		// Stamped so the REST of this frame is bound to this same answer,
@@ -81,6 +83,7 @@ func (w *Workspace) renderLive(e *liveEntry, width int, focused bool) []string {
 	throttled := e.rendered != nil &&
 		e.renderedWidth == width &&
 		e.renderedFocused == focused &&
+		e.renderedThemeGen == w.themeGen &&
 		!e.status.terminal() &&
 		time.Since(e.renderedAt) < streamThrottle
 	if throttled {
@@ -93,6 +96,7 @@ func (w *Workspace) renderLive(e *liveEntry, width int, focused bool) []string {
 	e.renderedVersion = e.version
 	e.renderedWidth = width
 	e.renderedFocused = focused
+	e.renderedThemeGen = w.themeGen
 	e.renderedAt = time.Now()
 	e.renderedSecond = second
 	e.renderedFrame, e.servedVersion = w.frame, e.version

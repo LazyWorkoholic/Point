@@ -83,6 +83,17 @@ type Root struct {
 	// coalescing logic (tasksDirty) needs no live protocol.Client.
 	ListTasksFn func(protocol.Envelope) bool
 
+	// SettingsSendFn is settings.go's equivalent of ListTasksFn, for the
+	// identical reason: a unit test's protocol.Client is never Start()ed
+	// (it cannot spin up a real backend), so the real settingsSend always
+	// fails there — which is enough to prove an ATTEMPT was made (picker.go's
+	// own tests already rely on this for awaitingConnection), but not
+	// enough to exercise what happens once a request genuinely succeeds,
+	// such as whether r.settings.modelsReqID is set before or after the
+	// item list is rebuilt (the exact ordering bug a verification round
+	// found in finalizeProviderSelection). Defaults to settingsSend.
+	SettingsSendFn func(cmdType string, payload map[string]any) (string, bool)
+
 	// lastFrame is the most recently rendered screen, re-served while a
 	// paste burst is assembling — see View's doc comment for why that is a
 	// correctness fix and not just a speed one.
@@ -113,6 +124,35 @@ type Root struct {
 	// view has been unloaded still has to appear and still has to open.
 	// Zero value: no tray open.
 	tray trayState
+
+	// settings is F10's Settings popup controller (settings.go) -- the
+	// provider chooser, credential entry and the Appearance tab. Root owns
+	// it for the same reason it owns the tray and the picker: an open
+	// Overlay never receives protocol.EnvelopeMsg (every envelope routes to
+	// the active WORKSPACE only), so the ListProviders/ListProviderModels/
+	// SetProviderApiKey round trips need an owner outside any Overlay.
+	settings settingsState
+
+	// activeProvider is the provider+model Settings/the first-run chooser
+	// has picked, read-only here (chat.Workspace is the sole writer of
+	// state.json's own copy -- see config\state.go's Provider doc and
+	// chat\providers.go). Root keeps its own copy only because it is what
+	// Settings' Providers tab renders "active" against and what the
+	// first-run trigger below reads; every CHANGE still flows through
+	// ProviderDefaultSetMsg to chat, never written here directly to disk.
+	activeProvider *config.ProviderDefault
+
+	// needsProviderSetup is opts.State.Provider == nil, latched at New()
+	// and consumed on the first tea.WindowSizeMsg -- see that case's own
+	// comment for why an overlay cannot open any earlier than that.
+	needsProviderSetup bool
+
+	// mouseEnabled mirrors whatever mouse option main.go actually gave
+	// tea.NewProgram, the one piece of runtime state this package cannot
+	// read back from Bubble Tea itself -- Settings' Appearance tab (F10)
+	// needs it both to render the toggle's current state and to know
+	// which of tea.EnableMouseCellMotion/tea.DisableMouse to send.
+	mouseEnabled bool
 
 	status   string
 	log      *slog.Logger
@@ -180,6 +220,12 @@ type Options struct {
 	Log    *slog.Logger
 	State  config.State
 	Env    Environment
+
+	// MouseEnabled is the mouse option main.go actually gave
+	// tea.NewProgram (state.json's UI override already applied there) --
+	// see Root.mouseEnabled's own doc for why this package cannot ask
+	// Bubble Tea for it instead.
+	MouseEnabled bool
 }
 
 // New builds the root and validates the action registry.
@@ -206,8 +252,15 @@ func New(opts Options) (*Root, error) {
 		env:           opts.Env,
 		conn:          connection{state: protocol.StateStarting},
 		rightPaneOpen: true,
+		// F10: nil exactly when nothing has been chosen through Point's own
+		// UI yet (config\state.go's Provider doc). needsProviderSetup is
+		// read exactly once, on the first WindowSizeMsg -- see that case.
+		activeProvider:     opts.State.Provider,
+		needsProviderSetup: opts.State.Provider == nil,
+		mouseEnabled:       opts.MouseEnabled,
 	}
 	r.ListTasksFn = r.sendListTasks
+	r.SettingsSendFn = r.settingsSend
 
 	r.actions = registerActions()
 	if err := r.actions.Validate(); err != nil {
@@ -321,6 +374,18 @@ func (r *Root) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		r.recompute()
 		r.closeOverlayIfTooSmall()
 		r.closeRightPaneFallbackIfObsolete()
+		// F10's first-run chooser cannot open any earlier than this: Init()
+		// runs before the terminal's real size is known (r.w/r.h are still
+		// 0,0), and OpenOverlay's own fit check (overlayFits) would refuse
+		// anything against a 0x0 terminal unconditionally. This is the
+		// first moment a real size exists, so it is also the first moment
+		// "does Settings fit" can be answered honestly. Latched so a LATER
+		// resize — the terminal shrinking and growing again — never reopens
+		// it a second time.
+		if r.needsProviderSetup {
+			r.needsProviderSetup = false
+			return r, r.openSettingsPopup()
+		}
 		return r, nil
 
 	case tea.KeyMsg:
@@ -428,7 +493,7 @@ func (r *Root) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		ws, wsCmd := r.current().Update(m)
 		r.workspaces[r.active] = ws
 		r.refreshTasks()
-		return r, tea.Batch(r.afterBackend(), wsCmd, r.retryPickerIfAwaiting())
+		return r, tea.Batch(r.afterBackend(), wsCmd, r.retryPickerIfAwaiting(), r.retrySettingsIfAwaiting())
 
 	case protocol.VersionMismatchMsg:
 		// Refuse, with BOTH versions named. This is the envelope version from
@@ -492,9 +557,10 @@ func (r *Root) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		r.handleTaskListEnvelope(m.Envelope)
 		r.handleTrayEnvelope(m.Envelope)
 		pickerCmd := r.handlePickerEnvelope(m.Envelope)
+		settingsCmd := r.handleSettingsEnvelope(m.Envelope)
 		ws, wsCmd := r.current().Update(m)
 		r.workspaces[r.active] = ws
-		return r, tea.Batch(r.afterBackend(), wsCmd, pickerCmd)
+		return r, tea.Batch(r.afterBackend(), wsCmd, pickerCmd, settingsCmd)
 
 	case openOverlayMsg:
 		// tray.go's OnSelect cannot assign r.overlay itself: it runs inside
@@ -516,6 +582,11 @@ func (r *Root) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		r.status = "card discarded -- the result is still in the tray"
 		r.log.Debug("tray: result card discarded", "task", m.taskID)
 		return r, nil
+
+	case submitCredentialMsg:
+		// CredentialPrompt's own Update cannot reach protocol.Client —
+		// see credential.go's doc on submitCredentialMsg.
+		return r, r.settingsSubmitKey(m.provider, m.key)
 
 	case OpenAttachmentPickerMsg:
 		// F8's @ picker — see picker.go. Root, not the workspace, opens
@@ -810,6 +881,10 @@ func (r *Root) pushDiagnostics() tea.Cmd {
 		StatePath:       r.env.StatePath,
 		StateError:      r.env.StateError,
 		Notes:           r.env.Notes,
+		// F10: nil exactly when nothing has been chosen through Point's own
+		// UI yet — see Diagnostics.NoProviderConfigured's own doc for why
+		// this is pushed rather than read off chat's own state.json copy.
+		NoProviderConfigured: r.activeProvider == nil,
 	}
 	return func() tea.Msg { return DiagnosticsMsg{D: d} }
 }

@@ -142,7 +142,7 @@ func TestOverlayTaskCardUpdatesLiveUnderRealClientConcurrency(t *testing.T) {
 		Dial: func() (protocol.Backend, error) { return fb, nil },
 	})
 
-	r, err := app.New(app.Options{Theme: th, Client: client})
+	r, err := app.New(app.Options{Theme: th, Client: client, State: testProviderDefault})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -266,7 +266,7 @@ func TestBothSurfacesShowARunningTaskWhileTokensFlood(t *testing.T) {
 			client := protocol.NewClient(protocol.Options{
 				Dial: func() (protocol.Backend, error) { return fb, nil },
 			})
-			r, err := app.New(app.Options{Theme: th, Client: client})
+			r, err := app.New(app.Options{Theme: th, Client: client, State: testProviderDefault})
 			if err != nil {
 				t.Fatal(err)
 			}

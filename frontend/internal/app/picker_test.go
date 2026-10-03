@@ -166,7 +166,7 @@ func TestOnPickerAgentsRespectsLeading(t *testing.T) {
 // picker should ALSO reopen live off buffer content) cannot silently widen
 // who gets offered Agents along the way.
 func TestOpenAttachmentPickerCarriesNonLeadingThrough(t *testing.T) {
-	r, err := New(Options{Client: protocol.NewClient(protocol.Options{})})
+	r, err := New(Options{Client: protocol.NewClient(protocol.Options{}), State: testProviderDefault})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -989,7 +989,7 @@ func TestOnPickerSelectFileStaysOpenUntilAttachResolves(t *testing.T) {
 func TestOnPickerAttachSuccessClosesAndProducesChip(t *testing.T) {
 	popup := NewPopup(PopupConfig{Title: "@", MinW: 60, MinH: 16})
 	fw := &fakePickerWorkspace{}
-	r, err := New(Options{})
+	r, err := New(Options{State: testProviderDefault})
 	if err != nil {
 		t.Fatal(err)
 	}

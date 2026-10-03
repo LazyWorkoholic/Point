@@ -57,6 +57,23 @@ type Diagnostics struct {
 	StateError  string
 
 	Notes []string
+
+	// NoProviderConfigured is F10's UI-03 state, derived from
+	// r.activeProvider == nil — nil exactly when nothing has been chosen
+	// through Point's own UI yet (the first-run chooser or Settings).
+	//
+	// Pushed here rather than read by chat.Workspace off its own state.json
+	// copy (config\state.go's Provider field) for the same reason
+	// ConnState/BackendDown already are: a value a workspace's own
+	// constructor defaults to zero would make every pre-existing test that
+	// builds a bare Workspace (never having gone through Root's first-run
+	// check at all) suddenly see "no provider" as true and lock its input —
+	// which is exactly what happened the first time this was wired directly
+	// off w.state.Provider, breaking essentially every chat test that sends
+	// a message. Routing it through Root's own diagnostics push instead
+	// means the lock can only ever turn on because ROOT decided it should,
+	// never as an accidental default of an unrelated struct's zero value.
+	NoProviderConfigured bool
 }
 
 // DiagnosticsMsg is how the root hands a workspace a fresh snapshot. The

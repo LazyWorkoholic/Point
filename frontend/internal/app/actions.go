@@ -288,6 +288,19 @@ func registerActions() *actions.Registry[*Root] {
 		},
 	})
 
+	// ---- F10 ------------------------------------------------------------
+
+	r.Register(actions.Action[*Root]{
+		ID:          "settings.open",
+		Name:        "Settings",
+		Description: "Providers, appearance -- add or change a provider's key, switch the theme",
+		Category:    "Application",
+		Leader:      "s",
+		Run: func(root *Root) tea.Cmd {
+			return root.openSettingsPopup()
+		},
+	})
+
 	r.Register(actions.Action[*Root]{
 		ID:          "backend.retry",
 		Name:        "Retry Backend",

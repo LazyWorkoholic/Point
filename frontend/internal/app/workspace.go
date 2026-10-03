@@ -66,6 +66,18 @@ type Overlay interface {
 	Update(tea.Msg) (Overlay, tea.Cmd)
 }
 
+// ThemeAware is implemented by a workspace that keeps its own copy of the
+// theme — every real Workspace does, since View takes a layout.Layout, not a
+// theme.Theme, and renders using whatever it was constructed with. Settings'
+// Appearance tab (F10) changes Root's own r.theme directly, which repaints
+// Root's own chrome (header, status bar, overlays) for free; a workspace
+// holding a stale copy would not otherwise ever find out. Root asks for this
+// the same way it asks FocusAware/OverlayProvider for theirs — a narrow
+// interface, type-asserted, never assumed.
+type ThemeAware interface {
+	SetTheme(theme.Theme)
+}
+
 // OverlayProvider is implemented by a workspace whose right-pane cards must
 // stay reachable when the pane auto-hides — LAYOUT.md's "Auto-hides below 90
 // columns; still openable as an overlay" (F06-right-pane.md). The same

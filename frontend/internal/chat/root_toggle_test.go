@@ -21,7 +21,7 @@ func key(s string) tea.KeyMsg {
 func newIntegrationRoot(t *testing.T) *app.Root {
 	t.Helper()
 	th := testTheme()
-	r, err := app.New(app.Options{Theme: th})
+	r, err := app.New(app.Options{Theme: th, State: testProviderDefault})
 	if err != nil {
 		t.Fatal(err)
 	}

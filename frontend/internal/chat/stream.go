@@ -196,6 +196,18 @@ type liveEntry struct {
 	renderedSecond  int
 	rendered        []string
 
+	// renderedThemeGen is the Workspace.themeGen this entry's rendered
+	// lines were coloured with (chat.go's doc on themeGen). None of
+	// version/width/focused change when Settings' Appearance tab (F10)
+	// repaints the theme, so without this the memo's every freshness check
+	// stayed satisfied and a streaming entry's "Point:" label and cursor
+	// bar kept their OLD colours until something ELSE happened to bump
+	// version/width/focused (a token arriving, a resize) — found live:
+	// changing the theme repainted everything except the transcript, which
+	// then jumped to the new palette on the next unrelated keypress that
+	// forced a real re-render for an unrelated reason.
+	renderedThemeGen int
+
 	// renderedFrame/servedVersion describe what this entry ANSWERED WITH
 	// in a given frame, which is not the same thing as what is cached:
 	// a throttled call serves lines rendered at an older version, and the
@@ -265,17 +277,30 @@ func (w *Workspace) Streaming() bool {
 // HasPending implements app.QueueAware.
 func (w *Workspace) HasPending() bool { return w.queued != nil }
 
-// inputLocked is the ONLY condition under which this episode locks the input
-// — F05-streaming-queue.md's Do NOT is explicit that nothing else may. Note
-// what it is not: it is not "a reply is streaming". Composing while a reply
-// streams is the entire point of the queue.
-func (w *Workspace) inputLocked() bool { return w.queued != nil }
+// inputLocked gates every editing keystroke (input_keys.go's own first
+// line). F05-streaming-queue.md's Do NOT was explicit that queue capacity is
+// the ONLY reason to lock the input, and for a long time it was the only
+// disjunct here. F10 adds a second, independent one: providerMissing, UI-03's
+// "no provider configured" state — the spec's own words for it are "input
+// disabled, with the reason and the fix inline", and a dead input a user can
+// still type into is not that. Note what neither case is: it is not "a
+// reply is streaming" — composing while a reply streams is the queue's whole
+// point.
+func (w *Workspace) inputLocked() bool { return w.queued != nil || w.providerMissing() }
 
-// lockReason is never allowed to be empty while inputLocked is true. A dead
+// lockReason is never allowed to be empty while w.queued != nil. A dead
 // input with no explanation is the failure F5's verification looks for by
 // name, so the reason travels with the lock rather than being rendered
-// somewhere that could get out of step with it.
+// somewhere that could get out of step with it. providerMissing's own
+// reason is a separate constant (render.go's queryLines) since the two
+// causes need different words and different fix keys.
 const lockReason = "queue full — esc to discard pending"
+
+// providerMissingReason is providerMissing's own "the reason and the fix" —
+// the query area shows this instead of the input the moment nothing has
+// been chosen yet, naming the exact chord that fixes it (actions.go's
+// settings.open, leader "s").
+const providerMissingReason = "no provider configured — ctrl+w s to set one up"
 
 // ---------------------------------------------------------------------------
 // Sending

@@ -270,14 +270,24 @@ func (w *Workspace) queryLines(rect layout.Rect) []string {
 	if rows <= 0 {
 		return nil
 	}
-	// F5: at queue capacity the input is locked, and the reason takes the
-	// input's own place rather than being tucked into a status bar the eye
-	// is not on. "the input is dead with no explanation" is the stated
-	// failure; the explanation is therefore rendered where the dead input
-	// would be, and it names the key that clears it.
-	if w.inputLocked() {
+	// F5/F10: while the input is locked, the reason takes its own place
+	// rather than being tucked into a status bar the eye is not on. "the
+	// input is dead with no explanation" is the stated failure for both
+	// causes; the explanation is therefore rendered where the dead input
+	// would be, and it names the key that clears it. Checked in this order
+	// because a provider is meaningless to set up mid-queue — the queue
+	// reason is the more immediately actionable of the two when both
+	// happen to be true at once (queued, in a profile that has also never
+	// had a provider chosen — reachable since CreateSession can still
+	// succeed with an unresolved session that only fails once sent).
+	switch {
+	case w.queued != nil:
 		width := w.input.boxContentWidth
 		reason := w.theme.Style(theme.Warning).Render("⊘ " + lockReason)
+		return clip([]string{padCells(reason, width)}, rows)
+	case w.providerMissing():
+		width := w.input.boxContentWidth
+		reason := w.theme.Style(theme.Warning).Render("⚠ " + providerMissingReason)
 		return clip([]string{padCells(reason, width)}, rows)
 	}
 	lines := renderInputLines(w.theme, &w.input.buf, w.input.currentMode(), w.input.chips,

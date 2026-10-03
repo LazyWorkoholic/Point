@@ -27,7 +27,10 @@ it passed.
 | **F9a** | **Task Tray + Result Cards (F9, SPLIT)** | 🟡 **built + manually verified — F9 NOT complete; F9b + F9c are the remainder** | `F09a-task-tray-cards.md` |
 | F9b | Diff Card | not started — blocked on F13 + B24 | — |
 | F9c | Result Card Attach + Save | not started — blocked on B13 + an unspecced B12 attachment-source extension | — |
-| F10–F18 | — | not started | — |
+| **F10** | **Settings, Providers, First Run (F10, narrowed)** | 🟡 **built + manually verified — F10 NOT complete; F10b + F10c are the remainder** | `F10-settings-first-run.md` |
+| F10b | Settings — Behaviour Overrides + `doctor` in About | not started — blocked on a not-yet-scoped backend episode (runtime override layer + a `doctor` wire event) | — |
+| F10c | Settings — Demo Mode | not started — blocked on a not-yet-scoped backend episode (new provider type + fixture library + sample project) | — |
+| F11–F18 | — | not started | — |
 
 **F1 and F2 were built and verified in one session** (`batchable: yes`).
 
@@ -43,6 +46,31 @@ is `file`-only so a task result cannot be attached, and nothing writes
 
 F9 closes only when **F9b** (Session 18b — the diff card) and **F9c**
 (Session 23b — attach and save) land. Until then this row stays 🟡.
+
+**F10 is SPLIT, the same shape as F9, stopped before any code was
+written — see `design/tasks/frontend/INDEX.md`'s F10 split note for the
+three reasons.** What shipped is the provider chooser (first run),
+credential entry/validation, the no-provider state, and the Providers +
+Appearance tabs of Settings — everything the wire protocol supports end
+to end now that B25 (credential persistence) has landed. `point doctor`,
+the Behaviour tab's live effect, and demo mode are each blocked on a
+backend episode that does not exist yet; **the three deferred items are
+recorded with file:line evidence in `F10-settings-first-run.md`** so
+F10b and F10c do not re-derive them.
+
+F10 closes only when **F10b** (Behaviour overrides + `doctor`) and
+**F10c** (demo mode) land. Until then this row stays 🟡.
+
+**`F10-settings-first-run.md` is worth reading before adding a tab to
+the Settings popup** (F10b's Behaviour/About, F11's Memory) — it records
+exactly how `Decor`/`OnSelect` dispatch by item-id prefix rather than by
+tab, which is what makes a new tab purely additive. It is also worth
+reading before touching anything that calls `protocol.Client.Request` at
+startup: the episode's headline bug (a 5-minute "stuck" state on a
+fresh profile's first launch) took three rounds of wrong theories before
+the actual cause — a request that failed because the backend handshake
+had not completed yet, with no retry — turned out to be the exact same
+shape `app\picker.go` had already hit once (its own "Bug B").
 
 **`F09a-task-tray-cards.md` is worth reading before building any Popup
 consumer**, F10's settings and F11's memory popup especially. Four of the six

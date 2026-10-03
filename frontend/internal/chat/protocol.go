@@ -49,6 +49,16 @@ const (
 	// two above: a refused refresh costs a chip staying on its last known
 	// state one cycle longer, never the transcript.
 	queryListAttachments
+	// querySetSessionProvider is F10's: Settings/the first-run chooser
+	// (app\settings.go) changes r.activeProvider, but that only affects
+	// sessions CREATED from then on (onSessionList's CreateSession
+	// payload) — the session already open keeps whatever it was given at
+	// ITS OWN creation, which cards.go's Status card reads verbatim
+	// (w.sessionProvider/w.sessionModel). A verification round found the
+	// Status card simply never moving no matter what was chosen in
+	// Settings, which this call exists to fix: see providers.go's
+	// applyProviderDefault.
+	querySetSessionProvider
 )
 
 // localID mints a request id. protocol.newID does the equivalent job inside
@@ -254,6 +264,15 @@ func (w *Workspace) handleEnvelope(env protocol.Envelope) tea.Cmd {
 			w.log.Warn("chat: GetContextReport refused, Status card stays unwired this load", "err", p.Error)
 			return nil
 		}
+		if kind == querySetSessionProvider {
+			// NOT w.loadErr: the transcript already on screen is correct
+			// either way, and CreateSession's own payload (onSessionList)
+			// still carries the chosen default for the NEXT session
+			// regardless of whether this one's retrofit succeeded. Costs
+			// only the Status card staying on whatever it showed before.
+			w.log.Warn("chat: SetSessionProvider refused, Status card not retrofitted", "err", p.Error)
+			return nil
+		}
 		if kind == queryDetachAttachment {
 			// NOT w.loadErr: detachChip already removed the chip locally
 			// (optimistic, matching backspace's own pre-F8 behaviour) —
@@ -292,8 +311,35 @@ func (w *Workspace) handleEnvelope(env protocol.Envelope) tea.Cmd {
 		w.onContextReport(env)
 	case queryListAttachments:
 		w.onAttachmentList(env)
+	case querySetSessionProvider:
+		w.onSessionProviderUpdated(env)
 	}
 	return nil
+}
+
+// onSessionProviderUpdated applies SessionProviderUpdated to the ONE place
+// the Status card actually reads (cards.go's statusCardLines) — see
+// providers.go's applyProviderDefault for why this request exists at all.
+// Decoded straight off the reply rather than trusted from what was sent:
+// the backend's own echo is the only claim this package treats as true
+// about what a session's row now holds.
+func (w *Workspace) onSessionProviderUpdated(env protocol.Envelope) {
+	var p struct {
+		SessionID string `json:"session_id"`
+		Provider  string `json:"provider"`
+		Model     string `json:"model"`
+	}
+	if err := env.UnmarshalPayload(&p); err != nil {
+		return
+	}
+	if p.SessionID != w.sessionID {
+		// The active session changed (or this reply is for a session this
+		// workspace has since moved away from) while the request was in
+		// flight — applying it now would relabel the WRONG session's card.
+		return
+	}
+	w.sessionProvider = p.Provider
+	w.sessionModel = p.Model
 }
 
 func (w *Workspace) onSessionList(env protocol.Envelope) {
@@ -323,11 +369,27 @@ func (w *Workspace) onSessionList(env protocol.Envelope) {
 		w.send(protocol.CmdGetSession, queryGetSession, map[string]any{"session_id": session.ID})
 		return
 	}
-	// Nothing usable, including the empty-list case: start fresh. A new
-	// session inherits the global config, so it is resolvable by
-	// construction — which makes this the branch that guarantees the app
-	// always reaches a usable state.
-	w.send(protocol.CmdCreateSession, queryCreateSession, map[string]any{})
+	// Nothing usable, including the empty-list case: start fresh.
+	//
+	// w.state.Provider is F10's own stored default (config\state.go) — nil
+	// until the user has picked one through Point's own UI (the first-run
+	// chooser or Settings' Providers tab, both app\settings.go), in which
+	// case the payload is exactly empty, same as before this episode, and
+	// the backend's own resolution chain (session > agent default > global
+	// config.toml) decides, unchanged. Once a choice exists it is passed
+	// explicitly so a fresh session is resolvable even on a profile whose
+	// config.toml never set provider.default/model.default at all — see
+	// state.go's own doc on why this field exists instead of writing that
+	// file (Point must never touch it).
+	payload := map[string]any{}
+	if d := w.state.Provider; d != nil {
+		payload["provider"] = d.Provider
+		payload["model"] = d.Model
+		if d.Effort != "" {
+			payload["effort"] = d.Effort
+		}
+	}
+	w.send(protocol.CmdCreateSession, queryCreateSession, payload)
 }
 
 func (w *Workspace) onSessionCreated(env protocol.Envelope) {
@@ -460,6 +522,7 @@ func (w *Workspace) Update(msg tea.Msg) (app.Workspace, tea.Cmd) {
 			w.tasks = m.D.Tasks
 			w.backendDown = m.D.ConnState == protocol.StateFailed
 			w.connState = m.D.ConnState
+			w.noProviderConfigured = m.D.NoProviderConfigured
 		}
 	case protocol.EnvelopeMsg:
 		return w, w.handleEnvelope(m.Envelope)
@@ -496,6 +559,14 @@ func (w *Workspace) Update(msg tea.Msg) (app.Workspace, tea.Cmd) {
 		return w, w.applyAgentPicked(m.ID)
 	case app.AttachmentPickedMsg:
 		return w, w.applyAttachmentPicked(m.Chip)
+	case app.ProviderDefaultSetMsg:
+		// F10: Settings/the first-run chooser chose this directly on Root
+		// (app\settings.go) — this workspace is only told so it can persist
+		// it (the single state.json writer, same rule Drafts already
+		// follows) and so CreateSession/providerMissing read it from here on.
+		w.applyProviderDefault(m.Default)
+	case app.UIOverrideSetMsg:
+		w.applyUIOverride(m.Override)
 	case tea.KeyMsg:
 		if w.input.focused {
 			return w, w.handleInputKey(m)

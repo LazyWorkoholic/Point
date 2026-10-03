@@ -531,10 +531,27 @@ class Runtime:
             provider = self.providers.get(name)
             if not getattr(provider, "selectable", True):
                 continue  # MockProvider: registered for tests, never offered
+            # F10 found ListProviders appearing to hang for minutes on a
+            # fresh profile's first launch, with every later launch of the
+            # SAME profile resolving instantly -- a pattern that pointed at
+            # something environmental (Windows' IPv6/"localhost" happy-
+            # eyeballs delay is the leading suspect; OllamaProvider's
+            # default base_url is now the literal 127.0.0.1 rather than
+            # "localhost" for exactly this reason) rather than Ollama
+            # itself being slow. Logged unconditionally, at warning once it
+            # crosses a second, so the NEXT reproduction -- if there is one
+            # -- pins the exact culprit from point.log instead of being
+            # re-diagnosed from a bug report alone.
+            started = time.monotonic()
             try:
                 health = await provider.health()
+                elapsed = time.monotonic() - started
+                log_at = _log.warning if elapsed > 1.0 else _log.debug
+                log_at("Provider %r health check took %.3fs (status=%s)", name, elapsed, health.status.value)
                 results.append({"name": name, **asdict(health)})
             except ProviderError as exc:
+                elapsed = time.monotonic() - started
+                _log.warning("Provider %r health check raised after %.3fs: %s", name, elapsed, exc)
                 results.append({"name": name, "status": "unhealthy", "detail": str(exc)})
         await self._emit(OutgoingEvent(
             type=OutgoingEventType.PROVIDER_LIST,

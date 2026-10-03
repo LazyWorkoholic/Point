@@ -68,11 +68,31 @@ func run() error {
 	stopPprof := startPprof(log)
 	defer stopPprof()
 
-	th := theme.New(cfg.UI.Theme, theme.Background(cfg.UI.Background))
-	if cfg.UI.Theme != "" && th.Name() != cfg.UI.Theme {
+	// F10's Appearance tab writes a state.json override rather than
+	// config.toml (Settings never writes the user's file) — applied here,
+	// on top of config.toml's own [ui] values, before anything downstream
+	// picks a theme or decides whether mouse reporting is on. An empty
+	// override field means "untouched"; only Mouse needs a pointer to tell
+	// "never touched" from "explicitly off".
+	themeName, background := cfg.UI.Theme, cfg.UI.Background
+	mouseEnabled := true
+	if ov := state.UI; ov != nil {
+		if ov.Theme != "" {
+			themeName = ov.Theme
+		}
+		if ov.Background != "" {
+			background = ov.Background
+		}
+		if ov.Mouse != nil {
+			mouseEnabled = *ov.Mouse
+		}
+	}
+
+	th := theme.New(themeName, theme.Background(background))
+	if themeName != "" && th.Name() != themeName {
 		env.Notes = append(env.Notes, fmt.Sprintf(
 			"unknown theme %q — using %s (available: %v)",
-			cfg.UI.Theme, th.Name(), theme.Names()))
+			themeName, th.Name(), theme.Names()))
 	}
 
 	// Python's stderr goes to its own file. Stdout is the protocol channel and
@@ -104,11 +124,12 @@ func run() error {
 	}
 
 	root, err := app.New(app.Options{
-		Theme:  th,
-		Client: client,
-		Log:    log,
-		State:  state,
-		Env:    env,
+		Theme:        th,
+		Client:       client,
+		Log:          log,
+		State:        state,
+		Env:          env,
+		MouseEnabled: mouseEnabled,
 	})
 	if err != nil {
 		// A duplicate action ID or binding lands here: loudly, at boot, with
@@ -134,17 +155,21 @@ func run() error {
 		State: state,
 	}))
 
-	program := tea.NewProgram(root,
+	programOpts := []tea.ProgramOption{
 		tea.WithAltScreen(),
-		// Mouse is on; nothing is mouse-only, and F16 adds the toggle.
-		tea.WithMouseCellMotion(),
 		// Bracketed paste is left enabled (the option to turn it off is
 		// WithoutBracketedPaste), but on Windows it does NOT reach the model:
 		// Bubble Tea's console-record reader clears ENABLE_VIRTUAL_TERMINAL_INPUT
 		// and never sets KeyMsg.Paste, so a paste arrives as N key events.
 		// frontend\internal\app\paste.go reconstructs it and explains why the
 		// obvious alternative (WithInputTTY) cannot be used here.
-	)
+	}
+	// Mouse is on by default — nothing is mouse-only — unless F10's
+	// Appearance tab turned it off via the state.json override above.
+	if mouseEnabled {
+		programOpts = append(programOpts, tea.WithMouseCellMotion())
+	}
+	program := tea.NewProgram(root, programOpts...)
 
 	// Restore the terminal on the way out, whatever the reason.
 	//

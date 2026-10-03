@@ -82,7 +82,17 @@ class ProviderConfig:
         api_key = appconfig.resolve_api_key(provider)
         base_url = os.environ.get(f"{provider.upper()}_BASE_URL")
         if provider == "ollama" and not base_url:
-            base_url = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
+            # 127.0.0.1, not "localhost" -- F10's verification found
+            # ListProviders hanging for minutes on a fresh profile's FIRST
+            # launch (every later launch of the same profile resolved
+            # instantly), the exact signature of Windows resolving
+            # "localhost" to both ::1 and 127.0.0.1 and trying the IPv6
+            # route first: Ollama listens on IPv4 only, so that attempt has
+            # to exhaust its own timeout before falling back -- and
+            # whatever cache makes the SECOND launch instant (the OS
+            # resolver, a route cache) is not warm yet on the very first
+            # one. A literal IP needs no resolution and no such race.
+            base_url = os.environ.get("OLLAMA_BASE_URL", "http://127.0.0.1:11434")
         return ProviderConfig(provider=provider, api_key=api_key, base_url=base_url)
 
 

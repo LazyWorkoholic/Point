@@ -245,6 +245,12 @@ type Workspace struct {
 	cache      map[string][]string
 	cacheOrder []string
 
+	// themeGen is bumped every time SetTheme (F10) installs a new theme —
+	// stream_render.go's per-entry render memo (liveEntry.renderedThemeGen)
+	// compares against this to notice a theme change the same way it
+	// already notices a width or focus change. See SetTheme's own doc.
+	themeGen int
+
 	// sessions is F6's Sessions card: the last ListSessions reply, kept
 	// around rather than discarded once bootstrap has picked one. Refreshed
 	// at bootstrap and after a switch (onSessionList/onSessionCreated) —
@@ -260,6 +266,11 @@ type Workspace struct {
 	// workspace only renders what it is handed.
 	tasks       []app.TaskRow
 	backendDown bool
+	// noProviderConfigured is F10's own addition to the DiagnosticsMsg push
+	// (app.Diagnostics.NoProviderConfigured) — see providers.go's
+	// providerMissing for why this is read off the push rather than off
+	// w.state.Provider directly.
+	noProviderConfigured bool
 	// connState is the connection state Root last pushed (same Seq guard as
 	// the fields around it). It is the ONE input to connectionDown — see
 	// connection.go for why the banner and a send's failure both read it.
@@ -331,6 +342,31 @@ func New(opts Options) *Workspace {
 
 func (w *Workspace) ID() layout.WorkspaceID { return layout.WorkspaceChat }
 
+// SetTheme is app.ThemeAware (F10): Settings' Appearance tab changes
+// Root's own r.theme directly for its own chrome, and reaches this workspace
+// through the same type-assertion Root already uses for FocusAware and
+// OverlayProvider — this package holds its own copy (every render call
+// reads w.theme, never a value threaded in from outside) because View's own
+// signature is layout.Layout, not theme.Theme.
+//
+// Both of this package's render memos bake colour into their cached lines
+// at the moment they are first rendered, and neither one's freshness check
+// has ever had a reason to know the theme could change underneath it —
+// found live, the real bug this fixes: changing the theme repainted every
+// OTHER surface immediately, but the transcript kept rendering persisted
+// messages (cache.go) and live/streaming entries (stream_render.go's
+// per-entry memo) in the OLD palette until some UNRELATED event (a resize,
+// a token, scrolling past a message whose id was not yet cached) happened
+// to invalidate the right cache entry for an unrelated reason. Clearing
+// cache.go's map directly handles persisted messages; themeGen is
+// stream_render.go's equivalent for live entries, which are memoised one at
+// a time rather than in a map SetTheme can simply wipe.
+func (w *Workspace) SetTheme(t theme.Theme) {
+	w.theme = t
+	w.themeGen++
+	w.invalidateCache()
+}
+
 // Cards is F6's right pane: Status short, Task medium, Sessions taking the
 // remainder — LAYOUT.md's own heights, unchanged since F1 chose them for the
 // Placeholder stub this replaces.
@@ -361,3 +397,4 @@ func (w *Workspace) Resume([]byte) error      { return nil }
 
 var _ app.Workspace = (*Workspace)(nil)
 var _ app.FocusAware = (*Workspace)(nil)
+var _ app.ThemeAware = (*Workspace)(nil)

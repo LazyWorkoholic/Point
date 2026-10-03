@@ -139,7 +139,7 @@ func updateAndDrain(t *testing.T, r *app.Root, msg tea.Msg) string {
 // this pins that down as an executable claim, not just a code-reading one.
 func TestTaskStartedRefreshesImmediatelyWhileOverlayIsTheVisibleSurface(t *testing.T) {
 	th := testTheme()
-	r, err := app.New(app.Options{Theme: th, Client: protocol.NewClient(protocol.Options{})})
+	r, err := app.New(app.Options{Theme: th, Client: protocol.NewClient(protocol.Options{}), State: testProviderDefault})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -202,7 +202,7 @@ func TestTaskStartedRefreshesImmediatelyWhileOverlayIsTheVisibleSurface(t *testi
 // snapshot latched at open time.
 func TestOverlayTracksLiveTaskIdentityAcrossTransitions(t *testing.T) {
 	th := testTheme()
-	r, err := app.New(app.Options{Theme: th, Client: protocol.NewClient(protocol.Options{})})
+	r, err := app.New(app.Options{Theme: th, Client: protocol.NewClient(protocol.Options{}), State: testProviderDefault})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -344,7 +344,7 @@ func elapsedSeconds(plain string) (int, bool) {
 // this, which is why four earlier reproduction attempts all passed.
 func TestReopeningTheOverlayRefreshesWorkStartedWhileItWasClosed(t *testing.T) {
 	th := testTheme()
-	r, err := app.New(app.Options{Theme: th, Client: protocol.NewClient(protocol.Options{})})
+	r, err := app.New(app.Options{Theme: th, Client: protocol.NewClient(protocol.Options{}), State: testProviderDefault})
 	if err != nil {
 		t.Fatal(err)
 	}

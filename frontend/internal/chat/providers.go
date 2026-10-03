@@ -1,6 +1,7 @@
 package chat
 
 import (
+	"github.com/lazyworkoholic/point/frontend/internal/config"
 	"github.com/lazyworkoholic/point/frontend/internal/protocol"
 )
 
@@ -79,4 +80,98 @@ func (w *Workspace) onProviderList(env protocol.Envelope) {
 		}
 	}
 	w.listSessions()
+}
+
+// ---------------------------------------------------------------------------
+// F10: the stored provider default
+// ---------------------------------------------------------------------------
+
+// providerMissing is UI-03's "no provider configured" state (F10): true
+// once Root has told this workspace, via app.DiagnosticsMsg, that
+// r.activeProvider is nil — nothing has been chosen through Point's own UI
+// yet. See config\state.go's doc on Provider for the one accepted gap this
+// check has — a hand-edited config.toml that already resolves fine would
+// still show this as true, since nothing on the wire lets this package tell
+// that case apart from a genuinely unconfigured one.
+//
+// Deliberately NOT w.state.Provider == nil, even though that is this exact
+// workspace's own copy of the same fact. A zero-valued config.State (every
+// chat test that builds a bare Workspace via New(Options{}), never having
+// gone through Root's first-run check at all) would make THAT check true by
+// simple default, locking the input for every one of them — which is
+// exactly what happened the first time this read w.state.Provider directly.
+// Routing it through the same DiagnosticsMsg push ConnState/backendDown
+// already use means the lock can only ever turn on because ROOT decided it
+// should (ultimately from opts.State.Provider at startup), never as an
+// accidental side effect of a field this package was never told to care
+// about defaulting to its zero value.
+//
+// Read by stream.go's inputLocked (query input disabled) and render.go's
+// queryLines (the reason shown in its place) — the same two call sites
+// connectionDown already feeds, and for the same reason: one check behind
+// both halves of the state, so they can never disagree.
+func (w *Workspace) providerMissing() bool {
+	return w.noProviderConfigured
+}
+
+// applyProviderDefault is app.ProviderDefaultSetMsg's handler: persist the
+// choice Root just made (Settings/the first-run chooser), immediately, not
+// debounced — this is a deliberate, discrete user action, not a keystroke.
+//
+// Also retrofits the CURRENTLY OPEN session, via SetSessionProvider — a
+// verification finding: persisting the default only ever changes what a
+// FUTURE session is created with (onSessionList's CreateSession payload);
+// the session already open was created before this choice existed (NULL
+// provider, "inherit from global config") and nothing was telling it
+// otherwise, so cards.go's Status card ("provider · model") sat frozen on
+// "—" or a stale value no matter what was picked in Settings afterward.
+// SetSessionProvider is the existing, already-wired-on-the-backend event
+// for exactly "this session's provider/model, now" (B4) — this is simply
+// the first Go caller of it. Session-less (sessionID == "", e.g. mid-
+// bootstrap before the first CreateSession/GetSession reply has landed) is
+// a silent no-op: there is nothing to retrofit yet, and onSessionList's own
+// payload will pick the default up when that session is created a moment
+// later anyway.
+func (w *Workspace) applyProviderDefault(d config.ProviderDefault) {
+	w.state.Provider = &d
+	if w.sessionID != "" {
+		w.send(protocol.CmdSetSessionProvider, querySetSessionProvider, map[string]any{
+			"session_id": w.sessionID, "provider": d.Provider, "model": d.Model,
+		})
+	}
+	if w.saveStateFn == nil {
+		return
+	}
+	if err := w.saveStateFn(w.state); err != nil {
+		w.log.Warn("saving the provider default", "err", err)
+	}
+}
+
+// applyUIOverride is app.UIOverrideSetMsg's handler — Settings' Appearance
+// tab (F10), the same immediate-persist rule applyProviderDefault uses.
+//
+// patch is a PATCH, not a full value (app.UIOverrideSetMsg's own doc): only
+// the field the user just changed is set, so this MERGES it into whatever
+// override already exists rather than replacing it outright. Replacing
+// would mean toggling the mouse after switching the theme throws the theme
+// choice away again — each call site only ever sends the one field it owns.
+func (w *Workspace) applyUIOverride(patch config.UIOverride) {
+	if w.state.UI == nil {
+		w.state.UI = &config.UIOverride{}
+	}
+	if patch.Theme != "" {
+		w.state.UI.Theme = patch.Theme
+	}
+	if patch.Background != "" {
+		w.state.UI.Background = patch.Background
+	}
+	if patch.Mouse != nil {
+		w.state.UI.Mouse = patch.Mouse
+	}
+	if w.saveStateFn == nil {
+		return
+	}
+	if err := w.saveStateFn(w.state); err != nil {
+		w.log.Warn("saving the appearance override", "err", err)
+	}
 }

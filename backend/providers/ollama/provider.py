@@ -65,7 +65,13 @@ class OllamaProvider(BaseProvider):
 
     def __init__(self, config) -> None:
         super().__init__(config)
-        self._base_url = (config.base_url or "http://localhost:11434").rstrip("/")
+        # 127.0.0.1, not "localhost" -- see providers\models.py's
+        # ProviderConfig.from_env, which is the normal path here and
+        # already resolves to the literal IP. This fallback only fires for
+        # a ProviderConfig built directly with no base_url (a test, or any
+        # future caller), and must not reintroduce the same hang by a
+        # second route.
+        self._base_url = (config.base_url or "http://127.0.0.1:11434").rstrip("/")
         self._translator = OllamaMessageTranslator()
 
     async def generate(self, request: GenerationRequest) -> GenerationResponse:
@@ -142,15 +148,38 @@ class OllamaProvider(BaseProvider):
         resp.raise_for_status()
         data = resp.json()
         return [
+            # /api/tags DOES report a model's on-disk size in bytes (`size`)
+            # and its parameter count (`details.parameter_size`) -- unlike
+            # context_window, which it genuinely never sends. Forwarded as
+            # metadata rather than a typed Model field: ModelCapabilities and
+            # Model's own columns are shared across every provider, and size
+            # on disk is Ollama-specific.
             Model(
                 id=m["name"], provider=self.name, display_name=m["name"],
                 context_window=0,  # not exposed via /api/tags
                 capabilities=ModelCapabilities(supports_streaming=True, supports_tools=True),
+                metadata={
+                    "size_bytes": m.get("size", 0),
+                    "parameter_size": m.get("details", {}).get("parameter_size", ""),
+                },
             )
             for m in data.get("models", [])
         ]
 
     async def health(self) -> ProviderHealth:
+        """F10 found this hanging ListProviders forever, not just failing
+        slowly: this method only ever caught httpx.ConnectError, so a slow
+        Ollama daemon raising httpx.TimeoutException (or any other httpx
+        error) instead propagated UNCAUGHT out of health(), past
+        _handle_list_providers's own `except ProviderError` (a raw httpx
+        exception is not one), and past Runtime.receive's `except
+        RuntimeException` too -- which means no ProviderList and no Error
+        envelope either reached the frontend AT ALL for that request.
+        F10's Settings popup sat on "checking..." indefinitely as a direct
+        symptom, resolving only once a FRESH ListProviders request happened
+        to land inside the 5-second timeout. generate()/stream() in this
+        same file already catch httpx.TimeoutException for the identical
+        reason; health() just never had it."""
         try:
             async with httpx.AsyncClient(timeout=5.0) as client:
                 resp = await client.get(f"{self._base_url}/api/tags")
@@ -159,3 +188,5 @@ class OllamaProvider(BaseProvider):
             return ProviderHealth(status=ProviderHealthStatus.UNHEALTHY, detail=f"status {resp.status_code}")
         except httpx.ConnectError:
             return ProviderHealth(status=ProviderHealthStatus.UNAVAILABLE, detail="Ollama not reachable")
+        except httpx.TimeoutException:
+            return ProviderHealth(status=ProviderHealthStatus.UNAVAILABLE, detail="Ollama timed out")

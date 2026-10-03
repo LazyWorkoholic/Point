@@ -36,6 +36,60 @@ type State struct {
 	// F12's real WorkspaceState must be adaptable TO Draft, not identical to
 	// it — see F04-query-input.md's Handoff for the exact call site.
 	Drafts map[string]Draft `json:"drafts,omitempty"`
+
+	// Provider is F10's own addition: the provider+model (+ optional effort)
+	// the user picked in the first-run chooser or Settings' Providers tab.
+	// nil means no choice has been made yet through Point's own UI — the
+	// first-run trigger (app\root.go) reads exactly this nil-ness, and
+	// nothing else, to decide whether to open the chooser.
+	//
+	// This is NOT the same thing as config.toml's `provider.default` /
+	// `model.default` (backend\appconfig.py), which Point must never write.
+	// A hand-edited config.toml can make SendMessage resolve perfectly well
+	// with this field still nil — in that one case the chooser still opens
+	// once, harmlessly (picking a provider here only ever ADDS a state.json
+	// override; it never touches config.toml), but nothing is broken by
+	// leaving it unset. There is no wire query that would let the frontend
+	// tell the two cases apart, since Go's own Config type deliberately
+	// parses only the [ui] table (config.go's own doc comment) and the
+	// resolution chain is backend-only (agents\executor.py's
+	// resolve_provider_model_effort). Documented here rather than solved.
+	//
+	// chat.Workspace is the sole reader and writer of this field, the same
+	// single-writer rule Drafts already follows — see chat\providers.go.
+	Provider *ProviderDefault `json:"provider,omitempty"`
+
+	// UI is F10's Appearance tab: theme/background/mouse overrides on top
+	// of config.toml's [ui] table, for the same reason Provider exists
+	// instead of writing config.toml — Settings never writes the user's
+	// file. nil means "nothing overridden, config.toml (or its defaults)
+	// governs" — main.go applies this on top of config.Load()'s result
+	// before building the theme or the Bubble Tea program's mouse option.
+	UI *UIOverride `json:"ui,omitempty"`
+}
+
+// ProviderDefault is the active provider+model Point's own UI will pass on
+// every new CreateSession from here on (chat\protocol.go) — see state.go's
+// doc on Provider for why this exists instead of config.toml's
+// provider.default/model.default.
+type ProviderDefault struct {
+	Provider string `json:"provider"`
+	Model    string `json:"model"`
+	// Effort is optional — only a model whose capabilities say
+	// supports_effort may ever have this set to anything but "".
+	Effort string `json:"effort,omitempty"`
+}
+
+// UIOverride is Settings' Appearance tab, on top of config.toml's [ui]
+// table. Each field is independently optional: changing the theme must not
+// force a background choice, and vice versa.
+type UIOverride struct {
+	Theme      string `json:"theme,omitempty"`
+	Background string `json:"background,omitempty"`
+	// Mouse is a pointer so "never touched" (nil, mouse stays on — F1's
+	// existing default) is distinguishable from "explicitly turned off"
+	// (false).
+	Mouse *bool `json:"mouse,omitempty"`
 }
 
 // Draft is one session's unsent input.

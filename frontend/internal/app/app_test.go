@@ -7,19 +7,39 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/lazyworkoholic/point/frontend/internal/actions"
+	"github.com/lazyworkoholic/point/frontend/internal/config"
 	"github.com/lazyworkoholic/point/frontend/internal/layout"
 	"github.com/lazyworkoholic/point/frontend/internal/protocol"
 	"github.com/lazyworkoholic/point/frontend/internal/theme"
 )
 
+// newRoot is the one shared Root fixture every test in this package builds
+// from. State.Provider is seeded with a dummy default (F10) so
+// needsProviderSetup is false and the Settings popup never auto-opens here —
+// none of these tests are ABOUT the first-run chooser, and the one
+// (TestFirstRunOpensSettingsWhenNoProviderIsConfigured, settings_test.go)
+// that is builds its own Root with State left at its zero value instead.
+// Without this, every pre-existing test in this package that opens its OWN
+// overlay at the first WindowSizeMsg — the exact moment the chooser used to
+// auto-open too — collided with it.
 func newRoot(t *testing.T) *Root {
 	t.Helper()
-	r, err := New(Options{Theme: theme.New("turquoise", theme.BackgroundTransparent)})
+	r, err := New(Options{
+		Theme: theme.New("turquoise", theme.BackgroundTransparent),
+		State: config.State{Provider: &config.ProviderDefault{Provider: "mock", Model: "mock"}},
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	return r
 }
+
+// testProviderDefault opts any OTHER direct New(Options{...}) call in this
+// package's tests out of the first-run chooser, the same way newRoot does —
+// for the tests that build their own Root instead of using newRoot (a real
+// client, a specific theme) but still don't want Settings auto-opening
+// underfoot.
+var testProviderDefault = config.State{Provider: &config.ProviderDefault{Provider: "mock", Model: "mock"}}
 
 func size(t *testing.T, r *Root, w, h int) string {
 	t.Helper()
@@ -319,7 +339,7 @@ func TestHelpListsEveryAction(t *testing.T) {
 func TestNoColorKeepsBordersAndDropsEscapes(t *testing.T) {
 	t.Setenv("NO_COLOR", "1")
 
-	r, err := New(Options{Theme: theme.New("turquoise", theme.BackgroundTransparent)})
+	r, err := New(Options{Theme: theme.New("turquoise", theme.BackgroundTransparent), State: testProviderDefault})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -345,8 +365,8 @@ func TestNoColorKeepsBordersAndDropsEscapes(t *testing.T) {
 // colours themselves are covered by the theme package's own tests, and by the
 // manual check that switching `[ui] theme` repaints the app.
 func TestSwitchingPaletteChangesNoText(t *testing.T) {
-	turquoise, _ := New(Options{Theme: theme.New("turquoise", theme.BackgroundTransparent)})
-	gold, _ := New(Options{Theme: theme.New("gold", theme.BackgroundTransparent)})
+	turquoise, _ := New(Options{Theme: theme.New("turquoise", theme.BackgroundTransparent), State: testProviderDefault})
+	gold, _ := New(Options{Theme: theme.New("gold", theme.BackgroundTransparent), State: testProviderDefault})
 
 	a := stripANSI(size(t, turquoise, 120, 30))
 	b := stripANSI(size(t, gold, 120, 30))
