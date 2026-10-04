@@ -34,6 +34,7 @@ it passed.
 | B25 | Persist a Validated Provider Key | ✅ built + manually verified | `B25-provider-key-persistence.md` |
 | B26 | Behaviour Overrides + `doctor` on the Wire | ✅ built + manually verified | `B26-behaviour-overrides-doctor-wire.md` |
 | B28 | Demo Mode: Provider, Fixture Library, Sample Project | ✅ built + manually verified | `B28-demo-mode-provider-fixtures.md` |
+| B29 | Remove the Legacy `backend\runtime.db` Copy-Forward | ✅ built + manually verified | `B29-remove-legacy-runtime-db.md` |
 | B30 | Let `SetSessionProvider` Also Bind a Session's Project | ✅ built + manually verified | `B30-set-session-project.md` |
 
 ## Verified file structure — end of Episode 11

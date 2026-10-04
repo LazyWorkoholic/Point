@@ -1717,6 +1717,72 @@ one.
 
 ---
 
+# SESSION 16h — B31 Validate `project_id` in `CreateSession`/`SetSessionProvider`
+
+**Goal:** neither `CreateSession` nor `SetSessionProvider` (B30) has ever
+checked that an incoming `project_id` matches a real `projects` row —
+close that gap in both handlers, with an unknown id treated as "no
+project" on `CreateSession` and "leave the existing binding alone" on
+`SetSessionProvider`. Neither refuses the request outright.
+
+**Does not block anything.** Found and queued *after* both Session 16d
+(F10c) and Session 16g (B30) were already recorded complete, via a live
+test run outside either episode's own verification gate. Unlike 16g, this
+session does not reopen 16d or any other closed session — it is a
+standalone hardening fix to a gap the earlier recording session found and
+parked (`design/tasks/backend/INDEX.md`'s parking lot) rather than fixed
+on the spot.
+
+**Why this episode exists.** The repro: select Demo mode (binds a session
+to the sample project), delete `runtime.db*` only — not `state.json` —
+migrate, relaunch. The session list comes back empty, `onSessionList`
+fires `CreateSession` with the `project_id` still stored in `state.json`,
+and the backend accepted it even though the fresh database's `projects`
+table was empty — no error, no validation, a session bound to nothing.
+Full trace in `design/completed/frontend/F10c-settings-demo-mode.md`'s
+Decision 1 correction and `design/tasks/backend/B31-validate-project-
+id.md`'s own "Why this episode exists" — the task doc already exists;
+this session reads it rather than writing it.
+
+**Paste:**
+```
+Read CLAUDE.md and design/tasks/backend/B31-validate-project-id.md.
+
+Add ProjectManager.exists() (a pure existence check, no touch, no write
+-- see the task doc's own Build §1 for why resolve() is not reused for
+this), then gate _handle_create_session's and _handle_set_session_
+provider's own handling of an incoming project_id on it. An unknown id
+means: CreateSession creates the session with project_id NULL and logs a
+warning; SetSessionProvider leaves whatever binding already existed
+untouched and logs a warning. Neither refuses the request.
+
+Do NOT touch the frontend, add a FOREIGN KEY/migration, change
+SetSessionProvider's existing unconditional-overwrite behaviour for a
+VALID project_id, or touch anything in either handler unrelated to
+project_id.
+
+Stop at the verification gate with real evidence for all seven
+Done-when items -- especially #3/#4 (an existing SetSessionProvider
+binding, bound or unbound, survives an unknown project_id arriving
+alongside it) and #5 (ProjectManager.exists() causes no write on a hit
+or a miss).
+
+If anything in this episode's Build section is ambiguous or seems to
+assume something not true of this repo, stop and tell me before writing
+code.
+```
+
+**Record:**
+```
+Write design/completed/backend/B31-validate-project-id.md following the
+format in design/completed/backend/INDEX.md. Add a row to that INDEX.md's
+status table and to design/model_usage.md.
+```
+
+**Then:** commit · `/clear`
+
+---
+
 # SESSION 16e — B27 Doctor Resolved Behaviour Values
 
 **Goal:** `GetDoctorReport` gains one new field — `behaviour_resolved` —

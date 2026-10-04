@@ -177,6 +177,19 @@ SESSION  EPISODE                          MODEL         WHY
                                                         change needed beyond the two
                                                         call sites 16g's own Build
                                                         section named in advance.
+--       B29 remove legacy runtime.db      Sonnet high   found and built inline during
+         copy-forward                                   16d (F10c), not its own
+                                                        WORKFLOW session -- deleting a
+                                                        proven-safe leftover file plus
+                                                        the dead copy-forward code
+                                                        behind it, and updating two
+                                                        docs to match. No completed doc
+                                                        was written at the time it
+                                                        shipped (commit b270433); this
+                                                        row and its completed doc were
+                                                        both written retroactively, once
+                                                        Aryan asked for them, against
+                                                        the real commit's own diff.
 16g      B30 set session project          Sonnet high   one optional field through an
          (via SetSessionProvider)                       existing handler, calling an
                                                         existing, already-tested manager
@@ -192,6 +205,24 @@ SESSION  EPISODE                          MODEL         WHY
                                                         discovered mid-session. Found
                                                         and spun out of 16d (F10c) by
                                                         live tracing, not reasoned about.
+16h      B31 validate project_id           Sonnet high   one new, narrow, side-effect-
+         (CreateSession/                                free existence check and two
+         SetSessionProvider)                             call sites that use it -- same
+                                                        shape as B20/B25/B26/B30. Does
+                                                        not block anything; found and
+                                                        parked (then scoped) after 16g
+                                                        (B30) and 16d (F10c) were both
+                                                        already recorded complete, via
+                                                        a live test outside either
+                                                        episode's own verification
+                                                        gate. The one real design call
+                                                        (asymmetric behaviour: null +
+                                                        warn on CreateSession, leave
+                                                        unchanged + warn on
+                                                        SetSessionProvider, neither
+                                                        refuses) was decided by Aryan
+                                                        and written into the task doc,
+                                                        not discovered mid-session.
 16e      B27 doctor resolved behaviour     Sonnet high   plumbing over two functions
          values                                         that already exist
                                                         (config_value,
