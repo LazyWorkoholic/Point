@@ -100,6 +100,13 @@ type ProviderDefault struct {
 	// Effort is optional — only a model whose capabilities say
 	// supports_effort may ever have this set to anything but "".
 	Effort string `json:"effort,omitempty"`
+	// ProjectID is Demo mode's (F10c): the shipped sample project's id,
+	// set once Demo is selected and its ProjectInit reply lands. Empty for
+	// every other provider — nothing else ever writes it. Forwarded on the
+	// next CreateSession (chat\protocol.go's onSessionList), never used to
+	// rebind a session that already exists — see F10c's own Decision 2 for
+	// why that is a real, inherited limit rather than solved here.
+	ProjectID string `json:"project_id,omitempty"`
 }
 
 // UIOverride is Settings' Appearance tab, on top of config.toml's [ui]

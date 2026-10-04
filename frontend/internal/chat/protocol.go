@@ -328,6 +328,7 @@ func (w *Workspace) onSessionProviderUpdated(env protocol.Envelope) {
 		SessionID string `json:"session_id"`
 		Provider  string `json:"provider"`
 		Model     string `json:"model"`
+		ProjectID string `json:"project_id"`
 	}
 	if err := env.UnmarshalPayload(&p); err != nil {
 		return
@@ -340,6 +341,7 @@ func (w *Workspace) onSessionProviderUpdated(env protocol.Envelope) {
 	}
 	w.sessionProvider = p.Provider
 	w.sessionModel = p.Model
+	w.projectID = p.ProjectID
 }
 
 func (w *Workspace) onSessionList(env protocol.Envelope) {
@@ -387,6 +389,14 @@ func (w *Workspace) onSessionList(env protocol.Envelope) {
 		payload["model"] = d.Model
 		if d.Effort != "" {
 			payload["effort"] = d.Effort
+		}
+		// F10c: Demo mode's sample-project binding. Only ever non-empty for
+		// Demo (nothing else writes it) — this is the ONE real path that
+		// binds a session's project_id, since CreateSession is reachable
+		// only from this empty-session-list branch and there is no later
+		// event that rebinds an already-created session's project.
+		if d.ProjectID != "" {
+			payload["project_id"] = d.ProjectID
 		}
 	}
 	w.send(protocol.CmdCreateSession, queryCreateSession, payload)

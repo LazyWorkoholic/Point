@@ -48,6 +48,7 @@ fix this table.
 | B23 | Agent + Directory Listing on the Wire | P1 | no | B7, B9 | ✅ built |
 | B24 | The Filler's Proposal on the Wire | P1 | no | B11, B8, B12 | not started — unblocks F9's diff card (WORKFLOW.md session 17b) |
 | B25 | Persist a Validated Provider Key | P1 | no | B6, B4 | not started — unblocks F10's credential-entry Done-when #4-6 (WORKFLOW.md session 15c) |
+| B30 | Let `SetSessionProvider` Also Bind a Session's Project | P1 | no | B12, B4/B6 | ✅ built |
 
 **B1–B5 are frozen.** Additive changes only — new columns, new optional fields.
 Never refactors.
@@ -117,6 +118,43 @@ never returns on stdin EOF. See `B06-schema-bootstrap.md` §9.
 Format: `[ ] item — why parked · hook · anchor · what unparking takes`
 `[✅] items - means it is written as an episode in above table and as a .md file.`
 
+- [ ] **`CreateSession`/`SetSessionProvider` accept a `project_id` matching no
+      `projects` row** — why parked: found live during F10c/B30's own
+      verification (`design/completed/frontend/F10c-settings-demo-mode.md`'s
+      Decision 1 correction), one finding among several, not either episode's
+      scope to fix (F10c's own "no backend changes" rule; B30 was already
+      scoped narrowly to one optional field). Repro: select Demo mode (binds a
+      session to the shipped sample project), delete `runtime.db*` only
+      (leave `state.json` alone), run `cli.py migrate`, relaunch. The session
+      list comes back empty, `onSessionList` fires `CreateSession` with the
+      `project_id` still stored in `state.json`, and the backend accepts it
+      even though the fresh database's `projects` table is empty — no error,
+      no validation, the app loads normally with a session
+      (`provider=demo`, `project_id=b93dbd75-...`) whose `project_id`
+      matches no row. Confirmed: `database\migrations.py`'s `sessions.
+      project_id` column (lines 58, 109) has no `FOREIGN KEY`/`REFERENCES`
+      constraint — every other cross-table id in that schema that needs one
+      has one (e.g. `session_id TEXT NOT NULL REFERENCES sessions(id) ON
+      DELETE CASCADE` at lines 74, 145, 223, 324); `sessions.project_id` is
+      the one exception. Both call sites that write it pass the value
+      straight through with no existence check: `runtime.py:374-386`
+      (`_handle_create_session`) and `runtime.py:631-642`
+      (`_handle_set_session_provider`, B30's own handler). Hook: none — no
+      migration or interface already anticipates this; it is a plain gap.
+      Anchor: whichever backend episode next touches `CreateSession` or
+      `SetSessionProvider`, or B17 (Hardening). Unpark: decide whether an
+      unknown `project_id` should be refused outright (raise
+      `ProjectNotFoundError`, the same exception `ProjectManager.resolve()`
+      already raises for an explicit, unknown id — `project_manager.py:
+      104-107`) or silently nulled, add that check to both handlers, and add
+      a regression test proving a dangling id is rejected (or nulled) rather
+      than silently persisted. Note: the dangling id in the repro above is
+      self-healing if Demo is *reselected* (`ProjectManager.init()`'s marker
+      file at `backend\demo\sample_project\.point\project.json` recreates
+      the `projects` row under the same id — `project_manager.py:120-145`,
+      confirmed by reading the code, not by a live repro) — a mere relaunch
+      does not trigger this, since `onSessionList`'s `CreateSession` path
+      never calls `ProjectInit` itself.
 - [ ] **Semantic retrieval (embeddings)** — keyword + tags closes most of the gap
       for zero cost. Hook: nullable `embedding` BLOB (B6), retrieval behind one
       interface. Anchor: B13. Unpark: embed model, vector search, backfill.

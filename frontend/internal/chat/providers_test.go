@@ -227,6 +227,48 @@ func TestApplyProviderDefaultSkipsRetrofitWithNoOpenSession(t *testing.T) {
 	}
 }
 
+// TestOnSessionListForwardsDemoProjectID is F10c's one line in
+// onSessionList: a stored default carrying a ProjectID (Demo mode's own
+// sample-project binding, set by app\settings.go's applyModelChoice once
+// its ProjectInit reply lands) rides onto CreateSession's payload exactly
+// like Effort already does — the ONE real path that can bind a session's
+// project_id, since there is no later event that rebinds one (F10c's
+// Decision 2).
+func TestOnSessionListForwardsDemoProjectID(t *testing.T) {
+	w, sent := recordingWorkspace(t)
+	w.state.Provider = &config.ProviderDefault{
+		Provider: "demo", Model: "point-demo-v1", ProjectID: "proj-sample-123",
+	}
+
+	w.onSessionList(sessionListEnvelope(t)) // empty list -> CreateSession
+
+	got := lastQuery(*sent)
+	if got.kind != queryCreateSession {
+		t.Fatalf("expected a fresh session, got %+v", got)
+	}
+	if got.payload["project_id"] != "proj-sample-123" {
+		t.Errorf("project_id = %v, want proj-sample-123", got.payload["project_id"])
+	}
+	if got.payload["provider"] != "demo" || got.payload["model"] != "point-demo-v1" {
+		t.Errorf("provider/model were not forwarded alongside it: %+v", got.payload)
+	}
+}
+
+// TestOnSessionListOmitsProjectIDWhenUnset — every non-demo default (and
+// demo itself before its ProjectInit reply has landed) must not send a
+// "project_id" key at all, never an empty string.
+func TestOnSessionListOmitsProjectIDWhenUnset(t *testing.T) {
+	w, sent := recordingWorkspace(t)
+	w.state.Provider = &config.ProviderDefault{Provider: "ollama", Model: "qwen3:8b"}
+
+	w.onSessionList(sessionListEnvelope(t))
+
+	got := lastQuery(*sent)
+	if _, ok := got.payload["project_id"]; ok {
+		t.Errorf("project_id present with no ProjectID set: %+v", got.payload)
+	}
+}
+
 // TestApplyBehaviourOverridesReplacesRatherThanMerges is F10b's own
 // precedent, exercised at the persistence boundary: BehaviourOverrideSet's
 // wire reply already carries the FULL resulting override map (B26 §1b), so

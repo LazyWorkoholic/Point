@@ -11,6 +11,7 @@ package app
 import (
 	"encoding/json"
 	"fmt"
+	"path/filepath"
 	"sort"
 	"strings"
 
@@ -41,8 +42,12 @@ const (
 // _KEY_ENV_VARS keys plus "ollama" by hand. If the backend ever adds a sixth
 // provider, it is invisible here until this list is updated to match.
 //
-// Demo mode is deliberately absent — out of this episode's scope, and F10's
-// own rule is to never show a live-looking control that does nothing.
+// Demo mode (F10c) is the one row that needs no key: DemoProvider.health()
+// always reports healthy (B28 §1) and is registered unconditionally, so it
+// becomes selectable here the moment ListProviders' reply includes it, with
+// no branching needed elsewhere in the selection/health-check machinery
+// below. Its one extra side effect (binding the shipped sample project) is
+// in applyModelChoice, the one place that does need to know its id.
 type providerCatalogEntry struct {
 	ID       string
 	Label    string
@@ -55,6 +60,7 @@ var providerCatalog = []providerCatalogEntry{
 	{ID: "anthropic", Label: "Anthropic", NeedsKey: true},
 	{ID: "gemini", Label: "Gemini", NeedsKey: true},
 	{ID: "openrouter", Label: "OpenRouter", NeedsKey: true},
+	{ID: "demo", Label: "Demo mode", NeedsKey: false},
 }
 
 func providerCatalogByID(id string) (providerCatalogEntry, bool) {
@@ -156,6 +162,16 @@ type settingsState struct {
 
 	// doctorReqID is the in-flight GetDoctorReport request, if any.
 	doctorReqID string
+
+	// demoProjectReqID is F10c's own: the in-flight ProjectInit request
+	// fired the moment Demo mode is selected (applyModelChoice), binding
+	// the shipped sample project. Single-valued like providersReqID/
+	// setKeyReqID, not a map like behaviourReqID — only Demo ever sends
+	// this, and only ever one at a time (re-selecting Demo while one is
+	// still in flight is not guarded against separately: ProjectInit is
+	// idempotent, so a second one landing after the first just confirms
+	// the same project id).
+	demoProjectReqID string
 }
 
 // openSettingsPopup builds and opens the Settings popup, then asks for the
@@ -645,6 +661,62 @@ func (r *Root) applyModelChoice(id string, model providerModelInfo) tea.Cmd {
 	r.settings.activeModelSupportsEffort = model.supportsEffort
 	r.rebuildSettingsProvidersTab()
 	r.status = fmt.Sprintf("%s (%s) is now the active provider", providerLabel(id), model.id)
+	cmds := []tea.Cmd{func() tea.Msg { return ProviderDefaultSetMsg{Default: def} }}
+	// F10c: becoming active does not wait on this — the badge and
+	// r.activeProvider update above with no perceptible delay regardless
+	// of how long ProjectInit's round trip takes. See onDemoProjectInit
+	// for the reply half, and the task doc's Decision 1 for why the
+	// sequencing is split this way.
+	if id == "demo" {
+		if cmd := r.initDemoProject(); cmd != nil {
+			cmds = append(cmds, cmd)
+		}
+	}
+	return tea.Batch(cmds...)
+}
+
+// initDemoProject fires ProjectInit against the shipped sample project —
+// F10c's Decision 1/Question 2: the path is a join onto env.BackendDir,
+// which protocol.FindBackendDir() already resolved at startup (spawn.go),
+// not a second, independently-guessed relative path. ProjectManager.init()
+// is idempotent (project_manager.py:70-96 — "if the folder is already
+// initialized, this is just resolve() plus a touch"), so firing this every
+// time Demo is (re-)selected is deliberately cheap.
+func (r *Root) initDemoProject() tea.Cmd {
+	if r.env.BackendDir == "" {
+		return nil // no backend found at all — nothing to bind against
+	}
+	path := filepath.Join(r.env.BackendDir, "demo", "sample_project")
+	reqID, ok := r.SettingsSendFn(protocol.CmdProjectInit, map[string]any{"path": path})
+	if !ok {
+		return nil
+	}
+	r.settings.demoProjectReqID = reqID
+	return nil
+}
+
+// onDemoProjectInit is the ProjectInit reply's handler (handleSettingsEnvelope).
+func (r *Root) onDemoProjectInit(env protocol.Envelope) tea.Cmd {
+	if env.Type != protocol.EvProject {
+		return nil // refused — Demo stays selected, just without a binding
+	}
+	var p struct {
+		Project struct {
+			ID string `json:"id"`
+		} `json:"project"`
+	}
+	if err := env.UnmarshalPayload(&p); err != nil || p.Project.ID == "" {
+		return nil
+	}
+	// The user may have switched away from Demo before this landed —
+	// Decision 1's own guard against patching a default that is no
+	// longer the active one.
+	if r.activeProvider == nil || r.activeProvider.Provider != "demo" {
+		return nil
+	}
+	def := *r.activeProvider
+	def.ProjectID = p.Project.ID
+	r.activeProvider = &def
 	return func() tea.Msg { return ProviderDefaultSetMsg{Default: def} }
 }
 
@@ -851,6 +923,10 @@ func (r *Root) handleSettingsEnvelope(env protocol.Envelope) tea.Cmd {
 	if env.CorrID == r.settings.doctorReqID {
 		r.settings.doctorReqID = ""
 		return r.onDoctorReport(env)
+	}
+	if env.CorrID == r.settings.demoProjectReqID {
+		r.settings.demoProjectReqID = ""
+		return r.onDemoProjectInit(env)
 	}
 	return nil
 }

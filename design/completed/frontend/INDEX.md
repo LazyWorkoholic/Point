@@ -27,9 +27,9 @@ it passed.
 | **F9a** | **Task Tray + Result Cards (F9, SPLIT)** | 🟡 **built + manually verified — F9 NOT complete; F9b + F9c are the remainder** | `F09a-task-tray-cards.md` |
 | F9b | Diff Card | not started — blocked on F13 + B24 | — |
 | F9c | Result Card Attach + Save | not started — blocked on B13 + an unspecced B12 attachment-source extension | — |
-| **F10** | **Settings, Providers, First Run (F10, narrowed)** | 🟡 **built + manually verified — F10 NOT complete; F10c is the remainder** | `F10-settings-first-run.md` |
+| F10 | Settings, Providers, First Run (F10, narrowed) | ✅ built + manually verified | `F10-settings-first-run.md` |
 | F10b | Settings — Behaviour Overrides + `doctor` in About | ✅ built + manually verified | `F10b-settings-behaviour-doctor.md` |
-| F10c | Settings — Demo Mode | not started — blocked on a not-yet-scoped backend episode (new provider type + fixture library + sample project) | — |
+| F10c | Settings — Demo Mode | ✅ built + manually verified | `F10c-settings-demo-mode.md` |
 | F11–F18 | — | not started | — |
 
 **F1 and F2 were built and verified in one session** (`batchable: yes`).
@@ -58,8 +58,8 @@ backend episode that does not exist yet; **the three deferred items are
 recorded with file:line evidence in `F10-settings-first-run.md`** so
 F10b and F10c do not re-derive them.
 
-F10 closes only when **F10b** (Behaviour overrides + `doctor`) and
-**F10c** (demo mode) land. Until then this row stays 🟡.
+F10 closed once **F10b** (Behaviour overrides + `doctor`) and **F10c**
+(demo mode) both landed — this row is ✅ accordingly.
 
 **`F10-settings-first-run.md` is worth reading before adding a tab to
 the Settings popup** (F10b's Behaviour/About, F11's Memory) — it records

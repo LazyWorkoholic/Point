@@ -89,6 +89,41 @@ func TestCardsShowPlaceholderWhenBackendDown(t *testing.T) {
 	}
 }
 
+// TestStatusCardFlagsAnUnboundDemoSession is F10c Build §5/Decision 2's
+// honest flag — derived purely from state this workspace already tracks
+// (sessionProvider, projectID — F8's own field), not from how the session
+// got into that state, so a session retrofitted onto Demo (no project
+// binding reachable after creation) shows it on the very next render.
+func TestStatusCardFlagsAnUnboundDemoSession(t *testing.T) {
+	w := &Workspace{theme: testTheme(), sessionProvider: "demo", sessionModel: "point-demo-v1"}
+	lines := w.statusCardLines(40, 5)
+	if !strings.Contains(strings.Join(lines, "\n"), "no sample project bound") {
+		t.Errorf("an unbound demo session's status card = %v, want a flag naming the gap", lines)
+	}
+}
+
+// TestStatusCardSilentWhenDemoIsBound — the flag must disappear the moment
+// the session actually has a project, and must never appear for any other
+// provider at all.
+func TestStatusCardSilentWhenDemoIsBound(t *testing.T) {
+	w := &Workspace{
+		theme: testTheme(), sessionProvider: "demo", sessionModel: "point-demo-v1",
+		projectID: "proj-sample-123",
+	}
+	lines := w.statusCardLines(40, 5)
+	if strings.Contains(strings.Join(lines, "\n"), "no sample project bound") {
+		t.Errorf("a BOUND demo session still shows the unbound flag: %v", lines)
+	}
+}
+
+func TestStatusCardNeverFlagsNonDemoProviders(t *testing.T) {
+	w := &Workspace{theme: testTheme(), sessionProvider: "ollama", sessionModel: "qwen3:8b"}
+	lines := w.statusCardLines(40, 5)
+	if strings.Contains(strings.Join(lines, "\n"), "no sample project bound") {
+		t.Errorf("ollama (no project either) was flagged like demo: %v", lines)
+	}
+}
+
 func TestTaskCardEmptyState(t *testing.T) {
 	w := &Workspace{theme: testTheme()}
 	lines := w.taskCardLines(28, 5)

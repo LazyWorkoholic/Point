@@ -160,6 +160,37 @@ the same shape and would likely want the same mechanism once it exists,
 so this is a small, narrow addition to `array`'s own API, not a
 picker-local patch.
 
+### The generic failure footer truncates long error text — found during F10c
+
+`liveFooter` (`frontend\internal\chat\stream_render.go:428`) builds the
+`"✗ failed — " + e.errText` line (line 442) for every `TaskFailed`/`Error`
+terminal state, then renders it through `padCells(line, width)` (line 451)
+— `width` is the transcript's own column width, passed in unchanged from
+`liveFooter`'s two call sites (`stream_render.go:199`, `:273`). `padCells`
+(`chat\textutil.go:44`) cuts anything wider than `width` via
+`truncateCells` (`chat\textutil.go:61`), which trims to the cell budget
+with no ellipsis, no wrap, and no "show more" — it is built for a
+single-line layout element, not a message body.
+
+**Exact repro, from F10c's error-case fixture**
+(`backend\demo\fixtures\error_case.json`): the scripted message is
+
+> `demo: scripted failure -- Point's error path, exercised on purpose, no real provider was involved`
+
+At a transcript width narrower than that string plus the `"✗ failed — "`
+prefix and the trailing `"  [Retry ^R]"` suffix, the rendered line cuts
+mid-word — observed ending `"...exercised on purpo"`. Any `TaskFailed`/
+`Error` whose message is longer than one line's worth of transcript width
+hits the same cut, demo or otherwise; this fixture is simply what surfaced
+it live.
+
+**Not fixed here or in F10c** — per that episode's own scope (wire Demo
+mode into existing surfaces, not change them) and this file's own
+instruction not to fix it in this entry either. A real fix needs
+`liveFooter` to wrap the error text across multiple lines (or truncate
+with a visible ellipsis) rather than pass a long single-purpose line
+through a single-line padder — this episode's job when it gets here.
+
 ### Demo recording
 Record the v1 demo script — **the one in `design/WORKFLOW.md` under "What done
 looks like"**, which covers ghost text, autosave + web preview, per-workspace

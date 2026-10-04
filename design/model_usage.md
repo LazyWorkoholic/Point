@@ -151,6 +151,47 @@ SESSION  EPISODE                          MODEL         WHY
                                                         reply, not a diff card, so
                                                         there is no apply-path risk
                                                         in this row either.
+                                                        -- ESTIMATE HELD FOR EVERYTHING
+                                                        BUILT, BUT LIVE VERIFICATION
+                                                        FOUND A REAL CORRECTNESS BUG:
+                                                        Decision 1's own binding
+                                                        mechanism (ride project_id on
+                                                        CreateSession's payload) is
+                                                        real code, passes its own unit
+                                                        tests, and never actually binds
+                                                        a session in the live app --
+                                                        traced to a structural race
+                                                        (CreateSession always completes
+                                                        before a human can act in the
+                                                        chooser, for every provider, not
+                                                        a timing coincidence this
+                                                        episode could have sequenced
+                                                        around). Spun out as its own
+                                                        episode (16g, B30) rather than
+                                                        patched in place, same
+                                                        discipline B23-B29 already
+                                                        established. Session resumed
+                                                        after 16g landed and re-verified
+                                                        Done-when #3/#4 live on a fresh
+                                                        profile -- no further Go-side
+                                                        change needed beyond the two
+                                                        call sites 16g's own Build
+                                                        section named in advance.
+16g      B30 set session project          Sonnet high   one optional field through an
+         (via SetSessionProvider)                       existing handler, calling an
+                                                        existing, already-tested manager
+                                                        method (session_manager.
+                                                        set_project, built for B12,
+                                                        never exposed until now) -- same
+                                                        shape as B20/B25/B26. The one
+                                                        real design call (no NULL-only
+                                                        guard, unlike _commit_adoption's
+                                                        inferred attach-adoption path)
+                                                        was already decided and written
+                                                        down in the task doc, not
+                                                        discovered mid-session. Found
+                                                        and spun out of 16d (F10c) by
+                                                        live tracing, not reasoned about.
 16e      B27 doctor resolved behaviour     Sonnet high   plumbing over two functions
          values                                         that already exist
                                                         (config_value,

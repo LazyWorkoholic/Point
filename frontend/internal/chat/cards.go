@@ -123,6 +123,23 @@ func (w *Workspace) statusCardLines(width, rows int) []string {
 		lines = append(lines, dim.Render("—"))
 	}
 
+	// 4. F10c's honest flag: this session is on Demo but has no project
+	// bound, which only ever happens on a session that existed BEFORE
+	// Demo became the active default — app\settings.go's applyModelChoice
+	// binds the shipped sample project on SELECTION, and
+	// chat\protocol.go's onSessionList forwards it on CREATION, but
+	// neither can reach a session that was already open at either moment
+	// (F10c's Decision 2: there is no wire event to rebind an existing
+	// session's project). Derived purely from state this workspace
+	// already tracks (w.sessionProvider, w.projectID — F8's own field),
+	// not from which code path got here, so it stays correct regardless
+	// of how the session ended up this way. Lowest priority: the first
+	// line clip(...) below drops as the card shrinks, since the rows
+	// above already say everything required for the session to function.
+	if w.sessionProvider == "demo" && w.projectID == "" {
+		lines = append(lines, th.Style(theme.Warning).Render("demo: no sample project bound"))
+	}
+
 	return clip(lines, rows)
 }
 

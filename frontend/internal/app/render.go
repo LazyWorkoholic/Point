@@ -124,13 +124,24 @@ func (r *Root) header(l layout.Layout) string {
 	width := l.Header.W
 
 	title := th.Style(theme.AccentPrimary).Render("P O I N T")
+	badge := r.demoBadge()
 
 	if l.HeaderCompact {
+		if badge != "" {
+			title = badge + " " + title
+		}
 		return centre(title, width)
 	}
 
 	left := th.Style(theme.TextDim).Render(r.animFrame())
 	right := th.Style(theme.TextDim).Render("◈ " + r.connWord())
+	if badge != "" {
+		// Folded into right BEFORE its width is measured below, so the
+		// existing gap math (which only ever knew about left/title/right)
+		// accounts for it automatically — no fourth segment to thread
+		// through gapL/gapR separately.
+		right = badge + "  " + right
+	}
 
 	lw := visibleWidth(left)
 	rw := visibleWidth(right)
@@ -155,6 +166,22 @@ func (r *Root) connWord() string {
 	default:
 		return string(r.conn.state)
 	}
+}
+
+// demoBadge is D55's "it must announce itself" (F10, F10c): a persistent
+// marker shown in the header for as long as Demo mode is the active
+// provider — in both the normal and compact header layouts (header,
+// above). theme.Warning is the fixed, outside-the-palette role every other
+// "this must read as distinct regardless of theme" surface in this
+// codebase already uses (behaviour.go's inert-key icon, credential.go's
+// validation errors, placeholder.go's diagnostics notes), picked for the
+// same reason here: a badge that could blend into some future palette
+// would not be announcing anything.
+func (r *Root) demoBadge() string {
+	if r.activeProvider == nil || r.activeProvider.Provider != "demo" {
+		return ""
+	}
+	return r.theme.Style(theme.Warning).Render("● DEMO")
 }
 
 // statusBar is an unboxed line at the bottom: bindings on the left, state on

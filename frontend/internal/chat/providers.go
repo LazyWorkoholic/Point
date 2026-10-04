@@ -135,9 +135,13 @@ func (w *Workspace) providerMissing() bool {
 func (w *Workspace) applyProviderDefault(d config.ProviderDefault) {
 	w.state.Provider = &d
 	if w.sessionID != "" {
-		w.send(protocol.CmdSetSessionProvider, querySetSessionProvider, map[string]any{
+		payload := map[string]any{
 			"session_id": w.sessionID, "provider": d.Provider, "model": d.Model,
-		})
+		}
+		if d.ProjectID != "" {
+			payload["project_id"] = d.ProjectID
+		}
+		w.send(protocol.CmdSetSessionProvider, querySetSessionProvider, payload)
 	}
 	if w.saveStateFn == nil {
 		return

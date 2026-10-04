@@ -635,12 +635,19 @@ class Runtime:
         if not session_id or not provider or not model:
             raise InvalidEventError("SetSessionProvider requires 'session_id', 'provider', and 'model'")
         await self.sessions.set_provider(session_id, provider, model)
+        project_id = event.payload.get("project_id")
+        if project_id:
+            await self.sessions.set_project(session_id, project_id)
+        session = await self.sessions.get(session_id)
         await self._emit(OutgoingEvent(
             type=OutgoingEventType.SESSION_PROVIDER_UPDATED,
             request_id=event.request_id,
-            payload={"session_id": session_id, "provider": provider, "model": model},
+            payload={
+                "session_id": session_id, "provider": provider, "model": model,
+                "project_id": session.project_id,
+            },
         ))
-        
+
 
     @staticmethod
     def _session_to_dict(session: Session, include_messages: bool = False) -> dict[str, Any]:

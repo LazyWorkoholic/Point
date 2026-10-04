@@ -38,7 +38,7 @@ All printed commands must be **PowerShell**.
 | F9c | Result Card Attach + Save | P1 | no | F9a | B13 + a B12 attachment-source ext (unspecced) |
 | F10 | Provider Chooser, Credentials, Providers+Appearance Tabs (F10, narrowed) | P1 | no | F7 | B6, B25 |
 | F10b | Settings — Behaviour Overrides + `doctor` in About | P1 | no | F10 | a not-yet-scoped backend episode (runtime override layer + a `doctor` wire event) |
-| F10c | Settings — Demo Mode | P1 | no | F10 | a not-yet-scoped backend episode (new provider type + fixture library + sample project) |
+| F10c | Settings — Demo Mode | P1 | no | F10 | B28 ✅ (provider + fixtures + sample project), B30 ✅ (project binding via `SetSessionProvider`, found mid-episode) |
 | F11 | Memory Popup | P2 | no | F7 | B13 |
 | F12 | Workspace Manager + Lifecycle | P1 | no | F6 | B15 |
 | F13 | Editor Core | P1 | no | F12 | B7 |
