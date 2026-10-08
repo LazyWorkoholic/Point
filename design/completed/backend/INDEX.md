@@ -37,6 +37,7 @@ it passed.
 | B28 | Demo Mode: Provider, Fixture Library, Sample Project | ✅ built + manually verified | `B28-demo-mode-provider-fixtures.md` |
 | B29 | Remove the Legacy `backend\runtime.db` Copy-Forward | ✅ built + manually verified | `B29-remove-legacy-runtime-db.md` |
 | B30 | Let `SetSessionProvider` Also Bind a Session's Project | ✅ built + manually verified | `B30-set-session-project.md` |
+| B31 | Validate `project_id` in `CreateSession`/`SetSessionProvider` | ✅ built + manually verified | `B31-validate-project-id.md` |
 
 ## Verified file structure — end of Episode 11
 

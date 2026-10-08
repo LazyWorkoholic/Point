@@ -378,12 +378,19 @@ class Runtime:
         not even register on a keyless profile. NULL means "inherit from
         global config"; B8 is what resolves it."""
         p = event.payload
+        project_id = p.get("project_id")
+        if project_id and not await self.projects.exists(project_id):
+            _log.warning(
+                "CreateSession: project_id %r matches no project; creating without one",
+                project_id,
+            )
+            project_id = None
         session = await self.sessions.create(
             title=p.get("title", "New Session"),
             provider=p.get("provider"),
             model=p.get("model"),
             workspace=p.get("workspace"),
-            project_id=p.get("project_id"),
+            project_id=project_id,
             settings=p.get("settings"),
             effort=p.get("effort"),
             created_by=p.get("created_by"),
@@ -637,7 +644,13 @@ class Runtime:
         await self.sessions.set_provider(session_id, provider, model)
         project_id = event.payload.get("project_id")
         if project_id:
-            await self.sessions.set_project(session_id, project_id)
+            if await self.projects.exists(project_id):
+                await self.sessions.set_project(session_id, project_id)
+            else:
+                _log.warning(
+                    "SetSessionProvider: project_id %r matches no project; binding left unchanged",
+                    project_id,
+                )
         session = await self.sessions.get(session_id)
         await self._emit(OutgoingEvent(
             type=OutgoingEventType.SESSION_PROVIDER_UPDATED,

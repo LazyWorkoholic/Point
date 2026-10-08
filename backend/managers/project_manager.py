@@ -95,6 +95,15 @@ class ProjectManager:
         _log.info("Project initialized: %s at %s", project.id, root)
         return project
 
+    async def exists(self, project_id: str) -> bool:
+        """A validation-only check -- no touch, no root_path rewrite, no
+        write of any kind on a hit or a miss. `resolve(explicit_project_id=
+        ...)` was considered and rejected for this: a hit calls `_touch()`,
+        which unconditionally bumps `last_opened_at` and rewrites `root_path`
+        -- a real DB write this check must not cause on every CreateSession/
+        SetSessionProvider call that merely carries a project_id (B31)."""
+        return (await self._repo.fetch_by_id(project_id)) is not None
+
     async def resolve(
         self, path: Optional[str] = None, explicit_project_id: Optional[str] = None
     ) -> Optional[Project]:

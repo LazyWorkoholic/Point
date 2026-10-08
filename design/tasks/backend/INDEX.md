@@ -49,7 +49,7 @@ fix this table.
 | B24 | The Filler's Proposal on the Wire | P1 | no | B11, B8, B12 | not started — unblocks F9's diff card (WORKFLOW.md session 17b) |
 | B25 | Persist a Validated Provider Key | P1 | no | B6, B4 | not started — unblocks F10's credential-entry Done-when #4-6 (WORKFLOW.md session 15c) |
 | B30 | Let `SetSessionProvider` Also Bind a Session's Project | P1 | no | B12, B4/B6 | ✅ built |
-| B31 | Validate `project_id` in `CreateSession`/`SetSessionProvider` | P1 | no | B7, B12, B30 | not started — task doc written, docs-only this session (WORKFLOW.md session 16h) |
+| B31 | Validate `project_id` in `CreateSession`/`SetSessionProvider` | P1 | no | B7, B12, B30 | ✅ built |
 
 **B1–B5 are frozen.** Additive changes only — new columns, new optional fields.
 Never refactors.
@@ -119,8 +119,11 @@ never returns on stdin EOF. See `B06-schema-bootstrap.md` §9.
 Format: `[ ] item — why parked · hook · anchor · what unparking takes`
 `[✅] items - means it is written as an episode in above table and as a .md file.`
 
-- [✅] **`CreateSession`/`SetSessionProvider` accept a `project_id` matching no
-      `projects` row** — now written as `B31-validate-project-id.md`. why parked: found live during F10c/B30's own
+- [✅] **RESOLVED — `CreateSession`/`SetSessionProvider` accept a `project_id`
+      matching no `projects` row** — built and manually verified as B31; see
+      `design/completed/backend/B31-validate-project-id.md` for the full
+      evidence (all seven Done-when items confirmed, including independent
+      log-file verification). why parked: found live during F10c/B30's own
       verification (`design/completed/frontend/F10c-settings-demo-mode.md`'s
       Decision 1 correction), one finding among several, not either episode's
       scope to fix (F10c's own "no backend changes" rule; B30 was already
@@ -143,15 +146,16 @@ Format: `[ ] item — why parked · hook · anchor · what unparking takes`
       (`_handle_set_session_provider`, B30's own handler). Hook: none — no
       migration or interface already anticipates this; it is a plain gap.
       Anchor: whichever backend episode next touches `CreateSession` or
-      `SetSessionProvider`, or B17 (Hardening). Unparked as B31: an unknown
+      `SetSessionProvider`, or B17 (Hardening). Resolved by B31: an unknown
       `project_id` is never refused outright — `CreateSession` treats it as
       no project (nulled, logged); `SetSessionProvider` leaves whatever
       binding already existed untouched (logged) — via a new, narrow,
       side-effect-free `ProjectManager.exists()` rather than reusing
       `resolve()` (which touches/writes on a hit). See
-      `B31-validate-project-id.md` for the full decision and build. A
-      database-level `FOREIGN KEY`/`REFERENCES` constraint remains a
-      separate, still-open idea (B31's own Handoff), not folded into it.
+      `design/completed/backend/B31-validate-project-id.md` for the full
+      decision, build, and verification evidence. A database-level
+      `FOREIGN KEY`/`REFERENCES` constraint remains a separate, still-open
+      idea (B31's own Handoff), not folded into it.
       Note: the dangling id in the repro above is
       self-healing if Demo is *reselected* (`ProjectManager.init()`'s marker
       file at `backend\demo\sample_project\.point\project.json` recreates

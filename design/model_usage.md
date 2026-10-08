@@ -207,7 +207,7 @@ SESSION  EPISODE                          MODEL         WHY
                                                         live tracing, not reasoned about.
 16h      B31 validate project_id           Sonnet high   one new, narrow, side-effect-
          (CreateSession/                                free existence check and two
-         SetSessionProvider)                             call sites that use it -- same
+         SetSessionProvider) (done)                      call sites that use it -- same
                                                         shape as B20/B25/B26/B30. Does
                                                         not block anything; found and
                                                         parked (then scoped) after 16g
