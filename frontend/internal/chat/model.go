@@ -9,8 +9,28 @@ package chat
 // exactly. Field names are the wire's JSON names, not Go convention, so a
 // diff against message.py stays a visual diff.
 type wireMessage struct {
-	ID         string          `json:"id"`
-	SessionID  string          `json:"session_id"`
+	ID        string `json:"id"`
+	SessionID string `json:"session_id"`
+
+	// Seq is B18's monotonic per-session message number -- the ONLY cursor
+	// F18 pages on and the only value its scroll anchor stores. Not a row
+	// index (meaningless the instant anything is inserted above) and not
+	// created_at (B18's migration broke created_at ties with rowid during
+	// a one-time backfill and never again).
+	//
+	// B18 added this key to every Message.to_dict() output, including the
+	// unbounded GetSession path, and noted that this struct's "mirrors
+	// to_dict() exactly" claim went stale the moment it did -- Go ignores
+	// unknown JSON fields, so nothing broke, but the comment was no longer
+	// true. F18 is the episode that actually reads it, so it is also the
+	// one that declares it and makes the comment true again.
+	//
+	// Zero means "this row did not come from the wire": the placeholder
+	// reply applyTaskRows inserts for a task that produced no message has
+	// no seq because it has no row, which is exactly why eviction and the
+	// anchor both have to skip it rather than address it.
+	Seq int `json:"seq"`
+
 	TaskID     string          `json:"task_id"`
 	Role       string          `json:"role"`
 	Content    wireContent     `json:"content"`
@@ -100,6 +120,15 @@ type wireSession struct {
 	Model     string        `json:"model"`
 	UpdatedAt float64       `json:"updated_at"`
 	Messages  []wireMessage `json:"messages"`
+
+	// TotalMessageCount is B18's, and it is present ONLY on a bounded
+	// (message_limit) GetSession reply -- runtime.py's _session_to_dict
+	// adds the key only when session.total_message_count is not None, so
+	// the unbounded path's payload shape is unchanged. F18 always asks
+	// bounded, so zero here means an older backend or a reply that was
+	// not a session load, and history.go reads it that way rather than as
+	// "this session has no messages".
+	TotalMessageCount int `json:"total_message_count"`
 }
 
 // wireContextReport mirrors backend\managers\context.py's

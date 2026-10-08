@@ -652,6 +652,13 @@ func (w *Workspace) handleStreamEvent(env protocol.Envelope) (tea.Cmd, bool) {
 		return nil, false
 	}
 
+	// F18's backpressure release, at the one point a stream can have just
+	// ended. A history fetch parked while tokens were arriving runs now;
+	// it is a no-op unless something is actually parked AND nothing is
+	// still streaming, which is what makes the second lane of a concurrent
+	// pair hold the gate until it too is done.
+	w.flushDeferredHistory()
+
 	return tea.Batch(w.armTick(), w.fireQueued()), true
 }
 

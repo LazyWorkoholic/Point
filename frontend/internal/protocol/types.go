@@ -8,12 +8,20 @@ package protocol
 
 // Commands and queries — Go to Python (IncomingEventType).
 const (
-	CmdSendMessage           = "SendMessage"
-	CmdCancelTask            = "CancelTask"
-	CmdListTasks             = "ListTasks"
-	CmdShutdown              = "Shutdown"
-	CmdCreateSession         = "CreateSession"
-	CmdGetSession            = "GetSession"
+	CmdSendMessage   = "SendMessage"
+	CmdCancelTask    = "CancelTask"
+	CmdListTasks     = "ListTasks"
+	CmdShutdown      = "Shutdown"
+	CmdCreateSession = "CreateSession"
+	CmdGetSession    = "GetSession"
+	// CmdSessionMessages is B18's keyset scrollback query, and F18 is its
+	// first and only Go consumer: {session_id, before|after, limit} ->
+	// EvSessionMessageList, oldest-first within the slice, keyed on `seq`
+	// and never on a row index or a timestamp. At most one of
+	// before/after may be non-null; BOTH NULL MEANS THE TAIL, not the
+	// start of history -- B18's own completed doc records a verification
+	// script that walked almost nothing because it assumed otherwise.
+	CmdSessionMessages       = "SessionMessages"
 	CmdListSessions          = "ListSessions"
 	CmdRenameSession         = "RenameSession"
 	CmdArchiveSession        = "ArchiveSession"
@@ -71,9 +79,13 @@ const (
 
 	EvError = "Error"
 
-	EvSessionCreated         = "SessionCreated"
-	EvSession                = "Session"
-	EvSessionList            = "SessionList"
+	EvSessionCreated = "SessionCreated"
+	EvSession        = "Session"
+	EvSessionList    = "SessionList"
+	// EvSessionMessageList is CmdSessionMessages' reply: {session_id,
+	// messages, has_more_before, has_more_after}. The two flags mean "does
+	// history exist beyond THIS slice", not "beyond this batch".
+	EvSessionMessageList     = "SessionMessageList"
 	EvSessionRenamed         = "SessionRenamed"
 	EvSessionArchived        = "SessionArchived"
 	EvSessionUnarchived      = "SessionUnarchived"

@@ -59,6 +59,14 @@ const (
 	// Settings, which this call exists to fix: see providers.go's
 	// applyProviderDefault.
 	querySetSessionProvider
+	// querySessionMessages is F18's: one batch of B18's keyset scrollback
+	// query. Decorative in the sense decorative() means -- the resident
+	// window already on screen is correct without it, so a refused or
+	// unreadable batch costs one more keystroke at the same edge and never
+	// the transcript. Unlike every other kind here it is correlated by id
+	// in history.go as well, because a superseded fetch must be dropped
+	// rather than applied to a window that has since moved.
+	querySessionMessages
 )
 
 // localID mints a request id. protocol.newID does the equivalent job inside
@@ -81,6 +89,18 @@ func (w *Workspace) send(cmdType string, kind queryKind, payload map[string]any)
 	w.sendFn(cmdType, kind, payload)
 }
 
+// newQueryEnvelope marshals a payload into an envelope with a caller-chosen
+// id. Extracted from doSend for history.go, which has to KNOW the id it sent
+// (doSend mints one privately and returns nothing) so a reply can be matched
+// against the window state it was issued against.
+func newQueryEnvelope(id, cmdType string, payload map[string]any) (protocol.Envelope, error) {
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		return protocol.Envelope{}, err
+	}
+	return protocol.Envelope{ID: id, Type: cmdType, Payload: raw}, nil
+}
+
 // doSend builds and sends one query envelope, remembering what kind of reply
 // to expect. The reply arrives through Update's EnvelopeMsg case, which Root
 // forwards to the active workspace — see root.go's ConnectedMsg and
@@ -101,13 +121,12 @@ func (w *Workspace) doSend(cmdType string, kind queryKind, payload map[string]an
 		w.loadErr = "no backend connection"
 		return
 	}
-	raw, err := json.Marshal(payload)
+	id := localID()
+	env, err := newQueryEnvelope(id, cmdType, payload)
 	if err != nil {
 		w.loadErr = err.Error()
 		return
 	}
-	id := localID()
-	env := protocol.Envelope{ID: id, Type: cmdType, Payload: raw}
 	if _, err := w.client.Request(env, 0); err != nil {
 		if kind.decorative() {
 			// Same treatment handleEnvelope already gives these kinds when
@@ -130,7 +149,8 @@ func (w *Workspace) doSend(cmdType string, kind queryKind, payload map[string]an
 // earns the loadErr screen; a decorative one never does.
 func (k queryKind) decorative() bool {
 	return k == queryListTasks || k == queryGetContextReport ||
-		k == queryDetachAttachment || k == queryListAttachments
+		k == queryDetachAttachment || k == queryListAttachments ||
+		k == querySessionMessages
 }
 
 // beginBootstrap fires once — the first time the backend is known to be
@@ -288,6 +308,16 @@ func (w *Workspace) handleEnvelope(env protocol.Envelope) tea.Cmd {
 			w.log.Warn("chat: ListAttachments refused, chip freshness not refreshed", "err", p.Error)
 			return nil
 		}
+		if kind == querySessionMessages {
+			// NOT w.loadErr, and the in-flight slot has to be cleared or
+			// every later edge check would find a fetch permanently
+			// outstanding and never ask again. The resident window stays
+			// exactly as it is; the next scroll re-asks.
+			w.log.Warn("chat: SessionMessages refused, resident window unchanged", "err", p.Error)
+			w.window.inFlight = histNone
+			w.window.fetchID = ""
+			return nil
+		}
 		w.loading = false
 		w.loadErr = p.Error
 		if w.loadErr == "" {
@@ -313,6 +343,8 @@ func (w *Workspace) handleEnvelope(env protocol.Envelope) tea.Cmd {
 		w.onAttachmentList(env)
 	case querySetSessionProvider:
 		w.onSessionProviderUpdated(env)
+	case querySessionMessages:
+		w.onSessionMessages(env)
 	}
 	return nil
 }
@@ -368,7 +400,7 @@ func (w *Workspace) onSessionList(env protocol.Envelope) {
 				"session", session.ID, "provider", session.Provider)
 			continue
 		}
-		w.send(protocol.CmdGetSession, queryGetSession, map[string]any{"session_id": session.ID})
+		w.getSession(session.ID)
 		return
 	}
 	// Nothing usable, including the empty-list case: start fresh.
@@ -400,6 +432,26 @@ func (w *Workspace) onSessionList(env protocol.Envelope) {
 		}
 	}
 	w.send(protocol.CmdCreateSession, queryCreateSession, payload)
+}
+
+// getSession opens a session, BOUNDED -- F18's "do not fetch the whole
+// session at open".
+//
+// `message_limit` is B18's additive parameter: omitted, GetSession is
+// byte-for-byte its old unbounded self (which is how F3 kept working while
+// F18 was unbuilt); given, it returns the newest N messages plus
+// total_message_count. This is the only caller, and it always passes it --
+// the unbounded path now has no reader anywhere in the frontend, which is the
+// point of the episode.
+//
+// The limit is the resident bound rather than one batch: the window has to
+// arrive full, or the first render sits at the top edge of a one-batch window
+// and immediately fires a prepend the user never asked for.
+func (w *Workspace) getSession(id string) {
+	w.send(protocol.CmdGetSession, queryGetSession, map[string]any{
+		"session_id":    id,
+		"message_limit": w.historyBound(),
+	})
 }
 
 func (w *Workspace) onSessionCreated(env protocol.Envelope) {
@@ -445,8 +497,12 @@ func (w *Workspace) setSession(s wireSession) {
 	// and a row that live rendered as a slot or with a footer gets the
 	// entry that renders it that way again. Neither invents a row and
 	// neither reads position, adjacency or time. See reload.go.
-	w.all = pairReloaded(s.Messages)
-	w.decorateReloaded()
+	//
+	// F18: and both now run over the RESIDENT WINDOW rather than the whole
+	// session. seedWindow installs the bounded tail GetSession returned as
+	// w.raw and derives w.all/w.hist from it; every later prepend, append
+	// or eviction re-derives them the same way. See history.go.
+	w.seedWindow(s)
 	// F6's Status card "tokens / cost" line: the last turn this session
 	// actually ran, not this session's total — the newest message that
 	// carries a non-zero usage, scanning backward since a live entry (below)
@@ -484,6 +540,12 @@ func (w *Workspace) setSession(s wireSession) {
 	// join only decorates, so nothing waits on it. See requestTaskRows.
 	w.requestTaskRows()
 	w.requestContextReport()
+	// F18, and deliberately last: a stored scroll anchor needs the session
+	// id, the resident window and the transcript all to exist, and it is
+	// allowed to issue a fetch of its own. It degrades to the bottom
+	// everywhere it cannot land, so nothing after this point can be left
+	// in a worse state than a plain load.
+	w.applyResumeAnchor()
 }
 
 // Update is the Workspace interface's entry point. Root's Update forwards

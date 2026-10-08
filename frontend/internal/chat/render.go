@@ -244,6 +244,28 @@ func (w *Workspace) viewportBody(rows, contentWidth int) []string {
 		hint := th.Style(theme.AccentPrimary).Render("↓ jump to latest (G)")
 		lines[rows-1] = overlayRight(lines[rows-1], hint, contentWidth)
 	}
+	// F18's loading affordance for a scroll-fetch, a G-fetch and a fetch
+	// that backpressure has parked. It overlays a transcript row rather
+	// than taking one, for the same reason the connection banner takes one
+	// and this does not: the banner is about the whole session, while this
+	// is about one edge of it, and stealing a row would reflow the
+	// transcript every time a batch loaded — which is the content jump the
+	// episode exists to prevent, arriving by the back door.
+	//
+	// It is deliberately placed on the edge the fetch is for, so "which way
+	// is this loading" needs no reading. Functional, not final — F16 may
+	// restyle it.
+	if note, atTop := w.historyNotice(); note != "" && rows > 0 {
+		for len(lines) < rows {
+			lines = append(lines, "")
+		}
+		styled := th.Style(theme.TextDim).Render(note)
+		if atTop {
+			lines[0] = overlayRight(lines[0], styled, contentWidth)
+		} else {
+			lines[rows-1] = overlayRight(lines[rows-1], styled, contentWidth)
+		}
+	}
 	return lines
 }
 

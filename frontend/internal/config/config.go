@@ -71,9 +71,21 @@ type UI struct {
 	Theme      string `toml:"theme"`
 	Background string `toml:"background"`
 
-	// Scrollback caps how many messages F3's Chat workspace renders per
-	// session. Named here, not in LAYOUT.md, which only names the default
-	// (500) and the key (`ui.scrollback`).
+	// Scrollback bounds how many messages the Chat workspace holds
+	// RESIDENT at once. Named here, not in LAYOUT.md, which only names the
+	// default (500) and the key (`ui.scrollback`).
+	//
+	// F18 is what made this a real bound. From F1 until then it governed
+	// only the render cache (chat\cache.go) while the transcript itself
+	// held every message GetSession returned, so this comment's original
+	// wording -- "caps how many messages F3's Chat workspace renders per
+	// session" -- described behaviour no code had. It is accurate now: it
+	// is the message-count bound on F18's contiguous resident window, and
+	// the render cache stays a multiple of it.
+	//
+	// The workspace floors it at a few screenfuls (chat\history.go's
+	// historyBound) so a very tall terminal can never want more rows than
+	// the window is allowed to hold.
 	Scrollback int `toml:"scrollback"`
 
 	// StreamTimeout is how many seconds a task may sit in a running state
@@ -85,6 +97,19 @@ type UI struct {
 	// backend has its own, unrelated per-request timeouts and does not read
 	// this key.
 	StreamTimeout int `toml:"stream_timeout"`
+
+	// HistoryBatch is how many messages one scroll-fetch pulls -- F18's
+	// `ui.historyBatch`, asked for by that episode as "config, not a
+	// constant" and named here in the file's own snake_case convention
+	// (`scrollback`, `stream_timeout`), so it reads like its neighbours
+	// rather than like the episode doc.
+	//
+	// It is tunable for one measured reason: the right batch differs
+	// between a fast machine and a low-end laptop with a local model
+	// loaded, and the whole point of F18's backpressure rule is that
+	// hydrating scrollback must never cost the generation the user is
+	// actually watching. The default is deliberately conservative.
+	HistoryBatch int `toml:"history_batch"`
 }
 
 // Config is the whole file, reduced to what the frontend reads. Keys the
@@ -97,7 +122,10 @@ type Config struct {
 
 // Defaults is what an absent config.toml means.
 func Defaults() Config {
-	return Config{UI: UI{Theme: "turquoise", Background: "transparent", Scrollback: 500, StreamTimeout: 120}}
+	return Config{UI: UI{
+		Theme: "turquoise", Background: "transparent",
+		Scrollback: 500, StreamTimeout: 120, HistoryBatch: 100,
+	}}
 }
 
 // Load reads config.toml.
@@ -146,6 +174,9 @@ func loadFrom(path string) (Config, error) {
 	}
 	if parsed.UI.StreamTimeout != 0 {
 		cfg.UI.StreamTimeout = parsed.UI.StreamTimeout
+	}
+	if parsed.UI.HistoryBatch != 0 {
+		cfg.UI.HistoryBatch = parsed.UI.HistoryBatch
 	}
 	return cfg, nil
 }

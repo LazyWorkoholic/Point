@@ -30,9 +30,24 @@ it passed.
 | F10 | Settings, Providers, First Run (F10, narrowed) | ✅ built + manually verified | `F10-settings-first-run.md` |
 | F10b | Settings — Behaviour Overrides + `doctor` in About | ✅ built + manually verified | `F10b-settings-behaviour-doctor.md` |
 | F10c | Settings — Demo Mode | ✅ built + manually verified | `F10c-settings-demo-mode.md` |
-| F11–F18 | — | not started | — |
+| F11 | Memory Popup | not started — blocked on B13 | — |
+| F12–F17 | — | not started | — |
+| F18 | Windowed History (bounded resident window) | ✅ built + manually verified | `F18-windowed-history.md` |
 
 **F1 and F2 were built and verified in one session** (`batchable: yes`).
+
+**F18 landed before F11–F17, and that ordering is required rather than
+opportunistic.** F18's scroll anchor lives in the Suspend/Resume blob that F12
+owns, so shipping F12 first would mean migrating a blob schema designed without
+knowing an anchor existed — the B11 `AgentConfig.background` retrofit trap.
+`tasks/frontend/INDEX.md` states the order as F5 → … → F18 → … → F12. F18 needed
+only F5 and B18, both of which were already built and verified.
+
+**F18 is also the first real implementation of `chat.Workspace.Suspend`/
+`Resume`** (both were `return nil, nil` from F3). **F12 must adopt that blob
+shape method-for-method, not approximate it** — the three fields, the
+degrade-to-bottom rule and the pinned-to-bottom rule are all recorded in
+`F18-windowed-history.md`'s handoff.
 
 **F9 is SPLIT across three sessions and is NOT complete.** F9a shipped the
 global task tray and the result card's render/discard half — two of the

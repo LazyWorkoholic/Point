@@ -1,6 +1,7 @@
 package chat
 
 import (
+	"encoding/json"
 	"log/slog"
 	"time"
 
@@ -19,9 +20,19 @@ type Options struct {
 	Client *protocol.Client
 	Log    *slog.Logger
 
-	// Scrollback bounds the render cache — see cache.go. <= 0 falls back to
-	// 500, matching config.Defaults().UI.Scrollback.
+	// Scrollback bounds the RESIDENT WINDOW (history.go's historyBound) and,
+	// through it, the render cache — see cache.go. <= 0 falls back to 500,
+	// matching config.Defaults().UI.Scrollback.
+	//
+	// Until F18 this bounded only the cache: the transcript itself held
+	// every message GetSession returned. It is a real bound on both now.
 	Scrollback int
+
+	// HistoryBatch is how many messages one F18 scroll-fetch pulls —
+	// `ui.historyBatch`. <= 0 falls back to defaultHistoryBatch, matching
+	// config.Defaults().UI.HistoryBatch, so a workspace built without it
+	// still pages rather than silently never paging.
+	HistoryBatch int
 
 	// StreamTimeout is F5's watchdog: how long a running task may say
 	// nothing before the UI stops its spinner and offers Retry. <= 0 falls
@@ -90,6 +101,9 @@ type Workspace struct {
 	log    *slog.Logger
 
 	scrollback int
+	// historyBatchSize is `ui.historyBatch`; see history.go's historyBatch
+	// for the accessor that applies the default.
+	historyBatchSize int
 
 	sessionID       string
 	sessionTitle    string
@@ -135,6 +149,12 @@ type Workspace struct {
 	// sendFn is: what these tests exercise is the lane/queue/lifecycle
 	// logic, not protocol.Client's send path, which that package tests.
 	sendMsgFn func(e *liveEntry, payload map[string]any) tea.Cmd
+	// sendHistoryFn is F18's own send, and the only one that RETURNS the
+	// correlation id it used -- a history fetch has to be matched against
+	// the window state it was issued against, so a superseded one can be
+	// dropped instead of spliced into a window that has since moved.
+	// Substituted by a test for the same reason the two above are.
+	sendHistoryFn func(payload map[string]any) (string, bool)
 
 	input inputState
 
@@ -170,7 +190,43 @@ type Workspace struct {
 	// nothing is merged, relabelled or dropped -- but they are now
 	// REORDERED so each answer sits directly under its own question, keyed
 	// on the persisted task_id and on nothing else. See reload.go.
+	//
+	// F18: `all` is no longer what the wire returned, and no longer the
+	// whole session. It is DERIVED from `raw` (below) on every window
+	// mutation. Nothing outside history.go assigns it except the package's
+	// own tests, which set it directly and get F3's plain rendering with
+	// no window behind it -- the same latitude histAt was already
+	// bounds-safe for.
 	all []wireMessage
+
+	// raw is F18's resident window: a CONTIGUOUS run of persisted rows,
+	// oldest-first, exactly as B18's keyset query returned them. It is the
+	// single source `all` and `hist` are rebuilt from, which is what makes
+	// S11b's three reload transforms idempotent under windowing -- one of
+	// them (applyTaskRows) inserts rows, so it must never run against its
+	// own output. See history.go.
+	raw []wireMessage
+
+	// window is every fact about `raw` that is not `raw` itself: its seq
+	// bounds, the open-time ceiling that keeps a re-fetched tail from
+	// duplicating w.live, what fetch is in flight, and what backpressure
+	// has parked. See history.go's historyWindow.
+	window historyWindow
+
+	// taskRows is the last ListTasks answer, kept rather than consumed.
+	//
+	// Before F18 the tasks join ran exactly once (onTaskList called
+	// applyTaskRows and dropped the rows). A windowed transcript rebuilds
+	// `all` on every prepend, append and eviction, and each rebuild has to
+	// re-run that join or a reloaded footer would survive only until the
+	// first scroll-fetch. nil is the ordinary state before the reply
+	// lands, and applyTaskRows is a no-op on it.
+	taskRows map[string]taskRow
+
+	// resumeAnchor is the scroll anchor Resume read out of F12's blob,
+	// waiting for a session to apply itself to. Consumed exactly once, at
+	// the end of setSession -- see history.go's applyResumeAnchor.
+	resumeAnchor *blobAnchor
 
 	// hist is a decoration parallel to `all`, one slot per row: non-nil
 	// where a persisted row renders through F5's LIVE renderers (a
@@ -319,21 +375,27 @@ func New(opts Options) *Workspace {
 	if st <= 0 {
 		st = defaultStreamTimeout
 	}
+	hb := opts.HistoryBatch
+	if hb <= 0 {
+		hb = defaultHistoryBatch
+	}
 	w := &Workspace{
-		theme:         opts.Theme,
-		client:        opts.Client,
-		log:           opts.Log,
-		scrollback:    sb,
-		streamTimeout: st,
-		pending:       make(map[string]queryKind),
-		resolvingPath: make(map[string]string),
-		cache:         make(map[string][]string),
-		focus:         -1,
-		pinned:        true,
-		state:         opts.State,
+		theme:            opts.Theme,
+		client:           opts.Client,
+		log:              opts.Log,
+		scrollback:       sb,
+		historyBatchSize: hb,
+		streamTimeout:    st,
+		pending:          make(map[string]queryKind),
+		resolvingPath:    make(map[string]string),
+		cache:            make(map[string][]string),
+		focus:            -1,
+		pinned:           true,
+		state:            opts.State,
 	}
 	w.sendFn = w.doSend
 	w.sendMsgFn = w.writeSend
+	w.sendHistoryFn = w.doSendHistory
 	w.saveStateFn = config.SaveState
 	w.input.buf = newInputBuffer()
 	w.input.focused = true // the input holds focus by default — F4
@@ -388,12 +450,57 @@ func (w *Workspace) Init() tea.Cmd { return nil }
 
 // Suspend/Resume persist roughly two kilobytes per F1's Workspace doc — never
 // message content, the same rule Resume documents: rehydrate from the
-// database, the same path as opening a week-old session. F3 has nowhere yet
-// to write these (F12 owns workspace-state persistence), so both are no-ops
-// that satisfy the interface without inventing storage this episode does not
-// own.
-func (w *Workspace) Suspend() ([]byte, error) { return nil, nil }
-func (w *Workspace) Resume([]byte) error      { return nil }
+// database, the same path as opening a week-old session.
+//
+// F3 left both as no-ops because it had nothing that needed to survive an
+// unload and nowhere to write it (F12 owns workspace-state persistence).
+// **F18 is the first real implementation of either.** It has something that
+// must survive: the scroll anchor, which is meaningless to re-derive and
+// impossible to guess. Doing it now rather than letting F12 ship first is
+// deliberate — F12 would otherwise design the blob schema having never heard
+// of an anchor, and F18 would then have to migrate it. That is the exact
+// B11 `AgentConfig.background` retrofit trap, avoided by ordering.
+//
+// What is in the blob is ONLY the anchor: `{anchorSeq, rowOffset,
+// pinnedToBottom}`, a narrow F18-owned shape under its own name, which F12's
+// real workspace-state type must ADAPT to rather than be identical to — the
+// `CardSlot`/`Drafts` precedent. See history.go's suspendBlob.
+//
+// Nothing calls either method yet; F12 owns the lifecycle that will. The
+// round trip is proven by test rather than by use, which is also why Resume
+// can never fail on bad input: it degrades to the bottom and returns nil,
+// because the restore path must never be the thing that breaks a resume.
+func (w *Workspace) Suspend() ([]byte, error) {
+	return json.Marshal(suspendBlob{Version: suspendVersion, Anchor: w.currentBlobAnchor()})
+}
+
+// Resume stores the anchor for setSession to apply. It cannot position
+// anything itself: at Resume time there is no session, no window and no
+// transcript to address. See history.go's applyResumeAnchor, which consumes
+// it once the load completes.
+//
+// Every failure is a degradation, never an error. An empty blob (F3's own
+// output, which a state file written before this episode will hold), a blob
+// that is not JSON, and a version this build does not know all resume at the
+// bottom — the same place a session with no stored anchor opens.
+func (w *Workspace) Resume(raw []byte) error {
+	w.resumeAnchor = nil
+	if len(raw) == 0 {
+		return nil
+	}
+	var blob suspendBlob
+	if err := json.Unmarshal(raw, &blob); err != nil {
+		w.log.Warn("chat: suspend blob unreadable, resuming at the bottom", "err", err)
+		return nil
+	}
+	if blob.Version != suspendVersion {
+		w.log.Warn("chat: suspend blob is a version this build does not know, resuming at the bottom",
+			"version", blob.Version, "want", suspendVersion)
+		return nil
+	}
+	w.resumeAnchor = blob.Anchor
+	return nil
+}
 
 var _ app.Workspace = (*Workspace)(nil)
 var _ app.FocusAware = (*Workspace)(nil)

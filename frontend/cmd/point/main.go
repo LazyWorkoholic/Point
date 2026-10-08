@@ -143,10 +143,11 @@ func run() error {
 	// that wires the two together, replacing F1's placeholder for the chat
 	// workspace with the real thing.
 	root.SetWorkspace(app.WorkspaceChat, chat.New(chat.Options{
-		Theme:      th,
-		Client:     client,
-		Log:        log,
-		Scrollback: cfg.UI.Scrollback,
+		Theme:        th,
+		Client:       client,
+		Log:          log,
+		Scrollback:   cfg.UI.Scrollback,
+		HistoryBatch: cfg.UI.HistoryBatch,
 		// F5: ui.stream_timeout, in seconds — the client-side watchdog
 		// that stops a spinner no backend event is ever going to stop.
 		StreamTimeout: time.Duration(cfg.UI.StreamTimeout) * time.Second,

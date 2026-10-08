@@ -177,7 +177,20 @@ func (w *Workspace) scrollRows(delta, width int) {
 	bAbs, bRow := w.bottomAnchored(w.viewRows, width)
 	if w.topAbs > bAbs || (w.topAbs == bAbs && w.topRow >= bRow) {
 		w.topAbs, w.topRow = bAbs, bRow
-		w.pinned = true
+		// F18: the bottom of the RESIDENT WINDOW is not necessarily the
+		// live edge any more. Pinning here when the tail has been evicted
+		// would be a lie with two visible consequences: the pinned render
+		// would bottom-anchor to a stale newest message, and the "jump to
+		// latest (G)" affordance would disappear at precisely the moment
+		// it is the only way back. So pinned keeps meaning "at the live
+		// edge", and reaching a windowed bottom instead fires an append
+		// fetch (maybeFetchAtEdge, below) and lets the user keep going.
+		if w.historyAtTail() {
+			w.pinned = true
+			return
+		}
+		w.pinned = false
+		w.maybeFetchAtEdge()
 		return
 	}
 	// Anywhere above the live edge is unpinned, and it has to be assigned
@@ -185,6 +198,10 @@ func (w *Workspace) scrollRows(delta, width int) {
 	// otherwise stay pinned, the pinned render would snap the position
 	// straight back to the bottom, and scrolling up would do nothing at all.
 	w.pinned = false
+	// F18: and this is where scrolling turns into fetching. Last, after the
+	// position is final, so the edge test reads the position the user will
+	// actually be looking at.
+	w.maybeFetchAtEdge()
 }
 
 // clampScroll keeps an unpinned position addressable after the content under
@@ -258,6 +275,11 @@ func (w *Workspace) handleKeyString(s string) tea.Cmd {
 	case "G":
 		w.pinned = true
 		w.focus = -1
+		// F18: G used to be free, because everything was in memory. With
+		// eviction the newest messages may not be resident, so this is now
+		// a fetch when it has to be — and still instant when it does not.
+		// See history.go's jumpToBottom.
+		w.jumpToBottom()
 	case "y":
 		w.copyFocused()
 	case "t":
@@ -336,8 +358,13 @@ func (w *Workspace) moveFocus(delta, width int) {
 	w.focus = next
 
 	if next == n-1 && delta > 0 {
-		w.pinned = true
-		return
+		// Same F18 gate as scrollRows': focusing the last RESIDENT entry
+		// is not the same as being at the live edge once the tail can be
+		// absent.
+		if w.historyAtTail() {
+			w.pinned = true
+			return
+		}
 	}
 	// Anchor the focused entry at the top of the viewport: predictable, and
 	// it always shows the head of the entry — which is the line a task slot
@@ -349,4 +376,5 @@ func (w *Workspace) moveFocus(delta, width int) {
 		// Skip the leading gap so the entry's own first row is at the top.
 		w.topRow = gapLines(w.entryRole(next-1), w.entryRole(next))
 	}
+	w.maybeFetchAtEdge()
 }

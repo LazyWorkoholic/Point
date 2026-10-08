@@ -196,6 +196,49 @@ F18 needs B18 and F5; must land before F12 (anchor lives in the Suspend blob).
       Hook: B12's attachment resolution (built) + F8's `@` picker UI (not built).
       Anchor: after F8, and only once F4's paste ceiling is fixed and understood.
 
+- [ ] **`G` clears the transcript's entry focus, so `o` silently stops
+      working on a task slot** — found during F18's verification, reported as
+      a task-tray bug. It is **not** the tray's and **not** F9a's: in
+      `app\popup.go`'s `handleKey`, every plain rune goes into the popup's
+      FILTER (F07's own Done-when #5, so a typed `j` cannot read as
+      "scroll"), so `n`/`o`/`j`/`k`/`G` never reach the tray at all. The keys
+      in the repro are the CHAT TRANSCRIPT's browse-mode keys
+      (`chat\scroll.go`'s `handleKeyString`), acting on a reloaded
+      `@research` slot in the transcript — which looks enough like a tray row
+      to be mistaken for one.
+
+      Repro: with the input unfocused, `n`/`p` onto a research task slot; `o`
+      opens and closes it correctly. Press `Shift+G`. Press `o` again — it
+      does nothing. Only `p` then `n` restores it.
+
+      Cause, one line: `case "G"` sets `w.pinned = true` **and
+      `w.focus = -1`**. `focusedIndex()` then falls back to the newest entry
+      (F3's convention, so `y` works without pressing a focus key first), and
+      `o` resolves `liveAt()` against that entry instead — which is usually
+      an ordinary reply with no slot, so the toggle is a silent no-op.
+      `p` then `n` re-establishes an explicit focus, which is why it "fixes"
+      it.
+
+      **Pre-existing since F3**, not introduced by F18: `w.focus = -1` on `G`
+      was added in commit `68a1cbc` ("F3: chat viewport") and is byte-identical
+      at `96feddc` (the commit F9a closed on) — verified by
+      `git show 96feddc:frontend/internal/chat/scroll.go`. F18 only appended
+      `w.jumpToBottom()` after those two lines. F18 also confirmed the
+      adjacent `j`/`k` spellings of the same symptom were its OWN and fixed
+      them (see `design/completed/frontend/F18-windowed-history.md`, bugs
+      4–6); this `G` one is the residue that is not.
+
+      Not fixed in F18: out of that episode's Build section, and the fix is a
+      genuine UX decision rather than a repair — should `G` keep the focus
+      where it is (and then the highlight sits off screen), move the focus to
+      the newest entry explicitly, or keep clearing it and have `o` say why it
+      did nothing? `y`, `t` and `^R` all read the same fallback, so whichever
+      answer is chosen governs four keys, not one.
+
+      Owner: `chat\scroll.go`'s `handleKeyString`/`focusedIndex` (F3).
+      Anchor: **F16 (polish)**, unless the chosen answer turns out to need its
+      own episode.
+
 
 ## Rejected
 

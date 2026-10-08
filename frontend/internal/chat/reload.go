@@ -79,6 +79,18 @@ const taskRowLimit = 500
 //
 // It is a stable reorder: with one send at a time, or with rows that
 // predate B12, the output is the input, verbatim.
+//
+// F18 changed what `msgs` IS — the resident window rather than the whole
+// session — and changed nothing else, because the no-reorder-across-an-edge
+// property the windowed case needs is already structural here. `answerAt` is
+// built from the slice it was handed, so an answer that is not in the slice
+// is not a candidate: a question whose answer sits one batch below is simply
+// left unpaired, exactly as a question whose answer does not exist is. When
+// that batch loads, the rebuild re-runs this over the longer run and the
+// pairing resolves. The visible cost is that a slot or footer at the very
+// edge of the window appears one batch late, and that rows near a batch seam
+// settle into their paired order as the seam fills in — expected behaviour
+// during a fast scroll, not a content jump.
 func pairReloaded(msgs []wireMessage) []wireMessage {
 	if len(msgs) < 2 {
 		return msgs
@@ -403,7 +415,14 @@ func (w *Workspace) onTaskList(env protocol.Envelope) {
 	for _, t := range p.Tasks {
 		byID[t.ID] = t
 	}
-	w.applyTaskRows(byID)
+	// F18: KEPT, not consumed. A windowed transcript rebuilds w.all from
+	// w.raw on every prepend, append and eviction, and each rebuild has to
+	// re-run this join -- otherwise a reloaded footer would survive exactly
+	// until the first scroll-fetch and then quietly disappear. Rebuilding
+	// here rather than calling applyTaskRows directly is what keeps "w.all
+	// is derived from w.raw" true with no second path.
+	w.taskRows = byID
+	w.rebuildWindow()
 }
 
 // applyTaskRows inserts a reply for each question whose task produced no
@@ -416,8 +435,36 @@ func (w *Workspace) onTaskList(env protocol.Envelope) {
 // therefore the same footer. It is emphatically not "attaching the question
 // to someone else's answer"; there is no answer, and the entry carries
 // none.
+//
+// # F18: why this does nothing unless the window reaches the tail
+//
+// `answered` can only be built from rows that are RESIDENT. Under windowing
+// that makes "this question's task produced no message" unprovable in the
+// general case, because an answer may sit arbitrarily far below its question
+// (two overlapping sends both persist their questions before either answer
+// lands — pairReloaded's own doc records this as the defect that episode
+// existed to fix) and so may be outside the window entirely.
+//
+// A task that failed AFTER streaming some tokens has a real assistant row.
+// With that row evicted, an ungated join would see an unanswered question, a
+// failed tasks row, and insert a placeholder "✗ failed" reply — a FABRICATED
+// row in a window whose whole contract is that it is a faithful slice. That
+// is strictly worse than a missing footer.
+//
+// So the join is gated on the window reaching the open-time tail, where an
+// absent answer really is absent. Everywhere else a question at or near a
+// window edge renders plain and unpaired, and re-resolves normally once the
+// adjoining batch loads. Deciding it any other way would need either an
+// overlap fetch past each edge or a guess, and a guess here invents rows.
 func (w *Workspace) applyTaskRows(byID map[string]taskRow) {
 	if len(byID) == 0 {
+		return
+	}
+	if !w.window.reachesTail() {
+		// The decorations that come off a message's OWN columns (a slot,
+		// a footer) are unaffected — decorateReloaded has already run and
+		// needs nothing from here. Only the two-table join for a task
+		// with no message at all is suppressed.
 		return
 	}
 
