@@ -33,6 +33,7 @@ it passed.
 | B23 | Agent and Directory Listing on the Wire | ✅ built + manually verified | `B23-agent-and-directory-listing.md` |
 | B25 | Persist a Validated Provider Key | ✅ built + manually verified | `B25-provider-key-persistence.md` |
 | B26 | Behaviour Overrides + `doctor` on the Wire | ✅ built + manually verified | `B26-behaviour-overrides-doctor-wire.md` |
+| B27 | Resolved Behaviour Values in `GetDoctorReport` | ✅ built + manually verified | `B27-doctor-resolved-behaviour-values.md` |
 | B28 | Demo Mode: Provider, Fixture Library, Sample Project | ✅ built + manually verified | `B28-demo-mode-provider-fixtures.md` |
 | B29 | Remove the Legacy `backend\runtime.db` Copy-Forward | ✅ built + manually verified | `B29-remove-legacy-runtime-db.md` |
 | B30 | Let `SetSessionProvider` Also Bind a Session's Project | ✅ built + manually verified | `B30-set-session-project.md` |

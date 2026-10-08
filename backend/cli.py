@@ -1272,6 +1272,7 @@ async def build_doctor_report() -> dict[str, Any]:
         "ollama_report": ollama_report,
         "mock_enabled": mock_provider.is_enabled(),
         "behaviour_overrides": appconfig_overrides.all_overrides(),
+        "behaviour_resolved": appconfig_overrides.resolved_behaviour_settings(),
     }
 
 

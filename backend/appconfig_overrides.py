@@ -96,6 +96,57 @@ def all_overrides() -> dict[str, Any]:
     return dict(_OVERRIDES)
 
 
+# The hardcoded fallback each of the five ALLOWED_KEYS' own real call
+# site already falls back to when config.toml has no value for it --
+# duplicated here, deliberately, not imported from each call site
+# (scheduler.py's DEFAULT_MAX_CONCURRENT / turn_queue_depth's own literal
+# `1`, runtime.py's `7` and two call sites' `False`, project_manager.py's
+# `True`), because none of those four modules exists to be a shared
+# source of truth for a doctor-only reporting need, and importing from
+# all four to save one constant each would be a worse coupling than the
+# duplication. If any of these five changes, its own call site AND this
+# line must change together -- the same discipline credential.go's
+# pasteSettleWindow already documents, frontend-side, for an identical
+# cross-boundary duplication ("this package cannot import chat... so the
+# value is reproduced rather than shared").
+RESOLVED_DEFAULTS: dict[str, Any] = {
+    "chat.queue_depth": 1,                    # scheduler.py:269 turn_queue_depth()
+    "limits.max_concurrent_tasks": 3,         # scheduler.py:68 DEFAULT_MAX_CONCURRENT
+    "project.allow_outside_project": False,   # context.py:843, runtime.py:1393
+    "index.respect_gitignore": True,          # project_manager.py:205
+    "research.stale_after_days": 7,           # runtime.py:1025
+}
+
+
+def resolved_behaviour_settings() -> dict[str, dict[str, Any]]:
+    """For GetDoctorReport (B27): each of the five Behaviour-tab keys'
+    actual config.toml value -- or RESOLVED_DEFAULTS' own fallback when
+    config.toml has none -- plus whether an override currently masks it.
+
+    Deliberately NOT config_value_live()'s own resolution: that function
+    already applies the override, which is the one thing this is here to
+    look PAST. "What does config.toml say, independent of anything
+    layered on top of it" and "what governs the next real decision" are
+    two different questions; config_value_live() already answers the
+    second one everywhere it's called. This answers the first, plus a
+    separate bit for whether the second currently differs from it.
+
+    Scoped to exactly these five keys -- NOT the
+    limits.<provider>.max_concurrent_tasks family _provider_cap_name()
+    also recognizes. F10b's own Behaviour tab exposes only the general
+    cap (its Decision 3); this field mirrors that tab's five rows
+    exactly, not every key SetBehaviourOverride will accept.
+    """
+    out: dict[str, dict[str, Any]] = {}
+    for key, default in RESOLVED_DEFAULTS.items():
+        present, _ = get_override(key)
+        out[key] = {
+            "resolved": appconfig.config_value(key, default),
+            "overridden": present,
+        }
+    return out
+
+
 def config_value_live(dotted_key: str, default: Any = None) -> Any:
     present, value = get_override(dotted_key)
     if present:
