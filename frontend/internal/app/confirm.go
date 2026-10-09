@@ -55,18 +55,79 @@ func NewConfirm(title, body, yes, no string, onConfirm tea.Cmd) *Confirm {
 // "Quit". The quit confirm ("Quit" / "Cancel") fits 40 and is unaffected —
 // this can only ever grow a confirm that would not have fitted.
 func (c *Confirm) MinSize() (int, int) {
-	// renderButtons' own geometry: each label gets four cells of box
-	// ("[ " + label + " ]", or two spaces either side), plus buttonGap
-	// between the two.
+	return c.naturalWidth(), confirmFloorH
+}
+
+// confirmFloorH is LAYOUT.md's "confirm 40×7" height, kept as the REFUSAL
+// threshold and no longer used as the rendered height. See PreferredSize.
+const confirmFloorH = 7
+
+// naturalWidth is renderButtons' own geometry: each label gets four cells of
+// box ("[ " + label + " ]", or two spaces either side), plus buttonGap
+// between the two, plus 2 for box.go's fitCells padding and 2 for the
+// border — the same accounting View does in reverse when it computes textW.
+func (c *Confirm) naturalWidth() int {
 	buttons := runewidth.StringWidth(c.yes) + runewidth.StringWidth(c.no) +
 		8 + runewidth.StringWidth(buttonGap) // 4 cells of box per button
-	// +2 for box.go's fitCells padding, +2 for the border: the same
-	// accounting View does in reverse when it computes textW.
 	w := buttons + 4
 	if w < 40 {
 		w = 40
 	}
-	return w, 7
+	return w
+}
+
+// PreferredSize lets a Confirm grow to fit its own body, which is what makes
+// it a MaximisedOverlay.
+//
+// # The bug this fixes
+//
+// MinSize returned a FLAT height of 7 — five content rows — however long
+// the body was, and for a plain Overlay overlayRect treats MinSize as the
+// ACTUAL rendered size. F7's one-line bodies fitted; F12's quit
+// confirmation (UI-14) does not: it lists the running tasks, wraps to four
+// lines, and the buttons and the key hint were rows six and seven. They
+// were simply cut off, so the dialog showed no labels and no focus marker
+// at all — while still responding to ←/→ and Enter, which is what made it
+// read as a frozen box rather than a clipped one.
+//
+// A verification round had already fixed exactly this bug on the WIDTH axis
+// (F9a's "Cancel it" / "Leave it running" overflowing a 40-cell row) and
+// left the height a constant. Same defect, one axis over.
+//
+// # Why PreferredSize and not a bigger MinSize
+//
+// Because MinSize is also the refusal threshold (overlayFits), and
+// F06-right-pane.md's own "Known limitation" note says so: raising it means
+// terminals that can open the dialog today stop being able to. For a quit
+// confirmation that is the worst possible trade — the dialog exists to warn
+// about losing work, and on a short terminal it would vanish instead,
+// taking the warning with it. That note asks for "a preferred-vs-minimum
+// distinction in the Overlay contract"; F9a built it as MaximisedOverlay for
+// the tray and the result card, and this is the same mechanism applied to
+// the third surface that needed it. overlayRect caps the answer against the
+// terminal, so a body too tall to fit is still clipped rather than refused
+// — the previous behaviour, now reached only when it is genuinely necessary.
+func (c *Confirm) PreferredSize(availW, availH int) (int, int) {
+	w := c.naturalWidth()
+	// The width View will wrap at, derived exactly as View derives it:
+	// withOverlay passes rect.W-2, and View then takes another 2 for
+	// fitCells' padding.
+	textW := w - 4
+	if textW < 1 {
+		textW = 1
+	}
+
+	lines := 0
+	for _, para := range strings.Split(c.body, "\n") {
+		lines += len(wrapLine(para, textW))
+	}
+	// View's own layout after the body: one blank row, the button row, the
+	// key hint. Plus 2 for the border.
+	h := lines + 3 + 2
+	if h < confirmFloorH {
+		h = confirmFloorH
+	}
+	return w, h
 }
 func (c *Confirm) Title() string { return c.title }
 

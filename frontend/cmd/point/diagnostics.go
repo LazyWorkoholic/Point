@@ -12,6 +12,7 @@ package main
 
 import (
 	"log/slog"
+	"net"
 	"net/http"
 	_ "net/http/pprof" // registers /debug/pprof/* on the default mux; served loopback-only below
 	"os"
@@ -71,6 +72,14 @@ func startMemLog(log *slog.Logger) (stop func()) {
 	return func() { close(done) }
 }
 
+// The port is 6061, not pprof's conventional 6060, and it has been since
+// F3 (design\completed\frontend\F03-chat-viewport.md records it). F12's task
+// doc asks for 6060 in its own Done-when #7 command, which is simply a wrong
+// number in that doc — a verification round spent a step on "nothing is
+// listening on 6060" because of it. The code is the truth here, per
+// CLAUDE.md, so the number stays and the docs get corrected.
+const pprofAddr = "127.0.0.1:6061"
+
 // startPprof serves net/http/pprof on loopback only, when POINT_PPROF is
 // set — the "settle it definitively" option: if startMemLog's counter shows
 // real growth, `go tool pprof` against /debug/pprof/heap points at exactly
@@ -79,19 +88,42 @@ func startMemLog(log *slog.Logger) (stop func()) {
 //
 // 127.0.0.1 only, never 0.0.0.0 — this is a loopback dev diagnostic, not a
 // network service, and binding it that way is what keeps it from being one
-// by accident.
+// by accident. Note that it is 127.0.0.1 and NOT `localhost`: on a machine
+// where `localhost` resolves to ::1 first, a browser or curl aimed at
+// `localhost` can be refused while the server is up and perfectly healthy.
+// Both the log line below and every doc that names this URL use the literal
+// address for that reason.
+//
+// # The listen is synchronous
+//
+// It used to spawn ListenAndServe in a goroutine and then log "pprof
+// enabled" unconditionally, which meant the one line a user would check
+// claimed success before the bind had been attempted at all: a port already
+// in use logged "enabled" and then, separately and later, a Warn that is
+// easy to miss above a screenful of startup. net.Listen happens here, in
+// line, so the log states what actually happened and names the address it
+// really bound.
 func startPprof(log *slog.Logger) (stop func()) {
 	if _, on := os.LookupEnv("POINT_PPROF"); !on {
 		return func() {}
 	}
-	const addr = "127.0.0.1:6061"
-	srv := &http.Server{Addr: addr}
+	ln, err := net.Listen("tcp", pprofAddr)
+	if err != nil {
+		// Loud, and not fatal: a diagnostic that cannot start must say so
+		// in the one place someone will look, but must never stop the app
+		// it was only meant to measure.
+		log.Error("pprof NOT started — nothing will be listening",
+			"addr", pprofAddr, "err", err)
+		return func() {}
+	}
+	srv := &http.Server{}
 	go func() {
-		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		if err := srv.Serve(ln); err != nil && err != http.ErrServerClosed {
 			log.Warn("pprof server stopped", "err", err)
 		}
 	}()
-	log.Info("pprof enabled", "url", "http://"+addr+"/debug/pprof/",
-		"heap_profile", "go tool pprof http://"+addr+"/debug/pprof/heap")
+	log.Info("pprof listening", "addr", ln.Addr().String(),
+		"url", "http://"+ln.Addr().String()+"/debug/pprof/",
+		"heap_profile", "go tool pprof -top http://"+ln.Addr().String()+"/debug/pprof/heap")
 	return func() { _ = srv.Close() }
 }

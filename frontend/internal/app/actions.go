@@ -2,6 +2,8 @@ package app
 
 import (
 	"fmt"
+	"strings"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 
@@ -44,14 +46,40 @@ func registerActions() *actions.Registry[*Root] {
 			// (chat's esc-at-capacity) stays unconfirmed on purpose — a
 			// draft persists to disk and is trivially recoverable, so it
 			// is not the losable-work case Confirm exists for.
-			if n := len(root.conn.inFlight); n > 0 {
-				root.OpenOverlay(NewConfirm(
-					"Quit With Tasks Running",
-					fmt.Sprintf("%d task(s) still running. Quitting now abandons their progress.", n),
-					"Quit", "Cancel",
-					quitCmd(root),
-				))
-				return nil
+			// F12 turns this into UI-14 proper: not a COUNT but the
+			// list, because the asymmetry with unload is the whole
+			// point. Unloading a view leaves its tasks running in the
+			// backend; quitting kills the backend, so they genuinely
+			// die here, and the wording has to make that visible
+			// rather than leave the user to infer it from two
+			// dialogs that look the same.
+			//
+			// root.conn.inFlight stays the TRIGGER -- it is the
+			// backend's own live count of what is in flight and
+			// cannot be stale -- while the rows come from the task
+			// snapshot, which refreshTasks now keeps current whether
+			// or not any pane is showing it (see its own doc). If the
+			// snapshot has no rows for a non-zero in-flight count,
+			// the dialog still warns, in the honest wording for
+			// "something is running and I cannot name it".
+			if len(root.conn.inFlight) > 0 {
+				// Ask for a fresh snapshot FIRST and draw the dialog
+				// once it lands (root.openQuitConfirm), rather than
+				// drawing it now from whichever snapshot happens to be
+				// in hand. With the right pane hidden and the tray
+				// never opened that snapshot is empty, and a quit
+				// dialog saying nothing is running while something is
+				// would be the worst place in the app to break the
+				// standing rule against a hint that lies. See
+				// requestTasksOffScreen.
+				root.quitConfirmPending = true
+				if !root.requestTasksOffScreen() {
+					root.openQuitConfirm() // no backend to ask; use what we have
+					return nil
+				}
+				return tea.Tick(quitConfirmWait, func(time.Time) tea.Msg {
+					return quitConfirmTimeoutMsg{}
+				})
 			}
 			doQuit(root)
 			return tea.Quit
@@ -301,6 +329,44 @@ func registerActions() *actions.Registry[*Root] {
 		},
 	})
 
+	// ---- F12 ------------------------------------------------------------
+
+	r.Register(actions.Action[*Root]{
+		ID:          "workspace.switcher",
+		Name:        "Workspaces",
+		Description: "Switch workspace -- every one, loaded or not, with its idle countdown",
+		Category:    "Workspace",
+		// `w`, not F12's `c`/`e`: leader `c` has been pane.right.toggle
+		// since F6 and `x` has been context.expand since S13d, and a
+		// duplicate leader sequence is a boot failure
+		// (actions.Registry.Validate), not a key that quietly does the
+		// other thing. One switcher listing every workspace also scales
+		// to the parked capability workspaces without needing a free
+		// letter per workspace, which is the thing that ran out here.
+		Leader: "w",
+		When: func(root *Root) bool {
+			return len(root.Defs()) > 0
+		},
+		Run: func(root *Root) tea.Cmd {
+			root.OpenOverlay(newSwitcherOverlay(root))
+			return nil
+		},
+	})
+
+	r.Register(actions.Action[*Root]{
+		ID:          "workspace.unload",
+		Name:        "Unload Workspace",
+		Description: "Release this view from memory -- background tasks keep running",
+		Category:    "Workspace",
+		Leader:      "u",
+		When: func(root *Root) bool {
+			return root.activeIsLoaded()
+		},
+		Run: func(root *Root) tea.Cmd {
+			return root.requestUnload()
+		},
+	})
+
 	r.Register(actions.Action[*Root]{
 		ID:          "backend.retry",
 		Name:        "Retry Backend",
@@ -334,7 +400,46 @@ func doQuit(root *Root) {
 	if f, ok := root.current().(DraftFlusher); ok {
 		f.FlushDraft()
 	}
+	// F12's suspended state has exactly the same problem for exactly the
+	// same reason: it is written debounced, and once bubbletea has
+	// tea.Quit the pending Tick is never delivered. Without this, quitting
+	// loses whatever moved since the last two-second window closed --
+	// which on a deliberate quit is almost always the position the user
+	// last chose.
+	root.flushWorkspaceState()
 	root.quitting = true
+}
+
+// quitBody is UI-14's text: what is running, and that quitting cancels it.
+//
+// Listed, with durations, up to a bound -- a session with forty queued
+// tasks must not produce a dialog taller than the terminal, and Confirm
+// sizes itself from its body.
+func quitBody(root *Root, inFlight int) string {
+	running := root.runningTasks()
+	if len(running) == 0 {
+		return fmt.Sprintf(
+			"%d request(s) still in flight. Quitting stops the backend and cancels them.", inFlight)
+	}
+
+	var b strings.Builder
+	if len(running) == 1 {
+		b.WriteString("1 task is still running:\n")
+	} else {
+		fmt.Fprintf(&b, "%d tasks are still running:\n", len(running))
+	}
+	const shown = 4
+	for i, t := range running {
+		if i == shown {
+			fmt.Fprintf(&b, "  … and %d more\n", len(running)-shown)
+			break
+		}
+		fmt.Fprintf(&b, "  %s %s  %s\n",
+			TaskGlyph(t.State), capitalise(TaskLabel(t)), TaskElapsed(t.StartedAt))
+	}
+	// The asymmetry with unload, stated rather than implied.
+	b.WriteString("Quitting will cancel them -- unloading a view would not.")
+	return b.String()
 }
 
 // quitCmd is app.quit's effect wrapped as a tea.Cmd, for the ONE case that

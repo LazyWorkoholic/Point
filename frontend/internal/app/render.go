@@ -68,6 +68,16 @@ func (r *Root) View() string {
 	if l.TooSmall {
 		return r.tooSmall(l.Message)
 	}
+	// F12: a workspace's own declared minimum, on top of layout's floor.
+	// Compute owns the floor every workspace has to clear (50×12) and
+	// cannot own this one: it is per-workspace data the registry supplies,
+	// and the Editor's is going to be larger than Chat's. Refused with the
+	// ACTUAL numbers, which is TEMPLATES.md's capability contract and the
+	// same rule OpenOverlay's fit check already follows -- a view that
+	// silently renders wrong is indistinguishable from a broken layout.
+	if msg, ok := r.activeTooSmall(); !ok {
+		return r.tooSmall(msg)
+	}
 
 	rows := make([]string, 0, r.h)
 	rows = append(rows, "") // top margin
@@ -191,24 +201,44 @@ func (r *Root) statusBar(l layout.Layout) string {
 	th := r.theme
 	width := l.StatusBar.W
 
+	// The right half is built FIRST so the hint builders below know what
+	// they actually have room for.
+	//
+	// They used to be built blind and then cut by truncateCells, which
+	// pads to exactly N cells and elides nothing — so an overflowing hint
+	// bar rendered "… w Workspac", a binding name missing its last two
+	// letters. That is worse than a hint that is simply absent: a hint is
+	// a claim about what a key does, and a cut one is a claim with the
+	// wrong word in it. Found against the real app at 74 columns, where
+	// F12's two new leader actions were what finally pushed the list past
+	// the edge (it fitted at 100 columns before them, and still does).
+	right := th.Style(theme.TextDim).Render(fmt.Sprintf(
+		"%s · %d task(s) · %d×%d", r.connWord(), len(r.conn.inFlight), r.w, r.h))
+
+	if l.ShowWatermark {
+		right = th.Style(theme.Watermark).Render(watermarkText)
+	}
+
+	// What the left half gets if the right half stays. hintFloor is the
+	// point below which keeping the right half costs more than it is
+	// worth — it is the perishable one (see the gap check below), so the
+	// hints get the whole line rather than being squeezed to nothing.
+	hintBudget := width - visibleWidth(right) - 1
+	if hintBudget < hintFloor {
+		hintBudget = width
+	}
+
 	var left string
 	switch {
 	case r.leader.pending && r.leader.showHint:
-		left = th.Style(theme.AccentPrimary).Render(r.leaderHint())
+		left = th.Style(theme.AccentPrimary).Render(r.leaderHint(hintBudget))
 	case r.conn.banner != "":
 		left = th.Style(theme.Error).Render("! "+r.conn.banner) + " " +
 			th.Style(theme.TextDim).Render(r.retryHint())
 	case r.status != "":
 		left = th.Style(theme.TextSecondary).Render(r.status)
 	default:
-		left = th.Style(theme.TextDim).Render(r.bindingsHint())
-	}
-
-	right := th.Style(theme.TextDim).Render(fmt.Sprintf(
-		"%s · %d task(s) · %d×%d", r.connWord(), len(r.conn.inFlight), r.w, r.h))
-
-	if l.ShowWatermark {
-		right = th.Style(theme.Watermark).Render(watermarkText)
+		left = th.Style(theme.TextDim).Render(r.bindingsHint(hintBudget))
 	}
 
 	gap := width - visibleWidth(left) - visibleWidth(right)
@@ -220,7 +250,61 @@ func (r *Root) statusBar(l layout.Layout) string {
 	return left + strings.Repeat(" ", gap) + right
 }
 
-func (r *Root) bindingsHint() string {
+// hintFloor is the narrowest left half worth keeping the right half for.
+// Below it the status/size readout is dropped and the hints take the line.
+const hintFloor = 24
+
+// hintGap separates two hints. Three cells, the same as it has always been
+// — named so fitHints can account for it exactly rather than approximately.
+const hintGap = "   "
+
+// fitHints joins as many hints as fit in width, in order, and says how many
+// it had to leave out.
+//
+// Whole hints are dropped, never cut. A hint is a claim about what a key
+// does; "w Workspac" is that claim with the wrong word in it, which is
+// strictly worse than the hint not being there — the same standing rule
+// F04's Bug 12 set when a browse indicator advertised an Esc binding that
+// did not exist. The "+N" suffix is what keeps the absence honest rather
+// than silent: the user can see the bar is holding something back and open
+// the palette or Help, both of which list everything.
+func fitHints(parts []string, width int) string {
+	if width < 1 || len(parts) == 0 {
+		return ""
+	}
+	gap := runewidth.StringWidth(hintGap)
+
+	kept, used := 0, 0
+	for _, p := range parts {
+		w := runewidth.StringWidth(p)
+		if kept > 0 {
+			w += gap
+		}
+		// Leave room for the "+N" the dropped ones will need. Measured
+		// against what is actually left to drop, so the common case --
+		// everything fits -- reserves nothing.
+		reserve := 0
+		if kept+1 < len(parts) {
+			reserve = gap + runewidth.StringWidth(
+				fmt.Sprintf("+%d", len(parts)-(kept+1)))
+		}
+		if used+w+reserve > width {
+			break
+		}
+		used += w
+		kept++
+	}
+	if kept == 0 {
+		return ""
+	}
+	out := strings.Join(parts[:kept], hintGap)
+	if dropped := len(parts) - kept; dropped > 0 {
+		out += hintGap + fmt.Sprintf("+%d", dropped)
+	}
+	return out
+}
+
+func (r *Root) bindingsHint(width int) string {
 	parts := make([]string, 0, 3)
 	for _, id := range []string{"app.palette", "app.quit", "ui.help"} {
 		a, ok := r.actions.ByID(id)
@@ -234,12 +318,12 @@ func (r *Root) bindingsHint() string {
 			parts = append(parts, actions.Leader+" "+a.Leader+" "+strings.ToLower(a.Name))
 		}
 	}
-	return strings.Join(parts, "   ")
+	return fitHints(parts, width)
 }
 
 // leaderHint is the hint bar shown after a short delay, built from the
 // registry — never from a hardcoded list.
-func (r *Root) leaderHint() string {
+func (r *Root) leaderHint(width int) string {
 	var parts []string
 	for _, a := range r.actions.LeaderHints() {
 		if r.leader.sequence != "" && !strings.HasPrefix(a.Leader, r.leader.sequence) {
@@ -253,7 +337,11 @@ func (r *Root) leaderHint() string {
 	if len(parts) == 0 {
 		return actions.Leader + r.leader.sequence + " — nothing bound"
 	}
-	return actions.Leader + " " + r.leader.sequence + "   " + strings.Join(parts, "   ")
+	// The prefix is never dropped: it is what tells the user the leader is
+	// pending at all, and a hint bar with no leader on it reads as the
+	// ordinary bindings line.
+	prefix := actions.Leader + " " + r.leader.sequence + hintGap
+	return prefix + fitHints(parts, width-runewidth.StringWidth(prefix))
 }
 
 // tooSmall is the whole screen when the terminal is below a floor.

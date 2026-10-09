@@ -31,7 +31,8 @@ it passed.
 | F10b | Settings — Behaviour Overrides + `doctor` in About | ✅ built + manually verified | `F10b-settings-behaviour-doctor.md` |
 | F10c | Settings — Demo Mode | ✅ built + manually verified | `F10c-settings-demo-mode.md` |
 | F11 | Memory Popup | not started — blocked on B13 | — |
-| F12–F17 | — | not started | — |
+| F12 | Workspace Manager + Lifecycle | ✅ built + manually verified | `F12-workspace-manager.md` |
+| F13–F17 | — | not started | — |
 | F18 | Windowed History (bounded resident window) | ✅ built + manually verified | `F18-windowed-history.md` |
 
 **F1 and F2 were built and verified in one session** (`batchable: yes`).
@@ -48,6 +49,33 @@ only F5 and B18, both of which were already built and verified.
 shape method-for-method, not approximate it** — the three fields, the
 degrade-to-bottom rule and the pinned-to-bottom rule are all recorded in
 `F18-windowed-history.md`'s handoff.
+
+**F12 shipped without B15, deliberately.** Its Build section asks for a
+`workspace.unload(id)` wire event so Python can release a session's
+contexts; B15 is P2 and not started, and there is no such command in the
+protocol. Unload is frontend-only: nothing waits on that send, so adding it
+later is additive (one call in `unloadWorkspace`). Recorded in
+`F12-workspace-manager.md`'s own "Four assumptions" section with the
+evidence, because the episode's INDEX row says "Backend needed: B15" and a
+future reader will otherwise assume it landed.
+
+**F12 registers exactly one workspace, and three of its "Done when" criteria
+are therefore test-proven rather than eyes-on.** The Editor is F13's and
+F13 depends on F12, so #1's NOT_LOADED check, #4's idle unload and #4b's
+independent per-workspace timers are proven by Go tests that register
+test-only workspaces through the real registry on a substitutable clock. No
+stub Editor was built to make the gate runnable — the same call F18 made for
+Suspend/Resume, and the reason `F12-workspace-manager.md`'s handoff tells
+F13 to re-run those three by hand the moment it registers.
+
+**F12 made F18's Suspend/Resume reachable for the first time.** `git grep`
+finds no callers of either method anywhere before this episode, so F18's
+`applyResumeAnchor` was proven by test and never by use. Running it found
+one behaviour worth knowing about — a scrolled-up resume lands above content
+that arrived while the view was unloaded, while a pinned one correctly lands
+on it — diagnosed, pinned by test, and parked to F16 rather than fixed,
+because every cheap fix needs a fourth field on F18's fixed blob shape. See
+`tasks/frontend/INDEX.md`'s parking lot.
 
 **F9 is SPLIT across three sessions and is NOT complete.** F9a shipped the
 global task tray and the result card's render/discard half — two of the

@@ -240,6 +240,196 @@ F18 needs B18 and F5; must land before F12 (anchor lives in the Suspend blob).
       own episode.
 
 
+- [x] **`go test ./frontend/...` wrote the user's real
+      `%LOCALAPPDATA%\Point\state.json`** — found during F12's verification,
+      **predates F12**, fixed in that session. **Not an F12 build item** and
+      deliberately not recorded in F12's completed doc: F12 only happened to
+      be the episode that looked at the file's timestamp.
+
+      CLAUDE.md is explicit that nothing automated may touch `%APPDATA%\Point`
+      or `%LOCALAPPDATA%\Point` outside a scratch profile, so this was a
+      standing violation in the test suite rather than a near miss. It had
+      already wiped `last_workspace` out of the live profile by the time it
+      was noticed; the file was restored by hand from a backup taken during
+      the same session.
+
+      Confirmed on a **clean tree** before any fix: `git stash push -u`,
+      record the real file's `LastWriteTime`, `go test
+      ./frontend/internal/chat/`, mtime moved. So it was not F12's.
+
+      Cause: `chat.New` defaults `w.saveStateFn` to the real
+      `config.SaveState` (the seam exists for the reason `chat\draft.go`'s
+      `persistDraft` doc gives), and `persistDraft` only declines when
+      `w.sessionID` is empty. Any test that sets a session id — `setSession`,
+      `onSessionCreated`, or a direct assignment — and then sends (`onSend`
+      calls `clearDraft`) or types (`draftSaveMsg` → `saveDraftIfDue`) wrote
+      the user's own file. Five sites substituted `saveStateFn`
+      (`input_workspace_test.go`, `providers_test.go`); every other one did
+      not, and did not need to for its own assertions to pass — which is
+      exactly why nothing caught it.
+
+      Fixed by a package-level `TestMain` guard in **both**
+      `frontend\internal\chat` and `frontend\internal\app`
+      (`redirectProfileToScratch`), pointing `APPDATA`, `LOCALAPPDATA`,
+      `XDG_CONFIG_HOME` and `XDG_STATE_HOME` at an `os.MkdirTemp` directory
+      for the whole package run, removed between `m.Run()` and `os.Exit`.
+      It self-verifies — if `ConfigDir`/`StateDir` ever stop resolving from
+      those variables the guard refuses to run the suite instead of quietly
+      guarding nothing — and `TestTheProfileIsRedirectedAwayFromTheRealOne`
+      fails outright if the redirect is removed, which an mtime check done
+      once by hand cannot do. Proven by reverting the redirect and watching
+      that test fail, then by two consecutive full `go test ./frontend/...`
+      runs leaving the real file's mtime **and SHA256** identical.
+
+      `app` was guarded too even though nothing there reaches the real file
+      today: `saveWorkspaceStateIfDue` declines when no workspaces are
+      registered, which every current test satisfies, but that safety rests
+      on every workspace-registering fixture remembering to substitute a
+      recorder — the exact shape of the assumption that failed in `chat`.
+
+      **The production default of `saveStateFn`/`SaveWorkspaceStateFn` was
+      deliberately NOT changed.** The running app absolutely should write the
+      user's `state.json`; making the shipped path safer for tests would be
+      making the product worse to make the suite better. The test
+      environment was redirected, not the code path.
+
+
+- [ ] **No transcript presence for a task that is running while its view is
+      reloaded** -- found during F12's verification gate, diagnosed there,
+      **deliberately not fixed in F12**. Aryan's call, after the diagnosis
+      came back: do not lift `orphanReply`'s decline, and do not force a
+      rushed static marker in either.
+
+      Repro: unload a workspace with `\research` running, reload it BEFORE
+      the task finishes. The right pane and F9a's tray track the task
+      correctly throughout -- that is F12's whole demo beat and it works --
+      but the chat transcript shows the question with no reply and no slot.
+      The inline entry appears only once the task has completed and the
+      session is reloaded again, and that is the ordinary paired path (a
+      finished `\research` has a real assistant row), not this one.
+
+      **F12's resume path is not at fault**, and that is pinned by test
+      rather than asserted: `TestReloadMidTaskReachesTheJoinAndOrphanReply
+      Declines` and `TestTheSameJoinInsertsASlotOnceTheTaskIsTerminal` in
+      `chat\history_test.go`. A resumed session runs F18's chain exactly
+      (`setSession` -> `rebuildWindow` -> `pairReloaded` ->
+      `decorateReloaded` -> `applyTaskRows`), the window reaches the tail so
+      the join is not short-circuited, and it reaches the unanswered
+      question with the running tasks row in hand. `orphanReply` then
+      declines because the task is non-terminal.
+
+      **Why a static "-> running elsewhere" marker was investigated and
+      rejected.** It looked cheap -- source it from the tasks table's status
+      column only, no event stream, no clock, nothing that could stick. It
+      is not, and the blocker is not the renderer:
+
+      - `requestTaskRows` fires **exactly once**, from `setSession`
+        (`chat\protocol.go`). Nothing re-fires it -- not a reconnect, not a
+        task lifecycle event.
+      - `entryFor` (`chat\stream.go`) resolves task envelopes against
+        `w.live` **only**, by corr id and by task id. A reloaded task has no
+        live entry, so its own `TaskDone` returns nil from
+        `handleStreamEvent` and is dropped before anything can see it.
+
+      So a marker set at load would say "running elsewhere" for the whole
+      life of the session, however long ago the task actually ended. A
+      permanent lie is worse than a missing footer, and this codebase
+      already has a standing rule against a hint that lies (F04's Bug 12).
+      Making it honest needs a correction path, and both available ones are
+      real work rather than a marker:
+
+      1. Re-fire `requestTaskRows` on task lifecycle -- but those envelopes
+         are dropped by `entryFor` first, so this means adding a branch to
+         the live event router for task events with no live entry. That is
+         the live/streaming machinery, which was the explicit line not to
+         cross.
+      2. Drive it off Root's `DiagnosticsMsg.Tasks`, which IS kept current.
+         But `refreshTasks` is gated on `tasksOnScreen()` (F6's Done-when
+         #6, which `chat\diagnostics_race_test.go` asserts directly), so
+         with the right pane hidden it goes stale again -- and `w.tasks` and
+         `w.taskRows` are deliberately two different things with two
+         different lifetimes. Merging them changes F18's "`w.all` has
+         exactly one writer path" invariant.
+
+      Also corrected while here: `orphanReply`'s own doc gave the WRONG
+      reason for the decline (`Streaming()` kept true via `w.hist`).
+      `Streaming()` and `tickInterval` scan `w.live` only, so that never
+      applied; the reasoning had been transplanted from `newUserEntry`,
+      where it does. The conclusion was right for two other reasons, now
+      written down in that doc -- a wrong reason beside a right conclusion
+      is the worst thing to leave for whoever picks this up.
+
+      Owner: whoever gives the frontend a way to learn task lifecycle for a
+      task it holds no live entry for. Root already has that capability at
+      the tray level (F9a); the transcript does not.
+      Anchor: **F16 (polish)**, unless the chosen answer needs the new
+      refresh cycle above, in which case it wants its own episode -- the
+      same hedge as the `G`-clears-the-focus entry.
+
+
+- [ ] **A scrolled-up resume lands above content that arrived while the view
+      was unloaded** -- found on F12's second gate run, reported as "the
+      transcript does NOT show the research task's row on this reload".
+      Diagnosed, **deliberately not fixed in F12**: the cheap fix needs
+      information F18's blob shape deliberately does not carry, and that
+      shape was fixed by prior decision.
+
+      Repro (the gate's own step 2): `\research <topic>`, wait for Running,
+      scroll the transcript up a screen or two, `^W u` to unload. The task
+      completes in the background -- tray and `cli.py tasks list` both say
+      Completed. `^W w` -> Chat to reload. The research row is not on screen.
+      It appears after a scroll, a `G`, or a reload that happened to be
+      pinned, which is the "further action" the report could not pin down.
+
+      **The row is not missing.** It is in `w.all`, fully decorated, with
+      `laneTask` and a terminal status, from the first frame and with no
+      ListTasks reply involved at all. What is wrong is the VIEWPORT:
+      `applyResumeAnchor`'s non-pinned branch restores the reading position
+      from the blob, which on this sequence is above the answer, so the row
+      is ~40 entries below the fold. Pinned resumes are correct -- F18's
+      `PinnedToBottom` is "the newest message, resolved at Resume time",
+      written for exactly this case.
+
+      Ruled out by test, not by argument (`chat\history_test.go`,
+      `TestAfterUnloadAndCompletionTheReloadedRowAndSlotArePresent` plus the
+      two beside it): `requestTaskRows` firing once from `setSession` before
+      the terminal row is queryable -- that fixture has no client, so the
+      request never even succeeds and the slot is still correct; an
+      `entryFor` `w.live`/`w.hist` resolution gap -- the entry comes from
+      `decorateReloaded`, off the message's own columns; and a
+      `historyWindow`/`slotUI` re-keying gap -- the entry is rebuilt from
+      `w.raw` each time and carries its lane and status. Also ruled out: the
+      two fetch paths returning different shapes. `GetSession` and
+      `SessionMessageList` both serialise through `Message.to_dict`
+      (`backend\managers\message.py`), so `invocation` is present on both.
+
+      **Attribution: F18 owns the policy, F12 made it reachable.**
+      `applyResumeAnchor` arrived in `75aab79` ("F18: windowed history"), and
+      `git grep` on HEAD finds **no callers of Suspend/Resume at all** -- F12
+      added the only ones. Same shape as the `orphanReply` entry above.
+
+      It is also arguably not a defect: F12's own Done-when #3 asks for
+      "scroll position ... from the suspended bytes", and `!pinned` already
+      makes `viewportBody` draw `↓ jump to latest (G)` in the corner. What
+      that affordance cannot say is that something arrived WHILE YOU WERE
+      GONE, which is the part that made a user look for a row and conclude
+      it was absent.
+
+      Candidate fixes and costs:
+
+      1. Resume to the live edge when newer content exists than the blob
+         knew about. Needs the session's newest-seq at suspend time, i.e. a
+         fourth field on `blobAnchor` -- which is redefining F18's shape,
+         explicitly ruled out.
+      2. Say "N new below" instead of "jump to latest". Same missing field,
+         same objection.
+      3. Leave the position and make the existing affordance louder. No new
+         state, purely presentational, and genuinely F16's.
+
+      Anchor: **F16 (polish)** for option 3. Options 1 and 2 need the blob
+      shape reopened, which is a decision above this episode.
+
+
 ## Rejected
 
 | Item | Why |

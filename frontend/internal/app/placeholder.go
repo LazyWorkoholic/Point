@@ -58,6 +58,13 @@ type Diagnostics struct {
 
 	Notes []string
 
+	// NoWorkspaceLoaded is F12's state: r.workspaces is empty, so the
+	// vacant diagnostics screen is what the frame shows. Pushed here
+	// rather than read off anything global for the reason the whole
+	// Diagnostics struct exists -- a component renders a source it is
+	// given and never reaches into the root.
+	NoWorkspaceLoaded bool
+
 	// NoProviderConfigured is F10's UI-03 state, derived from
 	// r.activeProvider == nil — nil exactly when nothing has been chosen
 	// through Point's own UI yet (the first-run chooser or Settings).
@@ -173,6 +180,17 @@ func (p *Placeholder) viewport(r layout.Rect) string {
 	add(th.Style(theme.AccentPrimary).Render("F1 + F2 — foundations only"))
 	add(dim.Render("No transcript, no input, no cards. F3–F6 build those."))
 	add("")
+	// F12: this screen is no longer only "F1's stub". It is also what
+	// renders whenever NOTHING is loaded -- before the startup chooser is
+	// answered, after dismissing it with esc, and after unloading the last
+	// loaded workspace. In that state the user needs one thing from it:
+	// how to get a workspace. Without this line the only way out of a
+	// dismissed chooser is a key nothing on screen mentions.
+	if p.d.NoWorkspaceLoaded {
+		add(th.Style(theme.Warning).Render("No workspace loaded — nothing is in memory."))
+		add(dim.Render("⎵ w  choose a workspace       ⎵ ?  help"))
+		add("")
+	}
 
 	add(txt.Render("Backend"))
 	add("  " + p.connLine())

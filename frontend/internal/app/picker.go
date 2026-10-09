@@ -646,7 +646,7 @@ func (r *Root) onPickerAttach(env protocol.Envelope) tea.Cmd {
 // them there.
 func (r *Root) deliverToWorkspace(msg tea.Msg) tea.Cmd {
 	ws, cmd := r.current().Update(msg)
-	r.workspaces[r.active] = ws
+	r.storeCurrent(ws)
 	return cmd
 }
 

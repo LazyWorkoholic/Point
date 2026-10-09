@@ -23,8 +23,17 @@ const StateVersion = 1
 type State struct {
 	Version int `json:"version"`
 
-	// LastWorkspace is the workspace to open on next launch. It is the one
-	// piece of state F1 genuinely produces, and it exercises the round trip.
+	// LastWorkspace is the workspace that was last ACTIVE. F1 wrote it as
+	// "the workspace to open on next launch", and F12 narrows that: it is
+	// what the startup chooser (UI-12) pre-selects and names on its
+	// `last:` line, and nothing loads a workspace without the user
+	// choosing one. F12's Build section is explicit — "Do not auto-load
+	// the last workspace", because loading the Editor's file tree and
+	// project context when the user only wants to ask a question wastes
+	// time and memory. A last-active record and an auto-load are different
+	// things, and only the first one is wanted.
+	//
+	// Owned by app.Root (with WorkspaceState); see saveStateTo.
 	LastWorkspace string `json:"last_workspace,omitempty"`
 
 	// Drafts is F4's own addition, not F12's eventual workspace-state shape.
@@ -88,6 +97,28 @@ type State struct {
 	// read "default" (F10b's Decision 2: never a guessed config.toml
 	// value, only override state this process actually set itself).
 	BehaviourOverrides map[string]any `json:"behaviour_overrides,omitempty"`
+
+	// WorkspaceState is F12's suspended state, one opaque blob per
+	// workspace id, and "opaque" is the contract rather than laziness.
+	//
+	// What a workspace puts in its blob is that workspace's own business:
+	// app.Root calls Workspace.Suspend(), stores the bytes it is handed
+	// under the workspace's id, and hands them back to Resume() unread.
+	// It never unmarshals one, which is the only way "the root never reads
+	// a workspace's internal fields" survives being given a persistence
+	// mechanism. chat.Workspace's blob is F18's `{version, anchor:
+	// {anchor_seq, row_offset, pinned_to_bottom}}` and is versioned
+	// INSIDE itself, so a workspace can change its own shape without this
+	// file's StateVersion moving.
+	//
+	// It is roughly 2KB per workspace by design — position, not content.
+	// Content comes back from the database on Resume, which is the same
+	// code path as opening a week-old session.
+	//
+	// This field and LastWorkspace are the two whose owner is app.Root;
+	// every other field here is chat.Workspace's. See saveStateTo for how
+	// two owners share one file without erasing each other.
+	WorkspaceState map[string]json.RawMessage `json:"workspace_state,omitempty"`
 }
 
 // ProviderDefault is the active provider+model Point's own UI will pass on
@@ -173,8 +204,62 @@ func SaveState(st State) error {
 	return saveStateTo(StatePath(), st)
 }
 
+// SaveWorkspaceState writes ONLY the two fields app.Root owns, keeping
+// whatever is on disk for the rest. It is Root's single writer of this file.
+func SaveWorkspaceState(lastWorkspace string, blobs map[string]json.RawMessage) error {
+	return saveWorkspaceStateTo(StatePath(), lastWorkspace, blobs)
+}
+
+func saveWorkspaceStateTo(path, lastWorkspace string, blobs map[string]json.RawMessage) error {
+	st, err := loadStateFrom(path)
+	if err != nil {
+		// Advisory, exactly as LoadState's own contract says: the State
+		// returned is always usable (defaults for a missing or corrupt
+		// file), so the write proceeds rather than losing this
+		// workspace's position because an unrelated field went bad.
+		st = DefaultState()
+	}
+	st.LastWorkspace = lastWorkspace
+	st.WorkspaceState = blobs
+	return saveStateTo(path, st)
+}
+
+// saveStateTo serialises the whole struct — which is why it has to answer a
+// question F1 never had: this file now has TWO owners.
+//
+// chat.Workspace owns Drafts, Provider, UI and BehaviourOverrides, and
+// writes them by serialising an in-memory copy of the WHOLE State taken at
+// startup (chat\draft.go's persistDraft). app.Root owns LastWorkspace and
+// WorkspaceState (F12). Two writers each serialising their own snapshot
+// means the loser of any pair of writes silently erases the winner's
+// fields: type a character and the scroll anchor is gone; unload and the
+// draft you just typed is gone.
+//
+// Rather than a second file, a shared mutable store, or a lock, the two
+// halves are kept apart by one rule that needs no coordination: a save
+// that leaves Root's fields at their zero value keeps whatever the file
+// already holds for them. main.go hands chat.Workspace a State with both
+// cleared, so chat's writes always take that branch and can never carry a
+// stale copy of either; Root's own writes go through
+// saveWorkspaceStateTo, which re-reads the file first and so can never
+// carry a stale copy of chat's.
+//
+// This supersedes chat.go's note that LastWorkspace "round-trips" through
+// the workspace's copy. It no longer does, and it must not — a round trip
+// IS a stale copy, which is the thing this rule exists to stop.
 func saveStateTo(path string, st State) error {
 	st.Version = StateVersion
+
+	if st.LastWorkspace == "" || st.WorkspaceState == nil {
+		if cur, err := loadStateFrom(path); err == nil {
+			if st.LastWorkspace == "" {
+				st.LastWorkspace = cur.LastWorkspace
+			}
+			if st.WorkspaceState == nil {
+				st.WorkspaceState = cur.WorkspaceState
+			}
+		}
+	}
 
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err

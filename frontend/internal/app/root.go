@@ -37,10 +37,96 @@ const maxProtocolErrors = 5
 // fields, and workspaces never talk to each other — they emit messages the
 // root routes.
 type Root struct {
+	// active is which workspace the frame is FOR. It is NOT "the loaded
+	// workspace": a key absent from r.workspaces is NOT_LOADED, and
+	// r.active can perfectly well name one (at startup before the chooser
+	// is answered, and after unloading the only loaded workspace), in
+	// which case current() returns the vacant diagnostics screen. F12
+	// needs those two facts separate — "which workspace would I be
+	// looking at" and "is it in memory" are the whole subject of this
+	// episode.
 	active     WorkspaceID
 	workspaces map[WorkspaceID]Workspace
-	suspended  map[WorkspaceID][]byte
-	overlay    Overlay
+
+	// suspended is each workspace's own ~2KB blob, OPAQUE here. Root
+	// stores what Suspend returned and hands it back to Resume unread —
+	// the only way "the root never reads a workspace's internal fields"
+	// survives being given a persistence mechanism. chat's blob is F18's
+	// versioned anchor; see config\state.go's WorkspaceState.
+	suspended map[WorkspaceID][]byte
+
+	// vacant is what renders when r.active names nothing loaded: F1's
+	// diagnostics placeholder, held HERE rather than in r.workspaces so
+	// the map keeps meaning exactly "what is loaded". It is a live model,
+	// not a rebuilt one — it receives DiagnosticsMsg through storeCurrent
+	// like any workspace, so the connection banner and protocol errors
+	// stay current on it.
+	vacant Workspace
+
+	// defs/defByID are F12's workspace registry (registry.go). Empty in
+	// most of this package's own tests, which build a Root with no
+	// Options.Workspaces: nothing registered means nothing to choose, so
+	// the startup chooser never opens underfoot — the same opt-out F10's
+	// first-run chooser needed and got through State.Provider.
+	defs    []WorkspaceDef
+	defByID map[WorkspaceID]WorkspaceDef
+
+	// lastActive is when each LOADED, INACTIVE workspace stopped being
+	// active — D87's one timer per workspace, with the map's own length as
+	// the count. The active workspace is deliberately absent: its timer
+	// starts when you leave it.
+	lastActive map[WorkspaceID]time.Time
+
+	idle idleState
+
+	// lastWorkspace is state.json's last_workspace as it was at startup:
+	// what UI-12 pre-selects and names. Read once, never used to load
+	// anything.
+	lastWorkspace string
+
+	// chooserShown latches UI-12 so it opens once per reason rather than
+	// once per frame — see ensureStartupChooser.
+	chooserShown bool
+
+	// suspendGen is the debounced workspace-state save's generation
+	// counter, F4's draftGen shape for F4's reason.
+	suspendGen int
+
+	// quitConfirmPending is app.quit waiting on a fresh task snapshot
+	// before it can draw UI-14 -- see requestTasksOffScreen. pendingQuit
+	// is the opposite answer: the snapshot came back with nothing to warn
+	// about, so there is no dialog and the quit proceeds on the next
+	// Update.
+	quitConfirmPending bool
+	pendingQuit        bool
+
+	// suspendPending is whether a debounced position save is already
+	// scheduled -- see schedulePositionSave for why a flag and not only
+	// the generation counter.
+	suspendPending bool
+
+	// cfg is config.toml as main.go read it, kept for the ONE table this
+	// package resolves per workspace at runtime: [workspace]'s
+	// idle_unload_minutes, which is per-workspace-overridable and so
+	// cannot be flattened to a single value at startup.
+	cfg config.Config
+
+	// SaveWorkspaceStateFn writes state.json's two Root-owned fields.
+	// Defaults to config.SaveWorkspaceState; a test substitutes a
+	// recorder, for the reason chat's own saveStateFn exists — the real
+	// one writes %LOCALAPPDATA%\Point\state.json, and CLAUDE.md is
+	// explicit that nothing automated may touch that file outside a
+	// scratch profile.
+	SaveWorkspaceStateFn func(lastWorkspace string, blobs map[string]json.RawMessage) error
+
+	// Now is the clock the idle timers read, defaulting to time.Now. A
+	// test substitutes one so a five-minute timeout can be exercised
+	// without waiting five minutes -- and so "three workspaces left at
+	// three different moments unload at three different moments" is
+	// assertable at all, which is Done-when #4b.
+	Now func() time.Time
+
+	overlay Overlay
 
 	layout  layout.Layout
 	theme   theme.Theme
@@ -239,6 +325,22 @@ type Options struct {
 	// see Root.mouseEnabled's own doc for why this package cannot ask
 	// Bubble Tea for it instead.
 	MouseEnabled bool
+
+	// Config is config.toml as main.go read it. Only F12's [workspace]
+	// table is used from it here; everything else main.go already applied
+	// itself before building this.
+	Config config.Config
+
+	// Workspaces is F12's registry (registry.go). Each entry's New is
+	// called on the first switch to it and NEVER at startup, which is how
+	// "do not auto-load the last workspace" is expressed structurally
+	// rather than as a rule somewhere to remember.
+	//
+	// Empty is a supported state and is what most of this package's own
+	// tests pass: nothing registered means nothing to choose, so UI-12
+	// never opens, and current() renders F1's diagnostics screen exactly
+	// as it did before this episode.
+	Workspaces []WorkspaceDef
 }
 
 // New builds the root and validates the action registry.
@@ -250,6 +352,11 @@ func New(opts Options) (*Root, error) {
 		opts.Log = slog.New(slog.DiscardHandler)
 	}
 
+	// What the frame is FOR, not what is loaded -- nothing is loaded here.
+	// last_workspace governs it so UI-12 opens with the right button
+	// pre-selected and so the chat.* actions' When predicates
+	// (root.active == WorkspaceChat) read the same before and after this
+	// episode.
 	active := WorkspaceChat
 	if opts.State.LastWorkspace != "" {
 		active = WorkspaceID(opts.State.LastWorkspace)
@@ -259,6 +366,11 @@ func New(opts Options) (*Root, error) {
 		active:        active,
 		workspaces:    make(map[WorkspaceID]Workspace),
 		suspended:     make(map[WorkspaceID][]byte),
+		defByID:       make(map[WorkspaceID]WorkspaceDef),
+		lastActive:    make(map[WorkspaceID]time.Time),
+		idle:          idleState{warned: make(map[WorkspaceID]bool)},
+		lastWorkspace: opts.State.LastWorkspace,
+		cfg:           opts.Config,
 		theme:         opts.Theme,
 		client:        opts.Client,
 		log:           opts.Log,
@@ -275,15 +387,28 @@ func New(opts Options) (*Root, error) {
 	}
 	r.ListTasksFn = r.sendListTasks
 	r.SettingsSendFn = r.settingsSend
+	r.SaveWorkspaceStateFn = config.SaveWorkspaceState
+	r.Now = time.Now
 
 	r.actions = registerActions()
+	// Registered before Validate, so a workspace's leader key colliding
+	// with a hand-registered action is a boot failure naming both
+	// offenders -- not a key that silently does the other thing.
+	if err := r.registerWorkspaces(opts.Workspaces); err != nil {
+		return nil, err
+	}
 	if err := r.actions.Validate(); err != nil {
 		return nil, err
 	}
 
-	// One workspace, absent from the map until it is loaded. A key that is not
-	// there is NOT_LOADED; there is no separate enum for it.
-	r.workspaces[active] = NewPlaceholder(active, opts.Theme)
+	// NOTHING is loaded. A key absent from r.workspaces is NOT_LOADED;
+	// there is no separate enum for it, and at startup every key is
+	// absent -- F12's "do not auto-load anything at startup", which is
+	// also F1's own stated intent ("absent from the map until it is
+	// loaded") finally made true. F1 pre-seeded a Placeholder here, which
+	// meant the map was never empty and NOT_LOADED was never observable;
+	// the vacant screen is current()'s job now instead.
+	r.restoreSuspended(opts.State)
 
 	return r, nil
 }
@@ -306,13 +431,56 @@ func (r *Root) SetWorkspace(id WorkspaceID, ws Workspace) {
 	r.workspaces[id] = ws
 }
 
+// current is the active workspace, or the vacant screen when r.active names
+// nothing loaded.
+//
+// # The F1 invariant edit
+//
+// This used to CREATE a Placeholder and store it under r.active, which was
+// invisible while a workspace was always loaded and is wrong now that one
+// can be unloaded: every read of the active workspace resurrected the key,
+// so "absent from the map is NOT_LOADED" became untrue one frame after any
+// unload, and Done-when #1's NOT_LOADED state would never have been
+// observable no matter which workspace was unloaded. The vacant screen now
+// lives in its own field, outside the map, and the map means exactly what
+// the lifecycle says it means.
+//
+// It is still a LIVE model and not a value rebuilt per call: storeCurrent
+// writes Update's result back into r.vacant, so the diagnostics screen's
+// connection banner and protocol error list keep updating while nothing is
+// loaded -- which is the state a user with a broken backend spends their
+// whole session in.
 func (r *Root) current() Workspace {
 	if ws, ok := r.workspaces[r.active]; ok {
 		return ws
 	}
-	ws := NewPlaceholder(r.active, r.theme)
-	r.workspaces[r.active] = ws
-	return ws
+	if r.vacant == nil {
+		r.vacant = NewPlaceholder(r.active, r.theme)
+	}
+	return r.vacant
+}
+
+// storeCurrent writes back whatever the active workspace's Update returned.
+//
+// It writes to a key that is ALREADY in the map, never one that is not: an
+// unconditional assignment to r.workspaces[r.active] is how the old
+// current() resurrected an unloaded workspace, and there were eleven of
+// those assignments. The vacant screen gets the same write so it stays
+// live.
+func (r *Root) storeCurrent(ws Workspace) {
+	if _, loaded := r.workspaces[r.active]; loaded {
+		r.workspaces[r.active] = ws
+		return
+	}
+	r.vacant = ws
+}
+
+// now is the clock, substitutable for the idle tests.
+func (r *Root) now() time.Time {
+	if r.Now == nil {
+		return time.Now()
+	}
+	return r.Now()
 }
 
 // ---------------------------------------------------------------------------
@@ -354,6 +522,26 @@ func (r *Root) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 	if clock := r.ensureTrayClock(); clock != nil {
 		extra = append(extra, clock)
+	}
+	// Asked here for the same "ask once, afterwards" reason as the three
+	// above, and in this order. The chooser must wait for whatever else
+	// wants the single overlay slot -- on a genuine first run that is
+	// F10's provider chooser, which opens at the same WindowSizeMsg and
+	// is a prerequisite rather than a peer -- so this asks whether
+	// anything is open rather than racing it. The idle walk is asked
+	// afterwards because the thing that makes it necessary (a workspace
+	// becoming inactive) happens inside the message that just ran.
+	if ch := r.ensureStartupChooser(); ch != nil {
+		extra = append(extra, ch)
+	}
+	if walk := r.ensureIdleWalk(); walk != nil {
+		extra = append(extra, walk)
+	}
+	// Asked here because the place that DECIDES it -- openQuitConfirm,
+	// called from inside handleTaskListEnvelope -- has no tea.Cmd to
+	// return one on.
+	if q := r.drainPendingQuit(); q != nil {
+		extra = append(extra, q)
 	}
 	if len(extra) > 0 {
 		return model, tea.Batch(append([]tea.Cmd{cmd}, extra...)...)
@@ -403,7 +591,31 @@ func (r *Root) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return r, nil
 
 	case tea.KeyMsg:
-		return r.handleKey(m)
+		// F12's two per-keypress lifecycle rules, in the ONE place every
+		// key arrives -- the taskCardWasVisible lesson applied to the
+		// timer:
+		//
+		//   - the active workspace never unloads, so every key resets
+		//     its clock;
+		//   - "any key to keep" rescues whatever is inside its grace
+		//     window.
+		//
+		// Here rather than in dispatchKey, and the difference is not
+		// cosmetic: handleKey's paste-burst detector CONSUMES a lone
+		// pasteable key and holds it (paste.go), so a plain letter never
+		// reaches dispatchKey at all on the frame it is pressed. A
+		// grace warning that said "any key to keep" and then ignored
+		// every ordinary letter would be exactly the hint-that-lies this
+		// codebase has a standing rule against -- found by test, since
+		// the keys these rules are about are the ones the detector
+		// holds.
+		r.touchActive()
+		keep := r.keepWarnedAlive()
+		model, cmd := r.handleKey(m)
+		if keep == nil {
+			return model, cmd
+		}
+		return model, tea.Batch(cmd, keep)
 
 	case tea.MouseMsg:
 		return r.dispatchMouse(m)
@@ -443,6 +655,34 @@ func (r *Root) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		r.anim.frame++
 		return r, animTick(m.gen)
 
+	case idleTickMsg:
+		if !r.idle.running || m.gen != r.idle.gen {
+			return r, nil // superseded, or the walk has already stopped
+		}
+		return r, r.walkIdle(r.now())
+
+	case quitConfirmTimeoutMsg:
+		r.openQuitConfirm()
+		return r, r.drainPendingQuit()
+
+	case unloadConfirmedMsg:
+		return r, r.unloadAndReport(m.id, m.name)
+
+	case suspendSaveMsg:
+		r.saveWorkspaceStateIfDue(m.gen)
+		return r, nil
+
+	case statusExpireMsg:
+		// Compared by TEXT, not by a generation counter: r.status is
+		// assigned directly from a dozen places in this package, and a
+		// counter would mean every one of them had to remember to bump
+		// it. Whatever wrote last wins, and an expiry whose text is no
+		// longer on screen does nothing.
+		if r.status == m.text {
+			r.status = ""
+		}
+		return r, nil
+
 	case leaderHintMsg:
 		if r.leader.pending && m.gen == r.leader.gen {
 			r.leader.showHint = true
@@ -461,7 +701,7 @@ func (r *Root) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// paste is — F3's Chat workspace recovers that case for its own
 		// single-letter keys. See chat\scroll.go's handlePastedBurst.
 		ws, wsCmd := r.current().Update(m)
-		r.workspaces[r.active] = ws
+		r.storeCurrent(ws)
 		return r, tea.Batch(r.pushDiagnostics(), wsCmd)
 
 	case pasteFlushMsg:
@@ -505,7 +745,7 @@ func (r *Root) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// before issuing its first query, since a query fails while
 		// c.backend is nil.
 		ws, wsCmd := r.current().Update(m)
-		r.workspaces[r.active] = ws
+		r.storeCurrent(ws)
 		r.refreshTasks()
 		// F10b Decision 1: every connect AND every later reconnect --
 		// including one caused by the BACKEND restarting while this
@@ -542,7 +782,7 @@ func (r *Root) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// that ever stopped such a spinner was the stream_timeout
 		// watchdog, two minutes later.
 		ws, wsCmd := r.current().Update(m)
-		r.workspaces[r.active] = ws
+		r.storeCurrent(ws)
 		return r, tea.Batch(r.afterBackend(), wsCmd)
 
 	case protocol.TasksInterruptedMsg:
@@ -582,7 +822,7 @@ func (r *Root) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		pickerCmd := r.handlePickerEnvelope(m.Envelope)
 		settingsCmd := r.handleSettingsEnvelope(m.Envelope)
 		ws, wsCmd := r.current().Update(m)
-		r.workspaces[r.active] = ws
+		r.storeCurrent(ws)
 		return r, tea.Batch(r.afterBackend(), wsCmd, pickerCmd, settingsCmd)
 
 	case openOverlayMsg:
@@ -632,7 +872,7 @@ func (r *Root) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 
 	ws, cmd := r.current().Update(msg)
-	r.workspaces[r.active] = ws
+	r.storeCurrent(ws)
 	return r, cmd
 }
 
@@ -696,6 +936,12 @@ func (r *Root) tasksOnScreen() bool {
 	return r.rightPaneVisible() || r.trayOpen()
 }
 
+// refreshTasks asks for the global task snapshot, event-driven and ONLY
+// while a surface that shows the answer is on screen -- F6's Done-when #6,
+// which chat's own TestReopeningTheOverlayRefreshesWorkStartedWhileItWas
+// Closed asserts directly. F12 leaves that gate exactly where it was; what
+// it adds is requestTasksOffScreen for the two consumers that are dialogs
+// rather than panes. See that function.
 func (r *Root) refreshTasks() {
 	if r.client == nil || !r.tasksOnScreen() {
 		return
@@ -843,6 +1089,11 @@ func (r *Root) handleTaskListEnvelope(env protocol.Envelope) {
 		// changed because this reply changed them.
 		r.pruneBackgroundSeen()
 		r.refreshTray()
+		// F12: app.quit is waiting on exactly this, so UI-14 can list
+		// what quitting cancels rather than guess. Before the dirty
+		// re-ask below, so the dialog opens on the snapshot that just
+		// landed rather than one round trip later.
+		r.openQuitConfirm()
 		if r.tasksDirty {
 			r.tasksDirty = false
 			r.refreshTasks()
@@ -913,6 +1164,7 @@ func (r *Root) pushDiagnostics() tea.Cmd {
 		// UI yet — see Diagnostics.NoProviderConfigured's own doc for why
 		// this is pushed rather than read off chat's own state.json copy.
 		NoProviderConfigured: r.activeProvider == nil,
+		NoWorkspaceLoaded:    len(r.workspaces) == 0,
 	}
 	return func() tea.Msg { return DiagnosticsMsg{D: d} }
 }
@@ -924,6 +1176,60 @@ func (r *Root) pushDiagnostics() tea.Cmd {
 type leaderHintMsg struct{ gen int }
 type animTickMsg struct{ gen int }
 type statusMsg string
+
+// statusExpireMsg clears a status line that has had its say.
+//
+// F12 asks for the idle grace warning as "a toast", and there is no toast in
+// this codebase -- only r.status, which is PERMANENT until something else
+// overwrites it. That is deliberate for most of what it carries, and wrong
+// for a countdown: actions.go's pane.right.toggle already records a round of
+// debugging spent on a stale status string that read as a compositor bug,
+// and "Editor unloads in 30s" left on screen after the Editor unloaded
+// would be the same lie. Rather than a new overlay for a one-line
+// notice, the status line gains an expiry -- the smallest thing that
+// makes the warning honest.
+type statusExpireMsg struct{ text string }
+
+// noticeLinger is how long an unload notice stays. Long enough to read a
+// sentence, short enough that it is gone before it can be mistaken for the
+// current state.
+const noticeLinger = 6 * time.Second
+
+// expiringStatus shows a status line and schedules its removal.
+func (r *Root) expiringStatus(text string, d time.Duration) tea.Cmd {
+	r.status = text
+	return tea.Tick(d, func(time.Time) tea.Msg {
+		return statusExpireMsg{text: text}
+	})
+}
+
+// ensureStartupChooser opens UI-12 when nothing is loaded and nothing else
+// has the overlay slot.
+//
+// Not in the WindowSizeMsg case, where F10's provider chooser is, even
+// though both need a real terminal size before OpenOverlay's own fit check
+// can answer honestly: only ONE overlay can be open, and on a genuine first
+// run both want that slot at the same instant. Asked after every message
+// instead, this opens on the first frame when a provider is already
+// configured, and on the frame after the provider chooser closes when one
+// is not -- with no ordering rule written down anywhere for a later episode
+// to break.
+//
+// chooserShown latches it so dismissing it with esc leaves the user on the
+// diagnostics screen rather than reopening it forever. unloadWorkspace
+// clears the latch when it unloads the last loaded workspace, which is the
+// other moment there is genuinely nothing to look at.
+func (r *Root) ensureStartupChooser() tea.Cmd {
+	if r.chooserShown || len(r.defs) == 0 || r.w == 0 || r.h == 0 {
+		return nil
+	}
+	if r.overlay != nil || len(r.workspaces) > 0 {
+		return nil
+	}
+	r.chooserShown = true
+	r.OpenOverlay(newChooser(r))
+	return nil
+}
 
 func (r *Root) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 	// A multi-line paste is ONE event, never N key events.
@@ -996,9 +1302,19 @@ func (r *Root) dispatchKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return r, a.Run(r)
 	}
 
+	// Only a key the workspace actually RECEIVES can have moved its
+	// position, so the blob is re-armed here rather than in Update's
+	// KeyMsg case. A chord an action consumed (ctrl+c, ctrl+q) scrolls
+	// nothing, and arming on it would also wrap every such key's command
+	// in a tea.Batch for no reason -- which is how this was first written
+	// and what TestCtrlCDoesNotQuit caught.
+	save := r.schedulePositionSave()
 	ws, cmd := r.current().Update(k)
-	r.workspaces[r.active] = ws
-	return r, cmd
+	r.storeCurrent(ws)
+	if save == nil {
+		return r, cmd
+	}
+	return r, tea.Batch(cmd, save)
 }
 
 func (r *Root) handleLeaderKey(key string) (tea.Model, tea.Cmd) {
@@ -1035,9 +1351,10 @@ func (r *Root) handleLeaderKey(key string) (tea.Model, tea.Cmd) {
 // deliverKey hands one key to the current workspace — used for a key the paste
 // detector held and then decided was an ordinary keystroke.
 func (r *Root) deliverKey(k tea.KeyMsg) tea.Cmd {
+	save := r.schedulePositionSave()
 	ws, cmd := r.current().Update(k)
-	r.workspaces[r.active] = ws
-	return cmd
+	r.storeCurrent(ws)
+	return tea.Batch(cmd, save)
 }
 
 func (r *Root) clearLeader() {
@@ -1240,9 +1557,15 @@ func (r *Root) dispatchMouse(m tea.MouseMsg) (tea.Model, tea.Cmd) {
 				}
 			}
 		}
+		// The wheel scrolls the transcript, which moves the position just
+		// as j/k do -- see schedulePositionSave.
+		save := r.schedulePositionSave()
 		ws, cmd := r.current().Update(m)
-		r.workspaces[r.active] = ws
-		return r, cmd
+		r.storeCurrent(ws)
+		if save == nil {
+			return r, cmd
+		}
+		return r, tea.Batch(cmd, save)
 	}
 
 	rect := r.overlayRect()

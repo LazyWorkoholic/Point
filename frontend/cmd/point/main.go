@@ -123,38 +123,71 @@ func run() error {
 		})
 	}
 
+	// F12: chat.Workspace is a FACTORY here, not an instance.
+	//
+	// It cannot be constructed inside app.New either way: its Update method
+	// has to return app.Workspace, which means the chat package imports app
+	// — so app cannot import chat back without a cycle. This is still the
+	// one place that wires the two together. What changed is WHEN: this
+	// closure runs on the first switch to the Chat workspace, which is
+	// after the startup chooser is answered, and never at startup. Point
+	// now boots with no workspace in memory at all.
+	chatState := state
+	// The two fields app.Root owns are cleared from the copy chat gets, and
+	// this is load-bearing rather than tidy. Both writers serialise the
+	// WHOLE State from their own in-memory copy (chat\draft.go's
+	// persistDraft, app\lifecycle.go's saveWorkspaceStateIfDue), so a
+	// stale copy of a field you do not own erases the owner's newer value:
+	// type one character and the scroll anchor is gone. Zeroed here, chat's
+	// writes always take saveStateTo's keep-what-is-on-disk branch. See
+	// config\state.go's saveStateTo for the whole rule.
+	chatState.LastWorkspace = ""
+	chatState.WorkspaceState = nil
+
+	newChat := func() app.Workspace {
+		return chat.New(chat.Options{
+			Theme:        th,
+			Client:       client,
+			Log:          log,
+			Scrollback:   cfg.UI.Scrollback,
+			HistoryBatch: cfg.UI.HistoryBatch,
+			// F5: ui.stream_timeout, in seconds — the client-side
+			// watchdog that stops a spinner no backend event is ever
+			// going to stop.
+			StreamTimeout: time.Duration(cfg.UI.StreamTimeout) * time.Second,
+			// F4: chat.Workspace reads Drafts out of this and writes it
+			// back, debounced, as the query input's buffer changes — see
+			// draft.go.
+			State: chatState,
+		})
+	}
+
 	root, err := app.New(app.Options{
 		Theme:        th,
 		Client:       client,
 		Log:          log,
 		State:        state,
+		Config:       cfg,
 		Env:          env,
 		MouseEnabled: mouseEnabled,
+		Workspaces: []app.WorkspaceDef{{
+			ID:   app.WorkspaceChat,
+			Name: "Chat",
+			// LeaderKey is deliberately empty. F12 asks for `c`, which
+			// has been pane.right.toggle since F6; leader → w opens the
+			// switcher instead. See WorkspaceDef.LeaderKey.
+			New: newChat,
+			// layout.MinWidth/MinHeight, named here rather than
+			// inherited silently: the registry is where a workspace's
+			// minimum belongs now, and the Editor's will be larger.
+			MinSize: app.Size{W: 50, H: 12},
+		}},
 	})
 	if err != nil {
 		// A duplicate action ID or binding lands here: loudly, at boot, with
 		// both offenders named — not silently at a keypress six weeks later.
 		return err
 	}
-
-	// chat cannot be constructed inside app.New: its Update method has to
-	// return app.Workspace, which means the chat package imports app — so
-	// app cannot import chat back without a cycle. This is the one place
-	// that wires the two together, replacing F1's placeholder for the chat
-	// workspace with the real thing.
-	root.SetWorkspace(app.WorkspaceChat, chat.New(chat.Options{
-		Theme:        th,
-		Client:       client,
-		Log:          log,
-		Scrollback:   cfg.UI.Scrollback,
-		HistoryBatch: cfg.UI.HistoryBatch,
-		// F5: ui.stream_timeout, in seconds — the client-side watchdog
-		// that stops a spinner no backend event is ever going to stop.
-		StreamTimeout: time.Duration(cfg.UI.StreamTimeout) * time.Second,
-		// F4: chat.Workspace reads Drafts out of this and writes it back,
-		// debounced, as the query input's buffer changes — see draft.go.
-		State: state,
-	}))
 
 	programOpts := []tea.ProgramOption{
 		tea.WithAltScreen(),

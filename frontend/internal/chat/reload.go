@@ -502,11 +502,44 @@ func (w *Workspace) applyTaskRows(byID map[string]taskRow) {
 // or nil when the task's state says nothing worth showing.
 //
 // nil for a task still PENDING, QUEUED or RUNNING — the question renders
-// with no reply, which is the truth, and a non-terminal entry in w.hist
-// would keep Streaming() true and the watchdog re-arming forever. nil for
-// a COMPLETED task too: a task that finished cleanly and wrote nothing has
-// no ending to report, and "✓ done" over an empty reply would assert an
-// answer that does not exist.
+// with no reply, which is the truth. nil for a COMPLETED task too: a task
+// that finished cleanly and wrote nothing has no ending to report, and
+// "✓ done" over an empty reply would assert an answer that does not exist.
+//
+// # Why the non-terminal decline, precisely
+//
+// This used to say "a non-terminal entry in w.hist would keep Streaming()
+// true and the watchdog re-arming forever". **That reason is wrong and the
+// conclusion is right**, which is the worst combination to leave in place —
+// found while investigating whether F12 could add a static marker here, and
+// corrected rather than deleted because the real reasons are what decide
+// whether anyone may lift this later.
+//
+// Streaming() and tickInterval (stream.go) scan `w.live` ONLY. A *liveEntry
+// in `w.hist` has never been able to keep either alive. The reasoning was
+// transplanted from newUserEntry, where it genuinely does apply because
+// that entry really is in `w.live`.
+//
+// The two real reasons:
+//
+//  1. **The renderer.** renderTaskEntry's `statusSending, statusRunning`
+//     branch draws `⟳ Research 0:42` from `time.Since(e.startedAt)` — a
+//     clock. In `w.hist` no tick is armed (nothing re-arms for a hist
+//     entry), so it would render a live-looking clock frozen at whatever
+//     the first frame computed, and `e.status.terminal()` being false also
+//     withholds the `▸ o` affordance.
+//  2. **Nothing would ever correct it.** requestTaskRows fires exactly
+//     once, from setSession, and entryFor resolves task envelopes against
+//     `w.live` only — so a reloaded task's own TaskDone is dropped before
+//     anything sees it. An entry placed here from a RUNNING tasks row
+//     would keep saying "running" for the life of the session, however
+//     long ago the task actually ended.
+//
+// Reason 2 is also why F12 did not add the obvious static alternative
+// ("→ running elsewhere", no clock, sourced only from the status column):
+// static or not, it has no correction path, and a permanent lie is not an
+// improvement on a missing footer. See tasks/frontend/INDEX.md's parking
+// lot for what closing it would actually take.
 func orphanReply(q wireMessage, t taskRow) *liveEntry {
 	var status liveStatus
 	var errCode string

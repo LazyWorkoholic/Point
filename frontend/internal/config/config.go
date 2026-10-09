@@ -19,6 +19,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"time"
 
 	"github.com/BurntSushi/toml"
 )
@@ -118,6 +119,83 @@ type UI struct {
 // could disagree.
 type Config struct {
 	UI UI `toml:"ui"`
+
+	// Workspace is F12's `[workspace]` table, held RAW rather than as a
+	// struct, and that is the whole reason it is a map.
+	//
+	// The table mixes two kinds of key:
+	//
+	//	[workspace]
+	//	idle_unload_minutes = 5      # the default, for every workspace
+	//
+	//	[workspace.editor]
+	//	idle_unload_minutes = 60     # one workspace's override
+	//
+	// A struct would have to name every workspace id as a field, and
+	// F12-workspace-manager.md's own requirement is the opposite of that:
+	// "no constant anywhere; a capability workspace added later inherits
+	// this for free because it comes through the same registry". A map
+	// keyed on whatever the file actually says has no list to keep in step
+	// with the registry. Read it through IdleUnload, never directly.
+	//
+	// This is the FIRST table outside `[ui]` the Go side parses. It is the
+	// frontend's own key — the per-workspace idle timer is a Bubble Tea
+	// tick in this process and nothing in `backend\appconfig.py` reads it.
+	// Like every other config.toml value, Point only ever reads it:
+	// Settings has no Workspace tab and never writes this file (F10b's
+	// same rule), so it is hand-edited or absent.
+	Workspace map[string]any `toml:"workspace"`
+}
+
+// DefaultIdleUnloadMinutes is `[workspace] idle_unload_minutes` when the
+// table is absent — F12's own example value. Zero in the FILE disables
+// unloading; zero is deliberately not the default, because a lifecycle that
+// never fires is a lifecycle nobody ever finds broken.
+const DefaultIdleUnloadMinutes = 5
+
+// IdleUnload is how long a loaded, inactive workspace may sit before it is
+// unloaded. Zero means never.
+//
+// Resolution order, narrowest first: `[workspace.<id>] idle_unload_minutes`,
+// then `[workspace] idle_unload_minutes`, then DefaultIdleUnloadMinutes. A
+// value that is present but not a number is ignored with the next level
+// used instead — the same "advisory, always usable" rule Load itself
+// follows, since a config.toml typo must not stop the app booting.
+func (c Config) IdleUnload(id string) time.Duration {
+	if sub, ok := c.Workspace[id].(map[string]any); ok {
+		if n, ok := tomlInt(sub["idle_unload_minutes"]); ok {
+			return minutes(n)
+		}
+	}
+	if n, ok := tomlInt(c.Workspace["idle_unload_minutes"]); ok {
+		return minutes(n)
+	}
+	return minutes(DefaultIdleUnloadMinutes)
+}
+
+// minutes clamps a negative value to zero — "never unload" — rather than
+// producing a deadline already in the past, which would unload a workspace
+// the instant it stopped being active.
+func minutes(n int64) time.Duration {
+	if n <= 0 {
+		return 0
+	}
+	return time.Duration(n) * time.Minute
+}
+
+// tomlInt accepts the two shapes BurntSushi's decoder produces for a bare
+// number landing in an `any`: int64 for an integer, float64 for `5.0`.
+// Anything else is not a number and is reported as absent.
+func tomlInt(v any) (int64, bool) {
+	switch n := v.(type) {
+	case int64:
+		return n, true
+	case int:
+		return int64(n), true
+	case float64:
+		return int64(n), true
+	}
+	return 0, false
 }
 
 // Defaults is what an absent config.toml means.
@@ -178,6 +256,12 @@ func loadFrom(path string) (Config, error) {
 	if parsed.UI.HistoryBatch != 0 {
 		cfg.UI.HistoryBatch = parsed.UI.HistoryBatch
 	}
+	// Carried wholesale rather than field-by-field: the "empty means not
+	// set" dance above exists because UI's fields have meaningful zero
+	// values this package has to distinguish from absence. A raw map
+	// already distinguishes them -- an absent key is simply not in it --
+	// and IdleUnload reads it that way.
+	cfg.Workspace = parsed.Workspace
 	return cfg, nil
 }
 

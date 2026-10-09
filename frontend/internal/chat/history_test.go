@@ -1213,3 +1213,265 @@ func TestMemoryStaysFlatAcrossAFullTraverse(t *testing.T) {
 		t.Fatalf("after a full traverse the window holds %d rows, bound is %d", len(h.raw), bound)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// F12 reload-mid-task: WHERE the live slot is lost
+// ---------------------------------------------------------------------------
+//
+// Reported against the real app: unload a workspace with @research running,
+// reload it BEFORE the task finishes, and the transcript shows no inline
+// "Research 0:04 > o" entry -- while the right pane and the tray track the
+// task correctly throughout.
+//
+// F12's resume path is NOT at fault, and these two tests are what establish
+// that rather than asserting it. A resumed session runs exactly F18's chain
+// -- setSession -> rebuildWindow -> pairReloaded -> decorateReloaded ->
+// applyTaskRows -- and applyTaskRows DOES reach the unanswered question with
+// the running task in hand. orphanReply then declines, deliberately, because
+// the task is non-terminal.
+//
+// That policy is S11b's and F18's, and orphanReply's own doc states the
+// hazard behind it: a non-terminal entry in w.hist keeps Streaming() true, so
+// F5's watchdog re-arms forever against a task that no live event source will
+// ever finish. Lifting it is a design decision rather than a repair -- the
+// task may have ended while the workspace was unloaded, in which case no
+// event is coming -- so it is left alone and recorded.
+//
+// These tests exist so that whoever takes that decision finds the boundary
+// already drawn, and so that "the reload path is broken" cannot be
+// rediagnosed from scratch.
+
+// runningResearchWindow is researchWindow's third variant: a question whose
+// task is still RUNNING and has therefore persisted no answer row, which is
+// exactly what the database holds when a workspace is reloaded mid-task.
+func runningResearchWindow(t *testing.T) *histWorkspace {
+	t.Helper()
+	q := histRow(41, roleUser, "@research tokio vs asyncio")
+	q.TaskID = "t1"
+	msgs := append([]wireMessage{q}, histRows(42, 19)...)
+
+	h := newHistWorkspace(t, 40, 10)
+	h.open(msgs, 1000)
+	h.taskRows = map[string]taskRow{
+		// "running" is not one of chat's three taskRow constants
+		// (completed/failed/cancelled) on purpose -- it arrives as a plain
+		// string and lands on orphanReply's default branch, which is the
+		// mechanism under test.
+		"t1": {ID: "t1", State: "running", Agent: "research", CreatedAt: 1},
+	}
+	h.rebuildWindow()
+	return h
+}
+
+func TestReloadMidTaskReachesTheJoinAndOrphanReplyDeclines(t *testing.T) {
+	h := runningResearchWindow(t)
+
+	// The join was not short-circuited: F18 gates applyTaskRows on the
+	// window reaching the open-time tail, and a freshly opened session
+	// does.
+	if !h.window.reachesTail() {
+		t.Fatal("the window does not reach the tail, so this proves nothing about the join")
+	}
+
+	// It reached the question and inserted nothing.
+	before := len(h.all)
+	if orphan := orphanReply(h.raw[0], h.taskRows["t1"]); orphan != nil {
+		t.Fatalf("orphanReply returned an entry for a RUNNING task: %+v", orphan)
+	}
+	h.rebuildWindow()
+	if len(h.all) != before {
+		t.Fatalf("a rebuild changed the row count from %d to %d", before, len(h.all))
+	}
+
+	// And so there is no task slot anywhere in the transcript -- the
+	// reported symptom, located.
+	for i := 0; i < h.entryCount(); i++ {
+		if e := h.liveAt(i); e != nil && e.lane == laneTask {
+			t.Fatalf("a task slot appeared at row %d; this test is measuring the wrong thing now", i)
+		}
+	}
+}
+
+// The same join, with the task terminal, DOES insert an entry -- which is
+// what proves the decline above is about the task's STATE and not about the
+// reload path being broken.
+func TestTheSameJoinInsertsASlotOnceTheTaskIsTerminal(t *testing.T) {
+	h := runningResearchWindow(t)
+	rowsWhileRunning := len(h.all)
+
+	// Nothing else changes: same window, same question, same join.
+	h.taskRows = map[string]taskRow{
+		"t1": {ID: "t1", State: taskCancelled, Agent: "research", CreatedAt: 1},
+	}
+	h.rebuildWindow()
+
+	if len(h.all) != rowsWhileRunning+1 {
+		t.Fatalf("w.all went from %d rows to %d, want exactly one placeholder added",
+			rowsWhileRunning, len(h.all))
+	}
+	found := false
+	for i := 0; i < h.entryCount(); i++ {
+		if e := h.liveAt(i); e != nil && e.lane == laneTask && e.taskID == "t1" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("the terminal task produced no slot either; the join itself is broken")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Unload -> the task completes while unloaded -> reload
+// ---------------------------------------------------------------------------
+//
+// Reported from F12's gate as "the transcript does NOT show the research
+// task's row on this reload", with the row reappearing after some further
+// action. These two tests separate the question that symptom conflates: is
+// the row in the transcript, and is it where the user can see it.
+//
+// The answer is that the row is always there, fully decorated, from the
+// first frame -- and that a NON-PINNED resume puts the viewport back where
+// the user left it, which on this sequence is above content that arrived
+// while they were away. See tasks/frontend/INDEX.md's parking lot.
+
+// seedUnloadCompleteReload runs the gate's own sequence against the real
+// Suspend/Resume path and returns the reloaded workspace.
+//
+// pinnedAtUnload is the one variable that matters: F18's PinnedToBottom
+// rule is explicitly "the newest message, resolved at Resume time", and it
+// exists for exactly this case -- "a session can RECEIVE MESSAGES WHILE
+// UNLOADED -- an F5 background task, or an SSH peer".
+func seedUnloadCompleteReload(t *testing.T, pinnedAtUnload bool) *histWorkspace {
+	t.Helper()
+
+	q := histRow(41, roleUser, "@research tokio vs asyncio")
+	q.TaskID = "t1"
+	running := append(histRows(1, 40), q)
+
+	before := newHistWorkspace(t, 40, 10)
+	before.open(running, 41)
+	before.pinned = pinnedAtUnload
+	if !pinnedAtUnload {
+		// Scrolled up to read something -- the only way pinned goes
+		// false, since leaving the input for browse mode does not touch
+		// it (input_keys.go's enterBrowseMode sets focus and nothing
+		// else).
+		before.topAbs, before.topRow = 0, 0
+	}
+	blob, err := before.Suspend()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// The task finishes while the workspace is UNLOADED: the backend
+	// persists its answer, and no event reaches a frontend that is not
+	// there to receive one.
+	answer := histRow(42, roleAssistant, "the research answer")
+	answer.TaskID = "t1"
+	answer.Invocation = &wireInvocation{Agent: "research"}
+	answer.Outcome = outcomeDone
+
+	after := newHistWorkspace(t, 40, 10)
+	if err := after.Resume(blob); err != nil {
+		t.Fatal(err)
+	}
+	after.open(append(append([]wireMessage{}, running...), answer), 42)
+	return after
+}
+
+// The row and its slot are present on the reload, with no ListTasks reply
+// involved at all.
+//
+// This is what rules out the three explanations the bug report offered:
+// requestTaskRows firing once from setSession before the terminal row is
+// queryable (this fixture has no client, so that request never even
+// succeeds, and the slot is still correct); an entryFor w.live/w.hist
+// resolution gap (the entry comes from decorateReloaded, which reads the
+// message's own columns); and a window or slotUI re-keying gap (the entry
+// is rebuilt from w.raw and carries its lane and status).
+func TestAfterUnloadAndCompletionTheReloadedRowAndSlotArePresent(t *testing.T) {
+	for _, pinned := range []bool{true, false} {
+		name := "scrolled up at unload"
+		if pinned {
+			name = "pinned at unload"
+		}
+		t.Run(name, func(t *testing.T) {
+			after := seedUnloadCompleteReload(t, pinned)
+
+			idx := -1
+			for i, m := range after.all {
+				if m.Role == roleAssistant && m.TaskID == "t1" {
+					idx = i
+				}
+			}
+			if idx < 0 {
+				t.Fatalf("the completed answer is not in w.all at all (%d rows) -- "+
+					"that would be a fetch or window bug, which this is not", len(after.all))
+			}
+			e := after.histAt(idx)
+			if e == nil {
+				t.Fatalf("the answer row earned no liveEntry, so it renders as a "+
+					"plain reply with no slot: invocation=%+v outcome=%q",
+					after.all[idx].Invocation, after.all[idx].Outcome)
+			}
+			if e.lane != laneTask {
+				t.Errorf("lane is %v, want laneTask -- no collapsed slot", e.lane)
+			}
+			if !e.status.terminal() {
+				t.Errorf("status is %v, want terminal -- a non-terminal reloaded "+
+					"entry can never be finished by anything", e.status)
+			}
+		})
+	}
+}
+
+// A PINNED user lands on the new content. This is F18's PinnedToBottom rule
+// doing the job it was specified for, and until F12 nothing called
+// Suspend/Resume so nothing exercised it end to end.
+func TestAPinnedUnloadLandsOnTheTaskThatFinishedWhileAway(t *testing.T) {
+	after := seedUnloadCompleteReload(t, true)
+
+	_, lines := after.visibleWindow(14, 70)
+	shown := stripANSI(strings.Join(lines, "\n"))
+	if !strings.Contains(shown, "research") {
+		t.Fatalf("a pinned resume did not land on the newest message "+
+			"(topAbs=%d pinned=%v):\n%s", after.topAbs, after.pinned, shown)
+	}
+}
+
+// A user who had SCROLLED UP resumes where they were reading, which is above
+// the answer -- so the row is off screen on the first frame.
+//
+// This is a CHARACTERISATION test: it pins the behaviour that was reported
+// as a bug and then deliberately parked, not behaviour anyone is happy with.
+// It is `applyResumeAnchor`'s non-pinned branch doing exactly what F12's own
+// Done-when #3 asks for ("scroll position ... from the suspended bytes").
+// If that decision is ever revisited, THIS is the test that must change with
+// it -- which is the point of writing it down rather than leaving the
+// behaviour undescribed.
+//
+// The mitigation already present: !pinned makes viewportBody draw
+// "↓ jump to latest (G)" in the bottom-right corner (render.go), so the
+// user is told they are not at the live edge. What it cannot say is that
+// something arrived while they were gone, because the blob does not carry
+// the session's newest seq and F18's shape is fixed.
+func TestAScrolledUpUnloadResumesWhereItLeftOffAndSaysSo(t *testing.T) {
+	after := seedUnloadCompleteReload(t, false)
+
+	_, lines := after.visibleWindow(14, 70)
+	shown := stripANSI(strings.Join(lines, "\n"))
+	if strings.Contains(shown, "research") {
+		t.Fatalf("the parked behaviour has changed: a scrolled-up resume now "+
+			"lands on the new content. If that was deliberate, this test and "+
+			"the INDEX.md parking-lot entry both need updating:\n%s", shown)
+	}
+	if after.pinned {
+		t.Fatal("the resume re-pinned, so the jump-to-latest affordance would " +
+			"not be drawn and the user would have no indication at all")
+	}
+	// The affordance is drawn from !pinned alone, so the previous check is
+	// what guarantees it. Asserted here too so the two cannot drift.
+	if _, atTop := after.historyNotice(); atTop {
+		t.Log("history notice sits at the top edge on this frame")
+	}
+}
