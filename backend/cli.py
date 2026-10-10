@@ -596,8 +596,58 @@ async def cmd_send(runtime: Runtime, args: argparse.Namespace) -> int:
         until=until, match=_first_ack_then(match), on_event=on_event,
         session=session_id, text=text, **extra,
     )
+
+    # B24: FillProposal is pushed AFTER the terminal event `until()`
+    # above already stops draining on, so it is not among `envelopes` --
+    # it is either already sitting on the outbox or about to land. One
+    # small bounded peek, only when asked for.
+    if (
+        getattr(args, "json_proposal", False)
+        and state["task_id"] is not None
+        and not _failed(envelopes)
+    ):
+        proposal_envelope = await _drain_for_fill_proposal(runtime, state["task_id"])
+        print(
+            json.dumps(proposal_envelope["payload"]["proposal"], indent=2)
+            if proposal_envelope is not None else "[no proposal]"
+        )
+
     _print_errors(envelopes)
     return EXIT_FAILED if _failed(envelopes) else EXIT_OK
+
+
+# B24: a 2s grace is generous -- `_push_fill_proposal` runs synchronously
+# right after the terminal event, in the same sink call, with no model
+# call or I/O in between, so in practice the envelope is already queued
+# by the time this starts draining.
+_FILL_PROPOSAL_GRACE_S = 2.0
+
+
+async def _drain_for_fill_proposal(
+    runtime: Runtime, task_id: str, grace: float = _FILL_PROPOSAL_GRACE_S,
+) -> Optional[dict[str, Any]]:
+    """Peek the outbox for a `FillProposal` belonging to `task_id`, for
+    up to `grace` seconds. Filtered by task_id exactly like `call()`'s
+    own `match()` -- a background agent (max_steps > 1) started by an
+    earlier, `--wait`-less send can still be running in this same
+    process and sharing this same outbox, so "take the next envelope"
+    is never safe here. Anything that does not match is discarded, same
+    as `call()`: the producer awaits `put()` on a bounded queue, so
+    refusing to take an envelope would eventually block it.
+    """
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + grace
+    while True:
+        remaining = deadline - loop.time()
+        if remaining <= 0:
+            return None
+        try:
+            event = await asyncio.wait_for(runtime.outbox.get(), timeout=remaining)
+        except asyncio.TimeoutError:
+            return None
+        envelope = event.to_dict()
+        if envelope.get("task_id") == task_id and envelope["type"] == "FillProposal":
+            return envelope
 
 
 def _first_ack_then(match: Callable[[dict[str, Any]], bool]) -> Callable[[dict[str, Any]], bool]:
@@ -1554,6 +1604,16 @@ def build_parser() -> argparse.ArgumentParser:
     send.add_argument(
         "--wait", action="store_true",
         help="block until the task finishes, even if it runs in the background",
+    )
+    # B24: a new flag rather than folding into --wait's own output --
+    # the proposal is a SEPARATE event pushed after the terminal one,
+    # and printing it has to cover the no-proposal case too ("no
+    # FillProposal arrived" is itself a verification-gate signal), which
+    # a change to --wait's existing printing would conflate with it.
+    send.add_argument(
+        "--json-proposal", action="store_true", dest="json_proposal",
+        help="after the terminal event, print the parsed FillProposal "
+             "if one arrives (~2s grace), else '[no proposal]'",
     )
     _add_editor_flags(send)
 

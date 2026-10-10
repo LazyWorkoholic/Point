@@ -28,6 +28,7 @@ from managers import context
 from managers.context import SessionMemoryService
 from managers.invocation import parse_invocation
 from managers.editor_context import EditorContext
+from managers.fill_proposal import FillParseFailure, parse_fill_proposal
 from managers.message import MessageRole, Outcome
 from managers.project import Project
 from managers.project_manager import ProjectManager
@@ -60,7 +61,7 @@ from providers.errors import AuthenticationError, ProviderError, ProviderUnavail
 from providers.models import ProviderConfig, ProviderHealthStatus
 from streaming.adapter import StreamAdapter
 from streaming.events import StreamEventType
-from streaming.manager import StreamManager
+from streaming.manager import RegisteredEditorContext, StreamManager
 from tools.registry import build_default_registry
 
 
@@ -1508,10 +1509,19 @@ class Runtime:
             # still enters history when the accumulator salvaged partial
             # text, and the report must reflect that turn too.
             persisted = False
+            # B24: read BEFORE close_stream() below pops it -- both
+            # branches call close_stream() well before the terminal
+            # event is emitted, and the FillProposal push (after that
+            # emit, never before/instead of it) needs this and the
+            # reply text regardless of which branch persisted the
+            # message.
+            ec_record = self.streams.editor_context_for(task.id)
+            fill_reply_text: Optional[str] = None
             if self.streams.has_stream(task.id):
                 accumulator = self.streams.get_accumulator(task.id)
                 if kind == "done":
                     msg = accumulator.finalize(invocation=invocation)
+                    fill_reply_text = accumulator.text
                 elif kind == "failed":
                     msg = accumulator.finalize_interrupted(
                         "failed", error=chunk.get("error"),
@@ -1552,6 +1562,7 @@ class Runtime:
             else:
                 if kind == "done" and echo_collected:
                     full_reply = "".join(echo_collected)
+                    fill_reply_text = full_reply
                     # The echo/refusal path persists a reply without ever
                     # registering a stream, so it needs its provenance
                     # and its outcome attached here rather than in the
@@ -1611,12 +1622,58 @@ class Runtime:
                 session_id=session_id, payload=payload,
             ))
 
+            # B24: AFTER the terminal event above, never instead of it
+            # and never before it (B6's one-terminal-event-per-task rule
+            # holds; a client that stops listening at the terminal event
+            # is not broken, it just has no diff card). Only for a
+            # clean `done` -- a failed/cancelled turn's salvaged partial
+            # text is the one case where syntactically valid JSON is
+            # semantically worthless (the model was cut off mid-
+            # `replacement`).
+            if kind == "done" and ec_record is not None and fill_reply_text is not None:
+                await self._push_fill_proposal(
+                    request_id, task.id, session_id, ec_record, fill_reply_text,
+                )
+
             # B20: pushed at the turn boundary, not per delta -- the
             # numbers only move once history actually gained a message.
             if persisted:
                 await self._push_context_report(session_id)
 
         return sink
+
+    async def _push_fill_proposal(
+        self,
+        request_id: Optional[str],
+        task_id: str,
+        session_id: str,
+        ec_record: RegisteredEditorContext,
+        reply_text: str,
+    ) -> None:
+        """B24: parse the Filler's reply against the region it was
+        actually shown, and push it as its own event -- or don't. A
+        reply that does not parse (a plain-text refusal, included) is
+        logged once at WARNING and otherwise produces nothing: no
+        `FillProposal`, no `Error`. A nullable payload would make every
+        consumer write the same `if proposal == nil` branch to express
+        what "no event arrived" already says for free.
+        """
+        result = parse_fill_proposal(
+            reply_text,
+            file=ec_record.context.file,
+            shown_start=ec_record.shown_start,
+            shown_end=ec_record.shown_end,
+        )
+        if isinstance(result, FillParseFailure):
+            _log.warning(
+                "Task %s: fill proposal (%s): %s", task_id, result.reason, result.detail,
+            )
+            return
+        await self._emit(OutgoingEvent(
+            type=OutgoingEventType.FILL_PROPOSAL,
+            request_id=request_id, task_id=task_id, session_id=session_id,
+            payload={"proposal": result.to_dict()},
+        ))
 
     # -- envelope ---------------------------------------------------------
 

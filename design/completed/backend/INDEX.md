@@ -31,6 +31,7 @@ it passed.
 | B21 | Orphaned Messages Must Not Enter the Next Prompt | ✅ built + manually verified | `B21-orphaned-message-context.md` |
 | B22 | Concurrent Task Completion Race (`SerializedConnection`) | ✅ built + manually verified | `B22-concurrent-completion-race.md` |
 | B23 | Agent and Directory Listing on the Wire | ✅ built + manually verified | `B23-agent-and-directory-listing.md` |
+| B24 | The Filler's Proposal on the Wire | ✅ built + manually verified (0/5 real-model compliance, recorded as a finding) | `B24-filler-proposal-event.md` |
 | B25 | Persist a Validated Provider Key | ✅ built + manually verified | `B25-provider-key-persistence.md` |
 | B26 | Behaviour Overrides + `doctor` on the Wire | ✅ built + manually verified | `B26-behaviour-overrides-doctor-wire.md` |
 | B27 | Resolved Behaviour Values in `GetDoctorReport` | ✅ built + manually verified | `B27-doctor-resolved-behaviour-values.md` |

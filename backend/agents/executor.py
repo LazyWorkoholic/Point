@@ -94,6 +94,40 @@ PROPOSAL_CAP_PER_SESSION = 3
 # characters long, to keep "e.g." from matching.
 _FILE_TOKEN_RE = re.compile(r"\b\w{2,}[\w.\\/-]*\.[A-Za-z0-9]{1,6}\b")
 
+# B24: the only external trace of the region `_render_editor_context`
+# (`managers\context.py`, on the B24 Do-NOT list -- read what it
+# decided, never touch it) showed the Filler. Its `task_state`
+# IncludedItem's `detail` is always `"editor context: {name}
+# mode={mode} lines {start}-{end}"`, built from one unconditional
+# f-string with no singular-line variant, so this one pattern covers
+# every case that detail string can take.
+_SHOWN_RANGE_RE = re.compile(r"lines (\d+)-(\d+)")
+
+
+def _shown_range_from_built(built: context.BuiltContext) -> Optional[tuple[int, int]]:
+    """The `(shown_start, shown_end)` `_render_editor_context` computed
+    for THIS build, recovered from `built.log.included` rather than
+    recomputed -- `resolve_scope()` is deterministic given the same
+    lines, but the file may change on disk before the terminal event
+    this feeds, so the region shown must be captured here, not re-asked
+    for later.
+
+    `build()`'s assembly runs its six sections exactly once with no
+    loop that could append `SECTION_TASK_STATE` to `log.included` more
+    than once, so there is at most one match -- never a "which one"
+    question. None (not a raise) when there isn't one at all: a
+    path-guard refusal or an unreadable file leaves `task_state` with
+    no "lines" text, same as task_state being evicted for budget
+    (`EvictedItem.reason` never contains it either). Both are ordinary
+    "nothing to find" outcomes, identical in effect to a Filler reply
+    that did not parse -- no event, no exception, the caller logs once.
+    """
+    for item in built.log.included:
+        if item.section == context.SECTION_TASK_STATE:
+            match = _SHOWN_RANGE_RE.search(item.detail)
+            return (int(match.group(1)), int(match.group(2))) if match else None
+    return None
+
 
 def _mentions_other_file(text: str, current_file: str) -> Optional[str]:
     """The first filename-looking token in `text` that is not
@@ -480,6 +514,27 @@ class AgentExecutor:
             provider=resolved_provider,
             model=model,
         ))
+
+        # B24: registered here too, for the same reason as the
+        # invocation above -- the echo/refusal path never registers a
+        # stream, and a fill-mode refusal (this file's own
+        # `refusal_text`) must still be reachable by the terminal
+        # event's parse gate. Gated on MODE_FILL only: an explain-mode
+        # or plain chat turn must never be parsed at all, whatever its
+        # reply looks like.
+        if editor_context is not None and editor_context.mode == MODE_FILL:
+            shown_range = _shown_range_from_built(built)
+            if shown_range is not None:
+                self._streams.register_editor_context(
+                    task_id, editor_context, shown_range[0], shown_range[1],
+                )
+            else:
+                _log.warning(
+                    "Task %s: fill turn's shown line range could not be "
+                    "recovered from the context build; no FillProposal "
+                    "will be parsed for this turn",
+                    task_id,
+                )
 
         agent_context = AgentContext(
             config=agent,

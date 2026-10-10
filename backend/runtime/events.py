@@ -215,6 +215,14 @@ class OutgoingEventType(str, Enum):
     # assistant message is persisted (corr_id null) -- one shape, one
     # decoder, not two.
     CONTEXT_REPORT = "ContextReport"
+    # B24: pushed after the terminal TaskDone/TaskFailed/TaskCancelled
+    # event for a fill-mode turn whose reply parsed as a valid
+    # `FillProposal` -- never instead of the terminal event, never
+    # before it, and never for a reply that failed to parse (that is a
+    # log line, not an event). `corr_id` is the originating
+    # SendMessage's, like the terminal event -- this is caused by a
+    # request, unlike CONTEXT_REPORT's push.
+    FILL_PROPOSAL = "FillProposal"
     # B23: reply to ListAgents / ListDirectory.
     AGENT_LIST = "AgentList"
     DIRECTORY_LIST = "DirectoryList"
