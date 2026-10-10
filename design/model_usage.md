@@ -247,8 +247,84 @@ SESSION  EPISODE                          MODEL         WHY
                                                        shown-region validation turns
                                                        out to interact with
                                                        resolve_scope.
+17c      B32 WriteProjectFile             Sonnet high   one manager method, one
+         (the editor's save path)                       event type, one reply type,
+                                                        one additive change to
+                                                        ReadProjectFile's payload,
+                                                        one CLI subcommand -- over
+                                                        resolve_path, check_stale
+                                                        and the four lock methods,
+                                                        all of which exist and are
+                                                        tested (B7). The same
+                                                        "plumbing over something
+                                                        already tested" shape as
+                                                        B20/B24/B25/B26/B30, with
+                                                        ONE difference, and it
+                                                        changes the gate rather
+                                                        than the model: the failure
+                                                        mode is SILENT DATA LOSS,
+                                                        so the gate is byte-level
+                                                        (SHA-256 before and after)
+                                                        and has to be RUN, not
+                                                        reviewed -- a diff that
+                                                        reads correctly is not
+                                                        evidence against a clobber.
+                                                        Every design call is decided
+                                                        in the task doc rather than
+                                                        left to the session:
+                                                        creation via expected_mtime
+                                                        null (so "create" and
+                                                        "clobber" are never the same
+                                                        request), heartbeat on
+                                                        success only and after the
+                                                        bytes land, refusals as
+                                                        ok:false replies while path
+                                                        and project failures stay
+                                                        Error envelopes. Escalate to
+                                                        Opus only if os.replace
+                                                        turns out to interact with
+                                                        the lock/heartbeat ordering,
+                                                        or with a file held open by
+                                                        another Windows process.
 18       F13 editor core                  Opus high     largest, subtlest — CRLF,
                                                         undo grouping, wide chars
+                                                        -- STOPPED BEFORE WRITING
+                                                        CODE on its own "settle this
+                                                        before writing code"
+                                                        instruction, the same shape
+                                                        as F9a/F10/F10c. Save
+                                                        ownership was the question
+                                                        it was told to settle (the
+                                                        backend owns the write);
+                                                        settling it surfaced TWO
+                                                        FURTHER BLOCKERS the episode
+                                                        cannot route around --
+                                                        ReadProjectFile collapses
+                                                        CRLF through read_text's
+                                                        universal-newline mode, so
+                                                        the frontend has nowhere to
+                                                        learn a line ending from and
+                                                        Done-when #2 cannot pass;
+                                                        and index.max_file_kb makes
+                                                        the 5,000-line Done-when
+                                                        both unreadable and invisible
+                                                        in the tree -- plus four
+                                                        stale facts in the episode
+                                                        doc (a 4x-wrong file size, a
+                                                        fixture that does not exist,
+                                                        a "second Point instance"
+                                                        check the single-instance
+                                                        lock makes impossible, and
+                                                        no project id for the lock
+                                                        events to use). The backend
+                                                        half was spun out as 17c
+                                                        (B32) rather than answered
+                                                        with a Go-side write --
+                                                        the same B24-before-18b
+                                                        discipline. This Opus high
+                                                        estimate is for the EPISODE
+                                                        and was not spent on the
+                                                        pass that stopped.
 18b      F9b diff card                   Opus high     was Opus MEDIUM as part of
                                                        F9; raised. The apply path is
                                                        destructive, and its three

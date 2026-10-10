@@ -2010,41 +2010,159 @@ and it is what tells a later episode whether the prompt needs work.
 
 ---
 
+# SESSION 17c — B32 `WriteProjectFile`: the Editor's Save Path
+
+**Goal:** make "save" exist. Point cannot write a project file — there is no
+write event in the backend, and the frontend writes nothing but `state.json`
+and its two log files — so every save, autosave and refusal path in F13's
+spec is written against a path that does not exist.
+
+**Why this episode exists.** Session 18 (F13) was started against its full
+spec and **stopped before any code** at its own "settle this before writing
+code" instruction. Save ownership was settled: **the backend owns the write,
+and the read moves with it.** `pathguard.py`'s own docstring already names
+"every editor open" as its consumer; `project_idea.md` §12 makes editor-write
+permission backend-enforced policy, which a Go-side write would make
+undeliverable for a B16 guest; and the lock key is derived backend-side from
+`resolve_path` (`project_manager.py:378-381`), so Go would have to reproduce
+that mapping to know which `file_locks` row its own write belongs to — the
+B12-bug-#2 / B23-`ListDirectory` drift pattern, in the one place where the
+consequence is a write rather than a wrong number.
+
+Settling it surfaced **two further blockers F13 cannot route around**:
+`ReadProjectFile` collapses CR LF to LF through `read_text`'s universal-newline
+mode (`project_manager.py:269`), so the frontend has nowhere to learn a file's
+line ending from and F13's Done-when #2 cannot pass; and `index.max_file_kb`
+(default 100) makes F13's own 5,000-line Done-when both unreadable and
+invisible in the file tree. Full trace in
+`design/tasks/backend/B32-write-project-file.md`'s "Why this episode exists".
+
+**Placed here, before F13**, for the same reason 17b (B24) sits before 18b:
+the consumer should find its dependency already landed. Unlike B24, this one
+is **mandatory** — F13 does not start without it.
+
+**Paste:**
+```
+Read CLAUDE.md and design/tasks/backend/B32-write-project-file.md.
+
+One manager method, one event type, one reply type, one additive change
+to ReadProjectFile's payload, one CLI subcommand. Every design call is
+already made in the task doc -- creation via expected_mtime null,
+heartbeat refreshed on success only and after the bytes land, refusals
+as ok:false replies while path and project failures stay Error
+envelopes, and no allow_outside_project flag on the write at all.
+
+A refused write must leave the file byte-identical. Check the hash, not
+the reply.
+
+Do NOT register this as a tool -- it is a runtime event handler like
+ProjectInit, and the absence of a write tool is how CLAUDE.md's first
+hard rule is enforced structurally. Do NOT build any frontend. Do NOT
+touch index.max_file_kb, _build_index's cache key, or context.py's
+three direct read_text calls. Do NOT make overwrite the default.
+
+Stop at the verification gate with PowerShell checks.
+
+If anything in this episode's Build section is ambiguous or seems to
+assume something not true of this repo, stop and tell me before writing
+code.
+```
+
+**You do:** the byte-exact round trip. Write a CRLF + BOM file, hash it, read
+and write it back through the event without editing, hash it again. Equal, or
+the episode is not done. Then confirm by eye that the `stale` refusal reports
+the file's **current** mtime rather than echoing back the one it was sent — a
+handler that echoed the input would pass every other check in the gate.
+
+**Record:**
+```
+Write design/completed/backend/B32-write-project-file.md following the
+format in design/completed/backend/INDEX.md. Include the bugs we hit
+and how they were fixed, and what the next episode inherits. Add a row
+to that INDEX.md's status table.
+
+Record the exact ProjectFileWritten payload shape -- every field name --
+and the full list of refusal reason slugs. Session 18 (F13) and 18b
+(F9b) are both written against these exact names.
+
+Record the seven new ReadProjectFile metadata fields and what each one
+is measured from. Record whether decode_replacements came back non-zero
+on any real file in this repo: that is a finding about B7's lossy
+errors="replace" read, not about this episode, and it is unrecoverable
+once the session is over.
+```
+
+**Then:** commit · `/clear`
+
+---
+
 # SESSION 18 — F13 Editor Core
 
 **Goal:** the largest frontend episode. **May take two sessions** — if so, stop at
 a working point, record what is done, `/clear`, and resume with a note.
 
+**Prerequisite, mandatory:** Session 17c (B32). The save path did not exist
+when this episode was first written; B32 builds it, and every field name below
+comes from B32's completed doc. If B32 has not landed, this session does not
+start.
+
 **Paste:**
 ```
 Read CLAUDE.md, design/tasks/frontend/LAYOUT.md, and F13-editor-core.md.
+Then read design/completed/backend/B32-write-project-file.md -- the save
+path's real shape, which this episode is written against field for
+field.
 
 Auto-indent is Tier 1 only (copy previous line's indentation). Line
-endings detected on open and preserved on save — this matters on Windows.
-Undo must group keystrokes, and an agent-applied diff must be ONE undo.
+endings detected on open and preserved on save -- this matters on
+Windows. Undo must group keystrokes, and an agent-applied diff must be
+ONE undo.
 
-SETTLE THIS BEFORE WRITING CODE: there is no way to save a file today,
-on either side. The backend has no write event at all -- no
-`WriteProjectFile`, no counterpart to `ReadProjectFile` (confirmed
-during F9a). The frontend writes exactly one file in the whole repo,
-`state.json`, via config\state.go. The only other writes anywhere are
-`project init`'s own `.point\project.toml` and `.gitignore`.
+THE SAVE PATH IS SETTLED AND BUILT, AND THE BACKEND OWNS THE WRITE.
+WriteProjectFile takes path, content (LF-normalised, no BOM), holder,
+expected_mtime, overwrite, line_ending, bom, trailing_newline, and
+returns the NEW mtime -- which is exactly what autosave rule 2 records,
+so there is no follow-up CheckFileStale. ReadProjectFile now reports
+line_ending, crlf_count, lf_count, bom, trailing_newline,
+decode_replacements and writable. Use them. Do not re-derive any of
+them, do not strip a BOM yourself, and do NOT write a project file from
+Go -- config\state.go stays the only file the frontend writes.
 
-So "save" is an unbuilt path and WHICH SIDE OWNS IT is a real
-decision, not plumbing. It interacts with three things that are
-backend-side today: B7's path guard, the file locks
-(AcquireFileLock/HeartbeatFileLock/ReleaseFileLock/TakeOverFileLock),
-and CheckFileStale -- and F13's own spec leans on all three ("never
-autosave a file held by another lock holder", "record Point's own
-write mtimes", "changed on disk since you opened it"). A Go-side write
-would have to re-ask questions the backend already answers, which is
-the drift B12's bug #2 and B23's ListDirectory decision were both
-about. Note also that CLAUDE.md's first hard rule bans writes from an
-AGENT path specifically; a user saving their own buffer is not that,
-so either answer is permitted -- but pick one deliberately and say
-why.
+Refusals come back as ok:false with a reason slug: stale, exists,
+locked, read_only, too_large, no_parent_dir, io_error. Render the three
+buttons off `stale` and the holder+age off `locked`. A path or project
+failure is still an Error envelope, not a slug.
 
-Raise it and stop if the episode doc assumes a save path exists.
+Four things in THIS episode's doc are wrong about this repo. They were
+found before the episode started; do not rediscover them:
+
+1. runtime.py is 88,425 bytes, not the "21KB" the manual verification
+   claims.
+2. No 5,000-line file exists in this repo. Generate the Done-when #1
+   fixture.
+3. Done-when #7's "second Point instance" is unachievable as written.
+   backend\lockfile.py refuses a second backend against the same
+   profile, and two profiles have two runtime.db files and therefore
+   two separate file_locks tables -- so they cannot see each other's
+   locks either. Use cli.py as the second holder: `project lock acquire
+   --holder someone-else@other-id`. It deliberately does not take the
+   single-instance lock.
+4. The Editor has no project id, and the lock events require one.
+   Resolve it from the opened file's OWN path, walking up for .point\,
+   via ProjectResolve. No .point\ found -> open READ-ONLY. Not
+   editable without a lock.
+
+The holder key is the WHOLE composed string <username>@<full-id>,
+generated once and persisted in state.json as one opaque value, never
+regenerated on relaunch -- not the id alone with the username re-read
+live at each launch, which would make a renamed account silently a
+different holder. Display <username>@<first 8 of the id>, splitting on
+the LAST @; compare on the whole string. The backend neither generates
+nor validates it.
+
+A file between index.max_file_kb (100) and editor.max_file_kb (512) is
+openable by path but will NOT appear in the file tree. That is an
+accepted limitation recorded in B32's handoff, not a bug to fix here.
 
 Stop at the verification gate with PowerShell checks.
 
@@ -2054,7 +2172,9 @@ code.
 ```
 
 **You do:** the CRLF check — open and save a file without editing, then
-`git status`. If the whole file shows modified, it is wrong.
+`git status`. If the whole file shows modified, it is wrong. Then the autosave
+counter: type continuously for 30 seconds and confirm **one** write landed, not
+thirty — read the file's mtime, do not watch the dirty marker.
 
 **Record:**
 ```
@@ -2069,6 +2189,12 @@ Also record the Buffer interface and exactly how undo grouping works.
 F15's ghost text and diff-apply write into this same buffer and must
 respect its undo boundaries, or Ctrl+Z stops being a single, trustworthy
 action.
+
+Record the CRLF and BOM handling as implemented -- which of B32's seven
+metadata fields the buffer stores, and what it sends back on save -- and
+any Windows Terminal key combination that did not arrive. Also correct
+the four stale facts listed in the paste, inside F13's own task doc, so
+the next reader of it is not misled the same way.
 ```
 
 **Then:** commit · `/clear`

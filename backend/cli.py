@@ -97,6 +97,7 @@ _EXPECTED_REPLY: dict[str, set[str]] = {
     "ProjectResolve": {"Project"},
     "ListProjectFiles": {"ProjectFileList"},
     "ReadProjectFile": {"ProjectFile"},
+    "WriteProjectFile": {"ProjectFileWritten"},
     "AcquireFileLock": {"FileLockResult"},
     "HeartbeatFileLock": {"FileLockResult"},
     "ReleaseFileLock": {"FileLockReleased"},
@@ -1159,9 +1160,84 @@ async def cmd_project_read_file(runtime: Runtime, args: argparse.Namespace) -> i
     print(f"mtime:           {f['mtime']}")
     print(f"size:            {f['size']}")
     print(f"outside_project: {f['outside_project']}")
+    # B32's byte-level metadata. `mtime` above is what --expect-mtime
+    # takes verbatim on a write: do not reconstruct it from a timestamp,
+    # since check_stale's tolerance is 1e-6 and anything truncated to
+    # whole seconds is ALWAYS stale.
+    print(f"line_ending:     {f['line_ending']}")
+    print(f"crlf_count:      {f['crlf_count']}")
+    print(f"lf_count:        {f['lf_count']}")
+    print(f"bom:             {f['bom']}")
+    print(f"trailing_newline: {f['trailing_newline']}")
+    print(f"decode_replacements: {f['decode_replacements']}")
+    print(f"writable:        {f['writable']}")
     print("---")
     print(f["content"])
     return EXIT_OK
+
+
+async def cmd_project_write_file(runtime: Runtime, args: argparse.Namespace) -> int:
+    r"""B32. `--content-from <file>`, never `--content <string>`.
+
+    The thing under test is byte-exact line endings, and `\r\n` cannot
+    be passed safely through an argv string or a PowerShell quoted
+    literal. Reading the content from a file is the only way the CLI can
+    exercise what this episode builds.
+
+    The content file is read as BYTES and normalised here, so a CRLF
+    payload file and an LF one produce the same request -- the
+    `--line-ending` flag decides what lands on disk, not the incidental
+    endings of whatever scratch file carried the text.
+    """
+    project = await _require_project(runtime, args)
+    if project is None:
+        return EXIT_FAILED
+    try:
+        raw = Path(args.content_from).read_bytes()
+    except OSError as exc:
+        print(f"error: cannot read --content-from {args.content_from!r}: {exc}", file=sys.stderr)
+        return EXIT_FAILED
+    content = raw.decode("utf-8", errors="replace").replace("\r\n", "\n")
+    if content.startswith("﻿"):
+        content = content[1:]
+
+    payload: dict[str, Any] = {
+        "project_id": project["id"],
+        "path": args.file,
+        "content": content,
+        "holder": args.holder,
+        "overwrite": args.overwrite,
+        "line_ending": args.line_ending,
+        "bom": args.bom,
+        "trailing_newline": not args.no_trailing_newline,
+    }
+    # `--create` and an absent --expect-mtime both mean expected_mtime
+    # null, which MEANS "I expect no file here". Sent explicitly rather
+    # than omitted so the request says what it intends.
+    payload["expected_mtime"] = None if args.create else args.expect_mtime
+
+    envelopes = await call(runtime, "WriteProjectFile", verbose=args.verbose, **payload)
+    _print_errors(envelopes)
+    if _failed(envelopes) or not envelopes:
+        return EXIT_FAILED
+    r = envelopes[-1]["payload"]
+    if r["ok"]:
+        print(f"ok               {r['path']}")
+        print(f"mtime:           {r['mtime']}")
+        print(f"size:            {r['size']}")
+        print(f"line_ending:     {r['line_ending']}")
+        print(f"bom:             {r['bom']}")
+        print(f"trailing_newline: {r['trailing_newline']}")
+        return EXIT_OK
+    # A refusal is a successful REQUEST with an unsuccessful outcome.
+    # It exits non-zero so a gate script's -ErrorActionPreference stop
+    # does not have to parse stdout to notice, but it is not an error
+    # envelope and is not printed as one.
+    print(f"refused          {r['reason']}")
+    for key in ("mtime", "holder", "age_seconds", "size", "limit_kb", "message"):
+        if key in r:
+            print(f"{key + ':':17}{r[key]}")
+    return EXIT_FAILED
 
 
 async def cmd_project_browse(runtime: Runtime, args: argparse.Namespace) -> int:
@@ -1753,6 +1829,42 @@ def build_parser() -> argparse.ArgumentParser:
     p_read.add_argument("--file", required=True, help="relative or absolute path")
     p_read.add_argument("--allow-outside", dest="allow_outside", action="store_true")
 
+    # B32: the editor's save. --content-from, never --content: \r\n
+    # cannot survive an argv string, and byte-exact line endings are the
+    # whole point of this command.
+    p_write = project.add_parser(
+        "write-file", help="guarded, atomic, precondition-checked file write", parents=[common]
+    )
+    p_write.add_argument("--path", default=".")
+    p_write.add_argument("--file", required=True, help="relative or absolute path")
+    p_write.add_argument(
+        "--content-from", dest="content_from", required=True, metavar="FILE",
+        help="file holding the content to write (never a --content string: \\r\\n "
+             "cannot be passed through argv)",
+    )
+    p_write.add_argument("--holder", required=True, help="the lock holder key")
+    # Exactly one precondition, and one is REQUIRED. There is no default:
+    # defaulting to --overwrite is how you ship a clobber.
+    precondition = p_write.add_mutually_exclusive_group(required=True)
+    precondition.add_argument(
+        "--expect-mtime", dest="expect_mtime", type=float, default=None,
+        help="the mtime read-file reported at open (use its value verbatim)",
+    )
+    precondition.add_argument(
+        "--create", action="store_true",
+        help="expect NO file at this path (expected_mtime null)",
+    )
+    precondition.add_argument(
+        "--overwrite", action="store_true",
+        help="skip the precondition entirely -- the user pressed [overwrite]",
+    )
+    p_write.add_argument("--line-ending", dest="line_ending", choices=("lf", "crlf"), default="lf")
+    p_write.add_argument("--bom", action="store_true", help="write a UTF-8 BOM")
+    p_write.add_argument(
+        "--no-trailing-newline", dest="no_trailing_newline", action="store_true",
+        help="do not end the file with a newline",
+    )
+
     p_lock = project.add_parser("lock", help="soft file locks", parents=[common]).add_subparsers(
         dest="lock_command", required=True
     )
@@ -1847,6 +1959,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         ("project", "resolve"): cmd_project_resolve,
         ("project", "list-files"): cmd_project_list_files,
         ("project", "read-file"): cmd_project_read_file,
+        ("project", "write-file"): cmd_project_write_file,
         ("project", "check-stale"): cmd_project_check_stale,
         ("project", "browse"): cmd_project_browse,
         # Attachments and single-task cancel (B12).

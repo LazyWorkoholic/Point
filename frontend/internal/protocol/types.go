@@ -37,12 +37,17 @@ const (
 	CmdProjectResolve        = "ProjectResolve"
 	CmdListProjectFiles      = "ListProjectFiles"
 	CmdReadProjectFile       = "ReadProjectFile"
-	CmdAcquireFileLock       = "AcquireFileLock"
-	CmdHeartbeatFileLock     = "HeartbeatFileLock"
-	CmdReleaseFileLock       = "ReleaseFileLock"
-	CmdTakeOverFileLock      = "TakeOverFileLock"
-	CmdCheckFileStale        = "CheckFileStale"
-	CmdGetContextReport      = "GetContextReport"
+	// B32: the editor's save. The backend owns the write; config\state.go
+	// stays the only file the FRONTEND writes. Declared here as the fixed
+	// name F13 consumes -- no Go caller yet, by design, the same way the
+	// lock commands above waited for theirs.
+	CmdWriteProjectFile  = "WriteProjectFile"
+	CmdAcquireFileLock   = "AcquireFileLock"
+	CmdHeartbeatFileLock = "HeartbeatFileLock"
+	CmdReleaseFileLock   = "ReleaseFileLock"
+	CmdTakeOverFileLock  = "TakeOverFileLock"
+	CmdCheckFileStale    = "CheckFileStale"
+	CmdGetContextReport  = "GetContextReport"
 	// Attachments (B12). B8 built the read half; these are the writes.
 	// F8's @ picker is the first Go consumer.
 	CmdAttachContext     = "AttachContext"
@@ -107,12 +112,17 @@ const (
 	EvToolStarted   = "ToolStarted"
 	EvToolCompleted = "ToolCompleted"
 
-	EvProject          = "Project"
-	EvProjectFileList  = "ProjectFileList"
-	EvProjectFile      = "ProjectFile"
-	EvFileLockResult   = "FileLockResult"
-	EvFileLockReleased = "FileLockReleased"
-	EvFileStaleResult  = "FileStaleResult"
+	EvProject         = "Project"
+	EvProjectFileList = "ProjectFileList"
+	EvProjectFile     = "ProjectFile"
+	// B32: reply to WriteProjectFile. {ok:true,...} carries the NEW mtime
+	// (F13's autosave rule 2); {ok:false,reason} carries one of seven
+	// slugs. A path denial or an unresolvable project is an EvError, not a
+	// slug.
+	EvProjectFileWritten = "ProjectFileWritten"
+	EvFileLockResult     = "FileLockResult"
+	EvFileLockReleased   = "FileLockReleased"
+	EvFileStaleResult    = "FileStaleResult"
 
 	// EvContextReport is B20's ContextReport -- one wire type serving both
 	// the GetContextReport reply (corr_id set) and the push after a turn's

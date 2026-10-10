@@ -76,6 +76,12 @@ class IncomingEventType(str, Enum):
     PROJECT_RESOLVE = "ProjectResolve"
     LIST_PROJECT_FILES = "ListProjectFiles"
     READ_PROJECT_FILE = "ReadProjectFile"
+    # B32: the editor's save, and the FIRST write path in the backend.
+    # A runtime event handler only -- there is no `write_file` tool and
+    # there must not be one. CLAUDE.md's first hard rule ("never write
+    # files from an agent") is enforced structurally, by the absence of
+    # a tool, not by a check inside one.
+    WRITE_PROJECT_FILE = "WriteProjectFile"
     ACQUIRE_FILE_LOCK = "AcquireFileLock"
     HEARTBEAT_FILE_LOCK = "HeartbeatFileLock"
     RELEASE_FILE_LOCK = "ReleaseFileLock"
@@ -202,6 +208,19 @@ class OutgoingEventType(str, Enum):
     PROJECT = "Project"
     PROJECT_FILE_LIST = "ProjectFileList"
     PROJECT_FILE = "ProjectFile"
+    # B32: reply to WriteProjectFile. A NEW type rather than a reuse of
+    # PROJECT_FILE -- the two payloads have almost nothing in common, and
+    # overloading one would make both decoders branch on which keys
+    # arrived (the same reason CONTEXT_REPORT's own comment gives for one
+    # shape, one decoder).
+    #
+    # `{ok: true, ...}` carries what was ACTUALLY written, including the
+    # new mtime -- which is the whole of F13's autosave rule 2, and why
+    # a save needs no follow-up CheckFileStale. `{ok: false, reason}`
+    # carries one of seven slugs; a path denial or an unresolvable
+    # project is NOT among them and arrives as an Error, because those
+    # mean the editor should never have offered the save.
+    PROJECT_FILE_WRITTEN = "ProjectFileWritten"
     FILE_LOCK_RESULT = "FileLockResult"
     FILE_LOCK_RELEASED = "FileLockReleased"
     FILE_STALE_RESULT = "FileStaleResult"

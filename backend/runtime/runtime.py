@@ -310,6 +310,7 @@ class Runtime:
         self.dispatcher.register(IncomingEventType.PROJECT_RESOLVE, self._handle_project_resolve)
         self.dispatcher.register(IncomingEventType.LIST_PROJECT_FILES, self._handle_list_project_files)
         self.dispatcher.register(IncomingEventType.READ_PROJECT_FILE, self._handle_read_project_file)
+        self.dispatcher.register(IncomingEventType.WRITE_PROJECT_FILE, self._handle_write_project_file)
         self.dispatcher.register(IncomingEventType.ACQUIRE_FILE_LOCK, self._handle_acquire_file_lock)
         self.dispatcher.register(IncomingEventType.HEARTBEAT_FILE_LOCK, self._handle_heartbeat_file_lock)
         self.dispatcher.register(IncomingEventType.RELEASE_FILE_LOCK, self._handle_release_file_lock)
@@ -749,13 +750,63 @@ class Runtime:
         if "path" not in p:
             raise InvalidEventError("ReadProjectFile requires 'path'")
         project = await self._resolve_optional_project(p)
+        # B32: the EDITOR's cap (512KB), not the index/tool one (100KB).
+        # read_file defaults to index.max_file_kb so the `read_file` tool
+        # keeps its own, narrower limit -- a 400KB file is reasonable to
+        # edit and unreasonable to pull into a prompt.
         result = await self.projects.read_file(
-            project, p["path"], allow_outside_project=bool(p.get("allow_outside_project", False))
+            project,
+            p["path"],
+            allow_outside_project=bool(p.get("allow_outside_project", False)),
+            max_kb=appconfig.editor_max_file_kb(),
         )
         await self._emit(OutgoingEvent(
             type=OutgoingEventType.PROJECT_FILE,
             request_id=event.request_id,
             payload={"file": result},
+        ))
+
+    async def _handle_write_project_file(self, event: IncomingEvent) -> None:
+        r"""B32: the editor's save.
+
+        `_require_project`, NOT `_resolve_optional_project` -- the same
+        choice AcquireFileLock and its three siblings already make, and
+        for the same reason: a file with no `.point\` above it cannot
+        take a lock, so it is read-only by construction rather than
+        writable-but-unlockable. That is F13's "no project means
+        read-only" decision enforced where it is enforceable.
+
+        `expected_mtime` ABSENT and `expected_mtime: null` both mean the
+        same thing here -- "I expect no file at this path" -- because
+        that is the creation signal, not a missing value. The
+        precondition is never defaulted to "write anyway"; `overwrite`
+        has to be asked for.
+        """
+        p = event.payload
+        if "path" not in p:
+            raise InvalidEventError("WriteProjectFile requires 'path'")
+        if "content" not in p:
+            raise InvalidEventError("WriteProjectFile requires 'content'")
+        if not p.get("holder"):
+            raise InvalidEventError("WriteProjectFile requires 'holder'")
+        project = await self._require_project(p)
+
+        raw_mtime = p.get("expected_mtime")
+        result = await self.projects.write_file(
+            project,
+            p["path"],
+            p["content"],
+            holder=p["holder"],
+            expected_mtime=None if raw_mtime is None else float(raw_mtime),
+            overwrite=bool(p.get("overwrite", False)),
+            line_ending=p.get("line_ending", "lf"),
+            bom=bool(p.get("bom", False)),
+            trailing_newline=bool(p.get("trailing_newline", True)),
+        )
+        await self._emit(OutgoingEvent(
+            type=OutgoingEventType.PROJECT_FILE_WRITTEN,
+            request_id=event.request_id,
+            payload=result.to_dict(),
         ))
 
     async def _handle_acquire_file_lock(self, event: IncomingEvent) -> None:

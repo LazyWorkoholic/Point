@@ -134,6 +134,38 @@ def config_value(dotted_key: str, default: Any = None) -> Any:
     return node
 
 
+# B32: the editor's own size cap, deliberately separate from
+# `index.max_file_kb`.
+#
+# `index.max_file_kb` (default 100) prices `@file` attachments against a
+# token budget and bounds index build time; it must not move. The editor
+# wants a different number for a different reason: a 400KB file is
+# reasonable to EDIT and unreasonable to ATTACH.
+#
+# ONE number governs the editor's read and its write, through this one
+# accessor, because two numbers would mean a file you can open is a file
+# you cannot save.
+#
+# 512 is CHOSEN, NOT MEASURED. It clears F13's 5,000-line Done-when with
+# headroom. It is not a performance figure and must not be described as
+# one.
+#
+# Not in `appconfig_overrides.ALLOWED_KEYS` on purpose: that set is the
+# five keys the Behaviour tab controls live, and B32 is not the episode
+# that expands B26's surface.
+EDITOR_MAX_FILE_KB_DEFAULT = 512
+
+
+def editor_max_file_kb() -> int:
+    """config.toml `[editor] max_file_kb`, else 512."""
+    raw = config_value("editor.max_file_kb", EDITOR_MAX_FILE_KB_DEFAULT)
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return EDITOR_MAX_FILE_KB_DEFAULT
+    return value if value > 0 else EDITOR_MAX_FILE_KB_DEFAULT
+
+
 def _strip_bom(raw: bytes) -> bytes:
     """tomllib rejects a UTF-8 BOM outright ("Invalid statement (at line
     1, column 1)") -- it does not strip one, by design. Users get a BOM

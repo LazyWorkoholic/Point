@@ -50,6 +50,7 @@ fix this table.
 | B25 | Persist a Validated Provider Key | P1 | no | B6, B4 | not started — unblocks F10's credential-entry Done-when #4-6 (WORKFLOW.md session 15c) |
 | B30 | Let `SetSessionProvider` Also Bind a Session's Project | P1 | no | B12, B4/B6 | ✅ built |
 | B31 | Validate `project_id` in `CreateSession`/`SetSessionProvider` | P1 | no | B7, B12, B30 | ✅ built |
+| B32 | `WriteProjectFile` — the Editor's Save Path | P1 | no | B7, B6 | ✅ built |
 
 **B1–B5 are frozen.** Additive changes only — new columns, new optional fields.
 Never refactors.

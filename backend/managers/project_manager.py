@@ -54,6 +54,76 @@ class LockResult:
         return {"ok": self.ok, "holder": self.holder, "age_seconds": self.age_seconds}
 
 
+# B32's seven refusal slugs. There is deliberately NO `denied` slug:
+# resolve_path already raises PathDeniedError and _require_project raises
+# ProjectNotFoundError, both of which Runtime.receive turns into an Error
+# envelope with no new code. Two ways to report one condition is worse
+# than one.
+WRITE_REASONS = frozenset({
+    "stale", "exists", "locked", "read_only", "too_large", "no_parent_dir", "io_error",
+})
+
+
+@dataclass
+class WriteResult:
+    """A refusal is a REPLY, not an exception -- the one real design call
+    in B32.
+
+    A path denial or an unresolvable project means the editor should
+    never have offered the save, so those stay exceptions and arrive as
+    Error envelopes. But `stale` is a normal outcome of a correct
+    program: F13 renders three specific buttons off it ("changed on disk
+    since you opened it -- [reload] [overwrite] [diff]"), and `locked`
+    has to name a holder and an age in the status bar. Neither is
+    possible from a prose string inside an Error.
+
+    to_dict() emits ONLY the fields that mean something for the outcome
+    it is reporting, so a consumer never has to guess whether a null
+    `holder` on a `stale` refusal is meaningful.
+    """
+
+    ok: bool
+    reason: Optional[str] = None
+    path: Optional[str] = None
+    mtime: Optional[float] = None
+    size: Optional[int] = None
+    line_ending: Optional[str] = None
+    bom: Optional[bool] = None
+    trailing_newline: Optional[bool] = None
+    holder: Optional[str] = None
+    age_seconds: Optional[float] = None
+    limit_kb: Optional[int] = None
+    message: Optional[str] = None
+
+    def __post_init__(self) -> None:
+        if not self.ok and self.reason not in WRITE_REASONS:
+            raise ValueError(f"unknown write refusal reason: {self.reason!r}")
+
+    def to_dict(self) -> dict:
+        if self.ok:
+            return {
+                "ok": True,
+                "path": self.path,
+                "mtime": self.mtime,
+                "size": self.size,
+                "line_ending": self.line_ending,
+                "bom": self.bom,
+                "trailing_newline": self.trailing_newline,
+            }
+        out: dict = {"ok": False, "reason": self.reason}
+        if self.reason in ("stale", "exists"):
+            out["mtime"] = self.mtime
+        elif self.reason == "locked":
+            out["holder"] = self.holder
+            out["age_seconds"] = self.age_seconds
+        elif self.reason == "too_large":
+            out["size"] = self.size
+            out["limit_kb"] = self.limit_kb
+        elif self.reason == "io_error":
+            out["message"] = self.message
+        return out
+
+
 @dataclass
 class _FileIndex:
     built_at: float
@@ -255,25 +325,190 @@ class ProjectManager:
     # -- guarded file read -----------------------------------------------------
 
     async def read_file(
-        self, project: Optional[Project], raw_path: str, *, allow_outside_project: bool = False
+        self,
+        project: Optional[Project],
+        raw_path: str,
+        *,
+        allow_outside_project: bool = False,
+        max_kb: Optional[int] = None,
     ) -> dict:
+        r"""Guarded, size-capped read (B7), with B32's byte-level metadata.
+
+        B32 changed two things here, both because the editor's save has
+        to reproduce a file byte for byte and the old version threw away
+        the information needed to do it:
+
+        1. **Reads bytes, not text.** `Path.read_text()` opens in
+           universal-newlines mode, which collapses `\r\n` to `\n`
+           before any caller sees a single byte. Verified:
+           `b"\xef\xbb\xbfline1\r\nline2\r\n"` came back as
+           `'﻿line1\nline2\n'` -- the BOM survived and the line
+           ending did not. So the frontend had nowhere to learn a file's
+           line ending from, and F13's CRLF round-trip Done-when could
+           not pass. Decoding by hand is what makes the counts below
+           knowable.
+
+        2. **The BOM is stripped from `content` and reported in `bom`.**
+           This is B32's one NON-ADDITIVE change. Previously a BOM
+           arrived as a literal U+FEFF inside the string, which meant
+           every attachment of a BOM'd file fed a zero-width character
+           to the model, and F13 would have had to strip it itself --
+           a second place knowing how to handle a BOM. The size cap is
+           still measured against the file's real on-disk size,
+           including the BOM.
+
+        `content` stays LF-normalised on the wire in both directions.
+        The backend owns the translation at both ends, so exactly one
+        place in Point knows about `\r\n`.
+
+        `max_kb` DEFAULTS to `index.max_file_kb` (100), which is what the
+        `read_file` TOOL keeps using. Only the editor's wire path
+        (_handle_read_project_file) passes `editor.max_file_kb` (512).
+
+        Defaulting the other way would have quietly widened the AGENT's
+        read fivefold, which is the exact thing the two separate numbers
+        exist to prevent: a 400KB file is reasonable to EDIT and
+        unreasonable to pull into a prompt. The caller that wants the
+        bigger cap asks for it.
+        """
         resolved = resolve_path(raw_path, project, allow_outside_project=allow_outside_project)
         if not resolved.is_file():
             raise InvalidEventError(f"Not a file: {resolved}")
-        max_kb = appconfig.config_value("index.max_file_kb", 100)
+        if max_kb is None:
+            max_kb = appconfig.config_value("index.max_file_kb", 100)
         stat = resolved.stat()
         if stat.st_size > max_kb * 1024:
             raise InvalidEventError(
                 f"File too large to read: {stat.st_size} bytes (limit {max_kb}KB)"
             )
-        content = resolved.read_text(encoding="utf-8", errors="replace")
+        raw = resolved.read_bytes()
+        meta = describe_bytes(raw)
         return {
             "path": str(resolved),
-            "content": content,
+            "content": meta["content"],
             "mtime": stat.st_mtime,
             "size": stat.st_size,
             "outside_project": is_outside_project(resolved, project),
+            # B32's additive metadata. F13 displays and preserves these
+            # rather than re-deriving any of them.
+            "line_ending": meta["line_ending"],
+            "crlf_count": meta["crlf_count"],
+            "lf_count": meta["lf_count"],
+            "bom": meta["bom"],
+            "trailing_newline": meta["trailing_newline"],
+            "decode_replacements": meta["decode_replacements"],
+            "writable": _is_writable(resolved),
         }
+
+    # -- guarded file write (B32) --------------------------------------------
+
+    async def write_file(
+        self,
+        project: Project,
+        raw_path: str,
+        content: str,
+        *,
+        holder: str,
+        expected_mtime: Optional[float],
+        overwrite: bool = False,
+        line_ending: str = "lf",
+        bom: bool = False,
+        trailing_newline: bool = True,
+    ) -> WriteResult:
+        r"""The editor's save. The first write path in the backend.
+
+        `project` is REQUIRED, unlike read_file's Optional -- and there
+        is deliberately no `allow_outside_project` flag. An
+        out-of-project path cannot take a lock at all (`_lock_key` calls
+        resolve_path with the flag off), so accepting one here would
+        manufacture exactly the writable-but-unlockable case F13's
+        "no `.point\` means read-only" decision rules out. An outside
+        path raises PathDeniedError, as everywhere else.
+
+        `expected_mtime=None` MEANS "I expect no file here" -- it is the
+        creation signal, not a missing value. Without it the only way to
+        create a file would be `overwrite=True`, which would make
+        "create a new file" and "clobber someone else's concurrent
+        change" the same request. Three intentions, three encodings:
+
+            expected_mtime=<float>  exists with this mtime  -> stale
+            expected_mtime=None     does not exist          -> exists
+            overwrite=True          already decided         -> no check
+
+        NOT REACHABLE FROM A TOOL OR AN AGENT. This is a manager method
+        behind a runtime event handler, like project init. There is no
+        `write_file` tool and there must not be one -- the absence is how
+        CLAUDE.md's first hard rule is enforced structurally.
+        """
+        resolved = resolve_path(raw_path, project)        # 1 -- PathDeniedError escapes
+
+        if not resolved.parent.is_dir():                  # 2
+            return WriteResult(ok=False, reason="no_parent_dir")
+
+        data = encode_for_write(
+            content, line_ending=line_ending, bom=bom, trailing_newline=trailing_newline
+        )
+        max_kb = appconfig.editor_max_file_kb()
+        if len(data) > max_kb * 1024:                     # 3
+            return WriteResult(
+                ok=False, reason="too_large", size=len(data), limit_kb=max_kb
+            )
+
+        rel_key = self._lock_key(project, raw_path)
+        row = await self._repo.get_lock(project.id, rel_key)
+        held_by_other = False
+        if row is not None and row["holder"] != holder:   # 4
+            age = time.time() - row["heartbeat_at"]
+            if age <= LOCK_STALE_AFTER_S:
+                return WriteResult(
+                    ok=False, reason="locked", holder=row["holder"], age_seconds=age
+                )
+            held_by_other = True  # stale: writable, but NOT ours to heartbeat
+
+        exists = resolved.exists()
+        if not overwrite:                                 # 5
+            if expected_mtime is None:
+                if exists:
+                    return WriteResult(
+                        ok=False, reason="exists", mtime=resolved.stat().st_mtime
+                    )
+            elif not exists:
+                # Deleted since open. check_stale calls this changed, and
+                # so do we -- a save is not a silent re-create.
+                return WriteResult(ok=False, reason="stale", mtime=None)
+            elif abs(resolved.stat().st_mtime - expected_mtime) > 1e-6:
+                return WriteResult(
+                    ok=False, reason="stale", mtime=resolved.stat().st_mtime
+                )
+
+        if exists and not _is_writable(resolved):         # 6
+            return WriteResult(ok=False, reason="read_only")
+
+        try:                                              # 7
+            _atomic_write(resolved, data)
+        except OSError as exc:
+            _log.warning("write_file failed for %s: %s", resolved, exc)
+            return WriteResult(ok=False, reason="io_error", message=str(exc))
+
+        # 8 -- the write IS the liveness proof, and it is better evidence
+        # than a timer tick. After the bytes land, never before: touching
+        # it first would extend a lock for a write that then failed. Only
+        # for a row this holder actually owns -- a write by a holder with
+        # no lock row must not create one, and a stale row belonging to
+        # someone else is not ours to refresh.
+        if row is not None and not held_by_other:
+            await self._repo.touch_heartbeat(project.id, rel_key, time.time())
+
+        stat = resolved.stat()                            # 9
+        return WriteResult(
+            ok=True,
+            path=str(resolved),
+            mtime=stat.st_mtime,
+            size=stat.st_size,
+            line_ending=line_ending,
+            bom=bom,
+            trailing_newline=trailing_newline,
+        )
 
     # -- plain directory browse (B23) ------------------------------------
     # Not list_files()/  _build_index(): that is an indexed, gitignore-
@@ -426,6 +661,143 @@ class ProjectManager:
         now = time.time()
         await self._repo.put_lock(project.id, rel_key, holder, now, now)
         return LockResult(ok=True)
+
+
+# ---------------------------------------------------------------------------
+# B32: the byte layer. One place in Point knows about \r\n, and it is here.
+# ---------------------------------------------------------------------------
+
+def describe_bytes(raw: bytes) -> dict:
+    r"""Decode a file's bytes and report what was in them.
+
+    Separate from read_file so the round-trip property
+    (describe_bytes -> encode_for_write == the original bytes) can be
+    tested on bytes directly, with no filesystem and no project.
+
+    `line_ending` is "mixed" when both styles appear. B32 reports the
+    COUNTS and does not decide what to do about a mixed file: counting
+    bytes is resolution, choosing a normalisation is a product decision,
+    and that one is F13's. This is the backend-resolves /
+    frontend-renders line drawn where B20 and B23 drew it, not one step
+    past it.
+    """
+    bom = raw.startswith(b"\xef\xbb\xbf")
+    body = raw[3:] if bom else raw
+
+    crlf_count = body.count(b"\r\n")
+    lf_count = body.count(b"\n") - crlf_count
+
+    if crlf_count and lf_count:
+        line_ending = "mixed"
+    elif crlf_count:
+        line_ending = "crlf"
+    else:
+        line_ending = "lf"
+
+    text = body.decode("utf-8", errors="replace")
+    # errors="replace" is lossy: a non-UTF-8 file round-trips as U+FFFD
+    # and saving it would corrupt it silently -- the exact failure B32
+    # exists to prevent, arriving by the back door. Count them so F13
+    # can open such a file strictly read-only. No encoding detection and
+    # no second codec: that is a larger decision than this episode
+    # should make, and refusing to write what Point cannot round-trip is
+    # the honest small answer.
+    decode_replacements = text.count("�")
+
+    # Normalise to LF for `content`. A lone \r is a classic-Mac ending;
+    # nothing in this project claims to support one, so it is left as a
+    # literal character rather than silently treated as a line break --
+    # which keeps the round trip exact for it too.
+    content = text.replace("\r\n", "\n")
+
+    return {
+        "content": content,
+        "line_ending": line_ending,
+        "crlf_count": crlf_count,
+        "lf_count": lf_count,
+        "bom": bom,
+        "trailing_newline": body.endswith(b"\n"),
+        "decode_replacements": decode_replacements,
+    }
+
+
+def encode_for_write(
+    content: str, *, line_ending: str = "lf", bom: bool = False, trailing_newline: bool = True
+) -> bytes:
+    r"""describe_bytes' inverse. `content` is LF-normalised going in.
+
+    Order matters and is the spec: expand \n to the target ending, apply
+    the trailing-newline flag, prepend the BOM, encode. Doing the
+    trailing-newline step after the expansion is what makes a CRLF
+    file's final newline \r\n rather than a bare \n.
+    """
+    if line_ending not in ("lf", "crlf"):
+        raise InvalidEventError(
+            f"line_ending must be 'lf' or 'crlf', not {line_ending!r}"
+        )
+
+    text = content.replace("\r\n", "\n")
+    if trailing_newline:
+        if not text.endswith("\n"):
+            text += "\n"
+    else:
+        text = text.rstrip("\n")
+
+    if line_ending == "crlf":
+        text = text.replace("\n", "\r\n")
+
+    data = text.encode("utf-8")
+    return b"\xef\xbb\xbf" + data if bom else data
+
+
+def _atomic_write(target: Path, data: bytes) -> None:
+    r"""Temp file in the SAME directory, then os.replace.
+
+    Same directory is mandatory: os.replace is only atomic within a
+    volume. The temp-plus-rename shape matches what config\state.go
+    already does on the Go side.
+
+    On any failure the temp is removed, so a failed save never leaves a
+    half-written target AND never leaves a stray tmp beside it -- a
+    leftover temp per save is the kind of defect that surfaces three
+    weeks later as a confused `git status`.
+
+    On Windows os.replace raises PermissionError when the target is open
+    by another process. That is a real case and the caller turns it into
+    `io_error`, not a traceback.
+    """
+    import tempfile
+
+    handle = tempfile.NamedTemporaryFile(
+        mode="wb", dir=str(target.parent), prefix=".point-write-", suffix=".tmp", delete=False
+    )
+    tmp = Path(handle.name)
+    try:
+        with handle:
+            handle.write(data)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp, target)
+    except BaseException:
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError:
+            _log.warning("could not remove temp file %s after a failed write", tmp)
+        raise
+
+
+def _is_writable(path: Path) -> bool:
+    """The read-only ATTRIBUTE, not a full ACL evaluation.
+
+    os.access(..., W_OK) does not evaluate Windows ACLs. That is enough
+    for F13's autosave rule 1 ("never autosave a read-only file")
+    without a probe write, and an ACL-denied write still surfaces as
+    io_error at save time. Do not document this as a guarantee.
+    """
+    try:
+        return os.access(path, os.W_OK)
+    except OSError:
+        return False
 
 
 def _looks_binary(path: Path) -> bool:
