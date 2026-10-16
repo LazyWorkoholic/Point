@@ -238,7 +238,11 @@ func (r *Root) statusBar(l layout.Layout) string {
 	case r.status != "":
 		left = th.Style(theme.TextSecondary).Render(r.status)
 	default:
-		left = th.Style(theme.TextDim).Render(r.bindingsHint(hintBudget))
+		text, keepRight := r.statusLeft(width, visibleWidth(right))
+		left = th.Style(theme.TextDim).Render(text)
+		if !keepRight {
+			right = ""
+		}
 	}
 
 	gap := width - visibleWidth(left) - visibleWidth(right)
@@ -248,6 +252,60 @@ func (r *Root) statusBar(l layout.Layout) string {
 		return padCells(truncateCells(left, width), width)
 	}
 	return left + strings.Repeat(" ", gap) + right
+}
+
+// statusLeft is the status bar's left half when nothing more urgent (the
+// leader hint, the connection banner, a transient status) has claimed it,
+// plus whether the right half still fits beside it.
+//
+// Both halves go through fitHints, so a narrow line drops whole parts and
+// says how many it dropped rather than cutting one in half.
+//
+// # Who yields to whom, and why that changed
+//
+// The left half used to be built against `width - right - 1`
+// unconditionally, so it dropped a part whenever the two together did not
+// fit -- and the right half is `connected · N task(s) · W×H`, thirty cells
+// of which the size is pure diagnostics.
+//
+// That trade is right for the BINDINGS HINT and wrong for a workspace's
+// SEGMENTS, and the difference is whether the information exists anywhere
+// else. fitHints' own doc makes the case for the hint: a dropped hint is
+// counted with "+N" and everything it hid is in the palette and in Help.
+// The Editor's segments are the only place the file's name, the caret's
+// line and column, the detected line ending and a read-only reason appear
+// at all -- there is no second surface to recover them from.
+//
+// Measured, at a 100-column terminal: width 98, right 30, so the segments
+// got 67 cells and a dirty file's line needed 77 -- a segment dropped with
+// 21 cells of the line spent on the size readout. Reported as "a segment
+// disappears when the column reaches double digits, and fullscreening
+// shows there was room all along": at 110 columns the budget was exactly
+// 77, so one more digit in `1:10` tipped it over.
+//
+// So a contributor's segments now take the line and the right half yields
+// -- but only when they would otherwise LOSE a segment, which is what
+// keeps the readout on screen in the ordinary case. The bindings-hint path
+// keeps F1's rule exactly: the right half stays unless the hint would be
+// squeezed below hintFloor.
+func (r *Root) statusLeft(width, rightW int) (string, bool) {
+	budget := width - rightW - 1
+
+	if sc, ok := r.current().(StatusContributor); ok {
+		if segs := sc.StatusSegments(); len(segs) > 0 {
+			beside, keptBeside := fitParts(segs, budget)
+			whole, keptWhole := fitParts(segs, width)
+			if keptBeside >= keptWhole {
+				return beside, true
+			}
+			return whole, false
+		}
+	}
+
+	if budget < hintFloor {
+		return r.bindingsHint(width), false
+	}
+	return r.bindingsHint(budget), true
 }
 
 // hintFloor is the narrowest left half worth keeping the right half for.
@@ -269,10 +327,38 @@ const hintGap = "   "
 // than silent: the user can see the bar is holding something back and open
 // the palette or Help, both of which list everything.
 func fitHints(parts []string, width int) string {
+	out, _ := fitParts(parts, width)
+	return out
+}
+
+// fitParts is fitHints, and also says how many parts it kept. The count is
+// what lets statusLeft tell "these fit beside the right half" from "these
+// only fit if the right half goes".
+func fitParts(parts []string, width int) (string, int) {
 	if width < 1 || len(parts) == 0 {
-		return ""
+		return "", 0
 	}
 	gap := runewidth.StringWidth(hintGap)
+
+	// The whole set first, measured exactly.
+	//
+	// Not an optimisation -- it is a correctness fix. The reserve below
+	// holds room for the "+N" suffix while deciding each part, and at a
+	// width that the full set fits EXACTLY that reservation drops parts
+	// which did not need to go. Measured: three parts totalling 27 cells
+	// at width 27 rendered "aaaaaaaaaa   +2", dropping two parts to make
+	// room for a suffix that was then only needed because they were
+	// dropped. Checking the whole set up front cannot be circular.
+	total := 0
+	for i, p := range parts {
+		if i > 0 {
+			total += gap
+		}
+		total += runewidth.StringWidth(p)
+	}
+	if total <= width {
+		return strings.Join(parts, hintGap), len(parts)
+	}
 
 	kept, used := 0, 0
 	for _, p := range parts {
@@ -295,13 +381,13 @@ func fitHints(parts []string, width int) string {
 		kept++
 	}
 	if kept == 0 {
-		return ""
+		return "", 0
 	}
 	out := strings.Join(parts[:kept], hintGap)
 	if dropped := len(parts) - kept; dropped > 0 {
 		out += hintGap + fmt.Sprintf("+%d", dropped)
 	}
-	return out
+	return out, kept
 }
 
 func (r *Root) bindingsHint(width int) string {

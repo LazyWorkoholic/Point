@@ -231,11 +231,11 @@ func newSwitcherOverlay(root *Root) *workspaceSwitcher {
 	for _, s := range rows {
 		// The readout ALONE, with no leader key in front of it.
 		//
-		// rowWidths caps the note column at 24 cells and at a third of the
-		// row, so "ctrl+w e · idle 59m59s of 59m59s" cannot fit at any
-		// width this popup will ever be given, and prefixing it would cost
-		// the thing the column exists for. Bindings already have a home:
-		// the palette and Help both render them from the same registry via
+		// The note column is the readout's and nothing else's: even at
+		// the width this popup now asks for, "ctrl+w e · idle 1m00s of
+		// 1m00s · pinned" does not fit, and prefixing it would cost the
+		// thing the column exists for. Bindings already have a home: the
+		// palette and Help both render them from the same registry via
 		// bindingLabel.
 		notes[string(s.Def.ID)] = s.Label()
 		icons[string(s.Def.ID)] = s
@@ -248,6 +248,14 @@ func newSwitcherOverlay(root *Root) *workspaceSwitcher {
 		// LAYOUT.md's "task tray 50×12" as the refusal FLOOR; the real
 		// width comes from PreferredSize below.
 		MinW: 50, MinH: 12,
+		// The readout is this popup's content, so it gets a column wide
+		// enough for its longest form -- `idle 1m00s of 1m00s · pinned`,
+		// 28 cells -- rather than the default third-of-the-row cap of
+		// 24, which truncated the pinned label away. switcherWidth is
+		// sized so a third of the row can actually supply it; below that
+		// width rowWidths clamps back down and the readout elides, which
+		// is the pre-existing narrow-width behaviour and unchanged.
+		NoteW: switcherNoteW,
 		// Decor, not SetBinding/SetDescription, and this is the whole
 		// reason the readout was invisible on first verification.
 		// renderRow draws exactly two columns — the title and the NOTE —
@@ -292,6 +300,18 @@ func newSwitcherOverlay(root *Root) *workspaceSwitcher {
 // panel that lost its contents. A couple of cells of slack above 70 so a
 // longer timeout than an hour does not immediately start eliding again.
 const switcherWidth = 72
+
+// switcherNoteW is what the idle readout needs: `idle 1m00s of 1m00s ·
+// pinned` is 28 cells, against rowWidths' default ceiling of 24 -- which
+// is why the pinned label was truncated away entirely and the row read
+// `idle 1m00s of 1m00s …`.
+//
+// switcherWidth above is unchanged at 72. With rowWidths clamping a
+// declared NoteW against the NAME column rather than against a third of
+// the row, 72 already supplies all 28 cells; narrower than that,
+// PreferredSize hands back what there is and the readout elides as it
+// always did.
+const switcherNoteW = 28
 
 // workspaceSwitcher is the switcher's preferred-vs-minimum wrapper.
 //

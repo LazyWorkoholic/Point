@@ -50,6 +50,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
+	"github.com/lazyworkoholic/point/frontend/internal/actions"
 	"github.com/lazyworkoholic/point/frontend/internal/config"
 	"github.com/lazyworkoholic/point/frontend/internal/protocol"
 )
@@ -63,6 +64,44 @@ import (
 // it only ever runs while at least one loaded workspace is both inactive and
 // unloadable, which with a single workspace loaded is never.
 const idleInterval = time.Second
+
+// graceSeconds formats the grace warning's countdown, and ONLY that.
+//
+//	Chat unloads in 29s — ctrl+w w to keep it
+//
+// # Why this is not shortDuration
+//
+// shortDuration is the paired formatter: it renders both halves of the
+// switcher's `idle X of Y`, so its output has to have ONE shape at every
+// value. It had an under-a-minute special case that gave it two, which
+// produced `idle 58s of 1m00s` — one line in two formats — and removing
+// that branch is what made the readout correct. It stays unconditional.
+//
+// This sentence has no pair. It is a countdown to an imminent event,
+// bounded by idleGrace below, and `in 29s` is how a countdown that short
+// reads. Routing it through the paired formatter spelled it `in 0m29s`,
+// which was a side effect of fixing the readout rather than anything
+// anybody wanted — and it contradicted gate_f13a.ps1's own
+// already-verified Step 10b text.
+//
+// So: its own formatter at its own call site, rather than a conditional
+// put back inside shortDuration. The conditional is what caused the bug;
+// a second function for a second purpose is not the same thing as a
+// special case inside one.
+//
+// # Seconds only, by construction
+//
+// `remaining` is at most idleGrace, which is well under a minute, so
+// there are never minutes to show. That is an assumption rather than a
+// guarantee, so TestGraceSecondsAssumesASubMinuteWindow asserts it: if
+// idleGrace is ever raised past a minute, that test fails and names this
+// function rather than letting it quietly print `in 90s`.
+func graceSeconds(d time.Duration) string {
+	if d < 0 {
+		d = 0
+	}
+	return fmt.Sprintf("%ds", int(d/time.Second))
+}
 
 // idleGrace is how long before an unload the warning appears. F12: "a grace
 // warning at ~30s — a toast: `Editor unloads in 30s — any key to keep`".
@@ -96,6 +135,19 @@ type idleState struct {
 	// its timer resets, which is what makes "any key to keep" able to
 	// warn again later.
 	warned map[WorkspaceID]bool
+
+	// dirtyNoticed records which workspaces have already been reported
+	// as pinned by unsaved work (F13), for the CURRENT idle period.
+	//
+	// A separate map from warned, because the two are cleared by
+	// different things and were once cleared by wildly different
+	// frequencies -- see the history in walkIdle's dirty branch. They are
+	// now reset together by resetIdle, which is what makes "the current
+	// idle period" the actual scope rather than the intended one: this
+	// used to be cleared only when a workspace stopped being dirty, so a
+	// workspace that stayed dirty reported itself once and then never
+	// again, however many times it was reactivated and re-idled.
+	dirtyNoticed map[WorkspaceID]bool
 }
 
 // ---------------------------------------------------------------------------
@@ -138,8 +190,7 @@ func (r *Root) switchWorkspace(id WorkspaceID) tea.Cmd {
 
 	r.active = id
 	r.vacant = nil // the vacant screen was for a different id
-	delete(r.lastActive, id)
-	delete(r.idle.warned, id)
+	r.resetIdle(id)
 	r.recompute()
 	cmds = append(cmds, r.pushDiagnostics(), r.persistWorkspaceState())
 
@@ -275,12 +326,36 @@ func (r *Root) loadWorkspace(def WorkspaceDef) (tea.Cmd, error) {
 	return ws.Init(), nil
 }
 
+// resetIdle starts a workspace's idle accounting over: the clock, and
+// BOTH say-once latches that hang off it.
+//
+// There is one function because there were three sites and two latches,
+// and the second latch was added to only one of them. idle.warned was
+// cleared by switchWorkspace, touchActive and unloadWorkspace;
+// idle.dirtyNoticed was cleared by exactly one line in walkIdle, on the
+// branch that runs when a workspace is NOT dirty. So for a workspace that
+// stayed dirty the latch was permanent for the whole of its loaded life:
+// the notice fired once, ever, and reactivating the workspace and
+// re-idling it never re-armed it.
+//
+// Reported as "background a dirty Editor, see the notice, switch back,
+// background it again -- the notice does not fire the second time". The
+// latch was scoped per-dirty-run when it should be scoped per-idle-period,
+// and the trigger for a new idle period is exactly the trigger for
+// resetting the clock. Hence one function rather than a third `delete`
+// added to three places, which is how the two drifted apart in the first
+// place.
+func (r *Root) resetIdle(id WorkspaceID) {
+	delete(r.lastActive, id)
+	delete(r.idle.warned, id)
+	delete(r.idle.dirtyNoticed, id)
+}
+
 // touchActive resets the active workspace's idle accounting. Called from
 // every key, because "the active workspace never unloads" has to be true of
 // a workspace you are typing in even if some other path forgot to say so.
 func (r *Root) touchActive() {
-	delete(r.lastActive, r.active)
-	delete(r.idle.warned, r.active)
+	r.resetIdle(r.active)
 }
 
 // ---------------------------------------------------------------------------
@@ -305,6 +380,15 @@ func (r *Root) unloadWorkspace(id WorkspaceID) (tea.Cmd, bool) {
 	if f, ok := ws.(DraftFlusher); ok {
 		f.FlushDraft()
 	}
+	// F13b: and the backend-side equivalent. A file lock outlives the
+	// workspace that took it -- the only thing that would eventually free
+	// it is B7's 60-second staleness timeout, so an unload without this
+	// makes Point wait out its OWN lock on the next open. Synchronous,
+	// here, for the same reason FlushDraft is: the workspace is about to
+	// stop receiving messages, so there is no later tick to do it on.
+	if lh, ok := ws.(LockHolder); ok {
+		lh.ReleaseLocks()
+	}
 
 	blob, err := ws.Suspend()
 	if err != nil {
@@ -324,8 +408,7 @@ func (r *Root) unloadWorkspace(id WorkspaceID) (tea.Cmd, bool) {
 	}
 
 	delete(r.workspaces, id)
-	delete(r.lastActive, id)
-	delete(r.idle.warned, id)
+	r.resetIdle(id)
 	r.log.Info("workspace unloaded", "workspace", id, "blob_bytes", len(blob))
 
 	var cmds []tea.Cmd
@@ -502,6 +585,54 @@ func (r *Root) walkIdle(now time.Time) tea.Cmd {
 			r.lastActive[id] = now
 			continue
 		}
+		// F13: an idle unload must never be the thing that discards an
+		// unsaved buffer.
+		//
+		// requestUnload (leader → u) has asked DirtyBuffers since F12 and
+		// confirms before unloading; this sweep never did, because until
+		// F13 nothing in the app could BE dirty — chat's draft is flushed
+		// to state.json on the way out, so a Chat unload loses nothing
+		// whether or not anyone is watching. An editor buffer is
+		// different: it is the only unsaved thing in Point that has no
+		// other copy, and unloading it is silent by this sweep's own
+		// design ("Expect: Chat unloads silently").
+		//
+		// So a dirty workspace is skipped rather than confirmed. A modal
+		// about a view you are not looking at, fired by a timer you did
+		// not start, is the worst possible place to ask a question — and
+		// the manual path already asks it properly. The workspace simply
+		// stays loaded, which is also what the switcher's readout then
+		// says, so the state is visible rather than inferred.
+		if db, ok := r.workspaces[id].(DirtyBuffers); ok && db.DirtyBufferCount() > 0 {
+			// Latched on its OWN map, not on idle.warned.
+			//
+			// It used idle.warned as a say-this-once flag, and
+			// keepWarnedAlive DELETED every entry in that map on every
+			// keypress -- it was the "any key to keep" rescue. So the
+			// notice re-armed on every keystroke and re-fired on the
+			// next tick, which is how one message ended up repeating
+			// forever while typing in another workspace. Two
+			// mechanisms, one map, and the one that cleared it ran a
+			// thousand times more often.
+			//
+			// That rescue is gone now (see below), and these are still
+			// two separate latches: whatever clears `warned` next must
+			// not silently re-arm this one.
+			//
+			// This notice is also deliberately not a countdown: there is
+			// nothing to count down to while the workspace is pinned,
+			// and a countdown would be a promise about an unload that
+			// is not going to happen.
+			if !r.idle.dirtyNoticed[id] {
+				r.idle.dirtyNoticed[id] = true
+				warns = append(warns, fmt.Sprintf(
+					"%s stays loaded — %d file(s) have unsaved changes",
+					def.Name, db.DirtyBufferCount()))
+			}
+			continue
+		}
+		delete(r.idle.dirtyNoticed, id)
+
 		idle := now.Sub(since)
 		if idle >= timeout {
 			due = append(due, id)
@@ -509,8 +640,8 @@ func (r *Root) walkIdle(now time.Time) tea.Cmd {
 		}
 		if remaining := timeout - idle; remaining <= idleGrace && !r.idle.warned[id] {
 			r.idle.warned[id] = true
-			warns = append(warns, fmt.Sprintf("%s unloads in %s — any key to keep",
-				def.Name, shortDuration(remaining)))
+			warns = append(warns, fmt.Sprintf("%s unloads in %s — %s to keep it",
+				def.Name, graceSeconds(remaining), r.keepHint()))
 		}
 	}
 
@@ -547,35 +678,52 @@ func (r *Root) walkIdle(now time.Time) tea.Cmd {
 	return tea.Batch(cmds...)
 }
 
-// keepWarnedAlive is "any keypress resets that workspace's timer".
+// keepHint is what the grace warning tells the user to do.
 //
-// It resets the timers of the workspaces currently INSIDE their grace window
-// — the ones that just told the user a key would keep them — and nothing
-// else. A keypress is not evidence of interest in a workspace that has been
-// sitting idle for four seconds of a five-minute timeout, so resetting every
-// loaded workspace on every key would quietly make the whole mechanism
-// unreachable: no workspace would ever unload while the user typed anywhere
-// in the app, which is most of the time they are using it.
-func (r *Root) keepWarnedAlive() tea.Cmd {
-	if len(r.idle.warned) == 0 {
-		return nil
+// It names the switcher's own binding rather than a literal, so the
+// sentence cannot drift from the registry the way a hardcoded one would
+// — the same rule bindingsHint already follows.
+func (r *Root) keepHint() string {
+	if a, ok := r.actions.ByID("workspace.switcher"); ok && a.Leader != "" {
+		return actions.Leader + " " + a.Leader
 	}
-	now := r.now()
-	kept := make([]string, 0, len(r.idle.warned))
-	for id := range r.idle.warned {
-		if _, loaded := r.workspaces[id]; !loaded {
-			delete(r.idle.warned, id)
-			continue
-		}
-		r.lastActive[id] = now
-		delete(r.idle.warned, id)
-		kept = append(kept, r.defByID[id].Name)
-	}
-	if len(kept) == 0 {
-		return nil
-	}
-	return r.expiringStatus(strings.Join(kept, ", ")+" kept loaded", noticeLinger)
+	return "switching to it"
 }
+
+// A keystroke somewhere else is NOT a reason to keep a workspace loaded,
+// and this is where the function that thought it was used to be.
+//
+// # What it did
+//
+// keepWarnedAlive reset the idle clock of every workspace inside its grace
+// window, from Root.Update's KeyMsg case — so from any key, in any
+// workspace. F12 built it that way deliberately and argued the scoping was
+// already narrow: only the WARNED workspaces, not every loaded one, "which
+// would make the whole mechanism unreachable while the user types anywhere
+// in the app".
+//
+// # Why that argument proves too little
+//
+// It makes the mechanism unreachable anyway, just later. Once a
+// backgrounded workspace enters its grace window, one keystroke anywhere
+// resets it to a FULL timeout — so while anybody is typing, the warned
+// workspace cycles idle → warn → rescued → idle → warn → rescued and can
+// never unload. Reproduced: open the Editor, visit Chat, come back, wait
+// for "Chat unloads in 29s", then keep typing in the Editor. Chat's
+// countdown returns to full, forever.
+//
+// A keypress in the Editor is not evidence of interest in Chat at 29
+// seconds remaining for exactly the reason it is not at four seconds. The
+// honest scope is activity in the workspace BEING EVALUATED — and a
+// backgrounded workspace receives no keys at all, so there is nothing left
+// for a key to rescue. That is not a gap: switching to a workspace already
+// clears its clock (switchWorkspace's own delete of lastActive), which is
+// the only act that actually evidences interest, and it is what the
+// warning now names.
+//
+// touchActive stays, and is a different thing: it keeps the ACTIVE
+// workspace's accounting clear, which is "the active workspace never
+// unloads" being true of the one you are typing in.
 
 // ---------------------------------------------------------------------------
 // Persistence

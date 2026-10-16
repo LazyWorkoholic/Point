@@ -400,6 +400,17 @@ func doQuit(root *Root) {
 	if f, ok := root.current().(DraftFlusher); ok {
 		f.FlushDraft()
 	}
+	// F13b: every LOADED workspace, not just the active one -- a lock is
+	// held by whichever workspace took it, and the Editor can be loaded
+	// while Chat is on screen. The release is written to the backend's
+	// stdin now; main.go's deferred client.Close() closes that stdin,
+	// which is the shutdown main.py drains in-flight handlers for, so
+	// these are processed rather than racing the exit.
+	for _, ws := range root.workspaces {
+		if lh, ok := ws.(LockHolder); ok {
+			lh.ReleaseLocks()
+		}
+	}
 	// F12's suspended state has exactly the same problem for exactly the
 	// same reason: it is written debounced, and once bubbletea has
 	// tea.Quit the pending Tick is never delivered. Without this, quitting

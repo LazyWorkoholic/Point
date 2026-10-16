@@ -98,6 +98,26 @@ type State struct {
 	// value, only override state this process actually set itself).
 	BehaviourOverrides map[string]any `json:"behaviour_overrides,omitempty"`
 
+	// Holder is F13b's lock identity: the WHOLE composed
+	// `<username>@<full-id>` string, generated ONCE and persisted here as
+	// one opaque value, never regenerated on relaunch.
+	//
+	// B32's Decision 4 settled the shape and the reason, and the reason
+	// is not cosmetic. `file_locks.holder` comparison is whole-string
+	// equality, and a username read live is not a stable input -- it
+	// changes with a renamed Windows account, a different signed-in user
+	// on the same profile, or anything else that alters USERNAME. Any of
+	// those would silently make Point a DIFFERENT holder and leave it
+	// unable to re-acquire its own lock after a restart. Composing once
+	// and persisting the result makes the holder as stable as the id
+	// inside it. The backend neither generates nor validates it; it only
+	// compares.
+	//
+	// Owned by main.go, which generates it before chat's copy of this
+	// State is taken -- see saveStateTo, and the keep-if-zero clause that
+	// stops chat's next draft save from erasing it.
+	Holder string `json:"holder,omitempty"`
+
 	// WorkspaceState is F12's suspended state, one opaque blob per
 	// workspace id, and "opaque" is the contract rather than laziness.
 	//
@@ -247,16 +267,37 @@ func saveWorkspaceStateTo(path, lastWorkspace string, blobs map[string]json.RawM
 // This supersedes chat.go's note that LastWorkspace "round-trips" through
 // the workspace's copy. It no longer does, and it must not — a round trip
 // IS a stale copy, which is the thing this rule exists to stop.
+//
+// # F13b added a THIRD field to the keep-if-zero clause, and had to
+//
+// Holder is written exactly once, by main.go, on the launch that first
+// generates it. chat.Workspace writes the WHOLE struct from its startup
+// snapshot, and that snapshot is taken in main.go at line `chatState :=
+// state` — BEFORE the holder exists on a first run. So without the clause
+// below, the very next keystroke in the query input would serialise a
+// State whose Holder is "" over the one just written, and Point would
+// generate a brand new identity on every launch: a lock taken in one
+// session could never be re-acquired or released by the next, and every
+// reopen would have to wait out B7's 60-second staleness timeout against
+// its own abandoned row.
+//
+// Clearing it in main.go's chatState copy (the way LastWorkspace and
+// WorkspaceState are cleared) is what makes chat's writes take this
+// branch, and this clause is what makes that branch preserve it. Both
+// halves are required; either alone still loses the value.
 func saveStateTo(path string, st State) error {
 	st.Version = StateVersion
 
-	if st.LastWorkspace == "" || st.WorkspaceState == nil {
+	if st.LastWorkspace == "" || st.WorkspaceState == nil || st.Holder == "" {
 		if cur, err := loadStateFrom(path); err == nil {
 			if st.LastWorkspace == "" {
 				st.LastWorkspace = cur.LastWorkspace
 			}
 			if st.WorkspaceState == nil {
 				st.WorkspaceState = cur.WorkspaceState
+			}
+			if st.Holder == "" {
+				st.Holder = cur.Holder
 			}
 		}
 	}

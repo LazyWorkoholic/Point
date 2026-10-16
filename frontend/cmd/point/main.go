@@ -20,6 +20,7 @@ import (
 	"github.com/lazyworkoholic/point/frontend/internal/app"
 	"github.com/lazyworkoholic/point/frontend/internal/chat"
 	"github.com/lazyworkoholic/point/frontend/internal/config"
+	"github.com/lazyworkoholic/point/frontend/internal/editor"
 	"github.com/lazyworkoholic/point/frontend/internal/protocol"
 	"github.com/lazyworkoholic/point/frontend/internal/theme"
 )
@@ -132,6 +133,33 @@ func run() error {
 	// closure runs on the first switch to the Chat workspace, which is
 	// after the startup chooser is answered, and never at startup. Point
 	// now boots with no workspace in memory at all.
+	// F13b / A2: the lock holder, generated ONCE and persisted, before
+	// chatState is taken below.
+	//
+	// The order here is the whole of the fix for the trap F13a's handoff
+	// recorded. chat.Workspace serialises the WHOLE State from the
+	// snapshot it is handed, so a holder generated AFTER that line would
+	// be erased by chat's next debounced draft save -- on the very launch
+	// that generated it -- and Point would mint a new identity every time
+	// it started. Generated here, the snapshot carries it; cleared from
+	// the snapshot below, chat's writes take saveStateTo's
+	// keep-what-is-on-disk branch instead. Both halves are required.
+	//
+	// Written through SaveState rather than left in memory because the
+	// value only does its job across restarts: an identity regenerated
+	// per launch cannot release a lock its predecessor took.
+	if state.Holder == "" {
+		state.Holder = config.NewHolder()
+		if err := config.SaveState(state); err != nil {
+			// Not fatal. A holder that failed to persist still works for
+			// this session -- the lock is taken and released by the same
+			// in-memory value -- and the only cost is that a lock left
+			// behind by a crash has to wait out B7's 60-second staleness
+			// timeout instead of being re-acquired by name.
+			log.Warn("persisting the editor lock holder", "err", err)
+		}
+	}
+
 	chatState := state
 	// The two fields app.Root owns are cleared from the copy chat gets, and
 	// this is load-bearing rather than tidy. Both writers serialise the
@@ -143,6 +171,10 @@ func run() error {
 	// config\state.go's saveStateTo for the whole rule.
 	chatState.LastWorkspace = ""
 	chatState.WorkspaceState = nil
+	// F13b: and the holder, for exactly the same reason -- it is owned
+	// here, not by chat, and a stale copy of it in chat's snapshot is how
+	// it gets erased. See config\state.go's saveStateTo.
+	chatState.Holder = ""
 
 	newChat := func() app.Workspace {
 		return chat.New(chat.Options{
@@ -159,6 +191,31 @@ func run() error {
 			// back, debounced, as the query input's buffer changes — see
 			// draft.go.
 			State: chatState,
+		})
+	}
+
+	// F13: the same factory shape, for the same reason — editor.Workspace's
+	// Update returns app.Workspace, so editor imports app and app cannot
+	// import editor back.
+	//
+	// It still takes no State, and there is still no third writer of
+	// state.json. F13b needs the holder key out of that file, but it
+	// RECEIVES the composed value rather than reading or writing the file
+	// itself: main.go generates and persists it above, which keeps the
+	// two-writer rule config\state.go's saveStateTo arbitrates exactly as
+	// it was.
+	newEditor := func() app.Workspace {
+		return editor.New(editor.Options{
+			Theme:  th,
+			Client: client,
+			Log:    log,
+			Holder: state.Holder,
+			// D90's two keys. Resolved here rather than inside the
+			// editor so the workspace takes values, not a Config -- the
+			// same shape chat's Scrollback/StreamTimeout/HistoryBatch
+			// already use.
+			Autosave:      cfg.AutosaveMode(),
+			AutosaveDelay: cfg.AutosaveDelay(),
 		})
 	}
 
@@ -179,8 +236,24 @@ func run() error {
 			New: newChat,
 			// layout.MinWidth/MinHeight, named here rather than
 			// inherited silently: the registry is where a workspace's
-			// minimum belongs now, and the Editor's will be larger.
+			// minimum belongs now, and the Editor's is larger.
 			MinSize: app.Size{W: 50, H: 12},
+		}, {
+			ID:   app.WorkspaceEditor,
+			Name: "Editor",
+			// `e` is free in the registry — leader → e, which is what
+			// F13's own manual verification asks for. Unlike Chat's,
+			// this one could be given its spec'd key.
+			LeaderKey: "e",
+			New:       newEditor,
+			// Larger than layout's floor, as WorkspaceDef.MinSize's own
+			// doc predicted: a gutter and a text area beside a file tree
+			// do not fit in fifty columns, and sixteen rows is the point
+			// at which the tab strip, the 3-row Terminal rect Compute
+			// always reserves for the Editor, and a usable number of code
+			// lines all still exist. Refused with the ACTUAL numbers by
+			// activeTooSmall, which is TEMPLATES.md's capability contract.
+			MinSize: app.Size{W: 70, H: 16},
 		}},
 	})
 	if err != nil {

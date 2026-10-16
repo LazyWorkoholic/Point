@@ -76,12 +76,41 @@ func (r *Root) selectBackground(mode string) tea.Cmd {
 	return func() tea.Msg { return UIOverrideSetMsg{Override: config.UIOverride{Background: mode}} }
 }
 
-// propagateTheme pushes r.theme into the active workspace — Root's own
-// chrome (header, status bar, this very popup) reads r.theme directly on
-// every render and needs no help, but a workspace holds its OWN copy (every
-// Workspace.View call reads it, never one threaded in from outside) and
-// would not otherwise ever learn a theme changed. See app.ThemeAware's doc.
+// propagateTheme pushes r.theme into EVERY LOADED workspace.
+//
+// Root's own chrome (header, status bar, this very popup) reads r.theme
+// directly on every render and needs no help. A workspace holds its OWN
+// copy -- every Workspace.View call reads it, never one threaded in from
+// outside -- and would not otherwise ever learn a theme changed. That much
+// was always true; see app.ThemeAware's doc.
+//
+// What was wrong is that this pushed to r.current() ALONE, so a workspace
+// that was loaded but not active never heard about it, and the only other
+// caller of SetTheme is loadWorkspace -- i.e. construction. Switching to a
+// workspace does not re-theme it, because it is already loaded.
+//
+// Reproduced: theme the Editor butterfly, switch to Chat, theme green from
+// there, switch back. Root's header, title, connection word and status bar
+// are green (they read r.theme live); the Editor's box borders, syntax
+// colours, File Tree, Terminal and Task card are all still butterfly. The
+// same in reverse, because the bug is in WHO gets told, not in which
+// workspace.
+//
+// Nothing here caches a resolved lipgloss.Style -- the Editor builds its
+// border and content styles per render from w.theme, and its highlight
+// cache holds theme.Role values rather than styles precisely so a palette
+// change cannot be baked into it. The copy was simply never refreshed.
+//
+// The vacant diagnostics screen is handled through r.current(): it is not
+// in r.workspaces (it has no id in the map) but it is what is on screen
+// when nothing is loaded, and it is ThemeAware. Re-setting the active
+// workspace a second time is idempotent.
 func (r *Root) propagateTheme() {
+	for _, ws := range r.workspaces {
+		if ta, ok := ws.(ThemeAware); ok {
+			ta.SetTheme(r.theme)
+		}
+	}
 	if ta, ok := r.current().(ThemeAware); ok {
 		ta.SetTheme(r.theme)
 	}

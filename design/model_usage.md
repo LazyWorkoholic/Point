@@ -286,7 +286,51 @@ SESSION  EPISODE                          MODEL         WHY
                                                         the lock/heartbeat ordering,
                                                         or with a file held open by
                                                         another Windows process.
-18       F13 editor core                  Opus high     largest, subtlest — CRLF,
+18a      F13a editor core: editing       Opus high     SPENT. Seven rounds: one
+         half (F13, SPLIT)                              build plus six of
+                                                        verification repairs, all in
+                                                        one session per the
+                                                        episode-boundary rule. Opus
+                                                        was the right call and the
+                                                        reason is in the rounds:
+                                                        three of them traced several
+                                                        separately-reported symptoms
+                                                        to ONE cause (a bare-modifier
+                                                        NUL KeyMsg; a note rendered
+                                                        only by the empty state; a
+                                                        status line with no expiry),
+                                                        and two found bugs in this
+                                                        episode's OWN earlier fixes.
+                                                        That is the "two wrong
+                                                        hypotheses means escalate"
+                                                        rule paying off in reverse --
+                                                        the unifying diagnoses are
+                                                        what kept it from being
+                                                        eighteen separate patches.
+                                                        Measurement, not reasoning,
+                                                        settled four of them (caret
+                                                        colour from emitted bytes,
+                                                        the 6ms paste gate, fitHints'
+                                                        drop boundary, rowWidths(86)).
+18b      F13b editor save + locks        Opus high     the remaining Done-whens: 2,
+         (F13, SPLIT)                                   7, 8, 9, 10, 11, 12. Still
+                                                        Opus: every one of them is a
+                                                        correctness claim about
+                                                        bytes on disk or a lock
+                                                        another process holds, and
+                                                        the one field that can
+                                                        destroy someone else's work
+                                                        (overwrite: true) lives
+                                                        here. B32 did the backend
+                                                        half and documented its nine
+                                                        ordered steps, which removes
+                                                        the design risk but not the
+                                                        care.
+                                                        ORIGINAL F13 ESTIMATE AND
+                                                        NOTE FOLLOW, unchanged --
+                                                        they describe the pass that
+                                                        stopped before writing code:
+(18)     (F13, as first planned)         Opus high     largest, subtlest — CRLF,
                                                         undo grouping, wide chars
                                                         -- STOPPED BEFORE WRITING
                                                         CODE on its own "settle this
@@ -320,12 +364,12 @@ SESSION  EPISODE                          MODEL         WHY
                                                         half was spun out as 17c
                                                         (B32) rather than answered
                                                         with a Go-side write --
-                                                        the same B24-before-18b
+                                                        the same B24-before-18d
                                                         discipline. This Opus high
                                                         estimate is for the EPISODE
                                                         and was not spent on the
                                                         pass that stopped.
-18b      F9b diff card                   Opus high     was Opus MEDIUM as part of
+18d      F9b diff card                   Opus high     was Opus MEDIUM as part of
                                                        F9; raised. The apply path is
                                                        destructive, and its three
                                                        real hazards are each ones
@@ -378,5 +422,15 @@ compound the error. Escalate, or stop theorising and instrument -- see
 WORKFLOW.md's rule 7.
 
 Doc-only work is always Sonnet. Writing completed/ files, parking-lot entries, updating an INDEX — Sonnet high is more than enough, and those are frequent.
+
+**A split episode gets one row per half, not one row with two estimates.** F13
+is the worked example: `18a` spent Opus high on F13a and `18b` carries its own
+Opus high for F13b, because the two halves have different risk (editing
+correctness versus bytes on disk and another process's lock) and the spend on
+one says nothing about the other. The row for the original combined episode is
+kept below them, labelled `(18)` because the plain number is retired, rather
+than deleted — it records the pass that stopped before
+writing code, which is itself a data point about estimating. See WORKFLOW.md's
+"Splitting an episode".
 
 If your quota gets tight mid-project, the four to protect at Opus are B6, B8, F1+F2, and F13. Everything else has a spec detailed enough that Sonnet plus your verification gate will catch the difference.

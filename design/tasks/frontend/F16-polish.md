@@ -7,6 +7,22 @@
 The difference between "it works" and "it feels finished". Everything here is
 small; together they are what a viewer actually notices.
 
+**This episode is `[P2]`, and depends on `all`** — which is already the
+"only if time remains" bucket: nothing in `design/tasks/` may grow a
+dependency on anything here, and CLAUDE.md's phase rule is that P2 is
+touched only after every P1 item is done and verified. Items carried
+forward into it from an earlier episode's verification are recorded with
+the reasoning they were logged with, and with the episode that deferred
+them named, so picking one up does not mean rediscovering why it was not
+done at the time.
+
+This is NOT the parking lot. `project_idea.md` and the `INDEX.md` files
+carry `[PARK]` entries, which are deferred *by design* — the hook exists
+and the feature deliberately does not, and CLAUDE.md is explicit that a
+parking-lot item is not work and must not be built because it seems
+adjacent. Everything here is wanted; it is a question of time, not of a
+decision still to be made.
+
 ## Build
 
 ### Header — carried forward from F1
@@ -190,6 +206,99 @@ instruction not to fix it in this entry either. A real fix needs
 `liveFooter` to wrap the error text across multiple lines (or truncate
 with a visible ellipsis) rather than pass a long single-purpose line
 through a single-line padder — this episode's job when it gets here.
+
+### Horizontal scrolling in the Code File box — carried forward from F13 (18a)
+
+Lines wider than the text area cannot be read past the right edge by any
+deliberate gesture.
+
+The mechanism exists and is exercised: `doc.left` is a horizontal scroll
+offset in display cells, `ensureVisible` moves it to keep the caret in
+view, and `sliceCells` renders from it — including the case of a
+double-width rune straddling the left edge, which is padded rather than
+half-drawn. So a long line IS reachable today by walking the caret to it
+with `end` or the arrow keys.
+
+What is missing is scrolling as its own action, independent of the caret:
+
+- a horizontal wheel / trackpad gesture (`tea.MouseButtonWheelLeft` and
+  `WheelRight`, which bubbletea decodes on Windows via `MOUSE_HWHEELED`
+  and `frontend\internal\editor\mouse.go` currently ignores);
+- a key pair for it;
+- some indication that there is content past the edge, so a truncated
+  line does not read as the file's real content.
+
+**The one trap worth knowing before starting.** `doc.reveal` separates
+"the caret asked to be shown" from "the user scrolled" — it is what made
+the vertical wheel work after `ensureVisible` was undoing every scroll on
+the frame it happened (18a's second verification round: `top after
+wheel=3, top after View=0`, five times running). A horizontal scroll must
+set `left` WITHOUT setting `reveal`, for exactly the same reason.
+
+Not urgent: code in this repo is mostly inside 100 columns, and the Code
+File box is 85 columns wide at 120×30 with the right pane open.
+
+### Creating files, and opening another directory as the project root — carried forward from F13 (18a)
+
+Two VS-Code-shaped affordances the Editor has no route to:
+
+- **create a new file** from inside the Editor (and the directory to put
+  it in);
+- **open a different directory as the project root**, rather than the one
+  Point was launched from.
+
+Both are deliberately absent rather than overlooked, and the reasons are
+worth keeping with the request:
+
+- The Editor resolves exactly one project, once, from the working
+  directory (`ProjectResolve{path: cwd}`), because it has no session and
+  therefore no `project_id` of its own. Changing roots means deciding what
+  happens to open buffers, the file index, and any lock held under the old
+  root.
+- Creating a file is a **write**, and the backend already supports it
+  precisely: `WriteProjectFile` with `expected_mtime: null` means "I
+  expect no file here", which B32 chose specifically so that creating a
+  file and clobbering a concurrent change could never be the same
+  request. It refuses `no_parent_dir` rather than creating directories.
+  So the backend half is built and settled; what is missing is the
+  frontend's — a name prompt, a target directory, and the refusal UI.
+- F13b (18b) owns the save path, the lock lifecycle and the refusal UIs.
+  Creating a file sits naturally **after** that, reusing them, and would
+  be disproportionate before it.
+
+So: not before 18b, and not part of it either.
+
+### Tab strip: shrink tabs to fit rather than hiding all but the active one — carried forward from F13 (18a)
+
+Confirmed current behaviour, and not a regression: once the open tabs no
+longer fit the Code File box's content width, the strip scrolls
+horizontally with `‹` and `›` markers and keeps the ACTIVE tab visible —
+so with enough files open you see one filename and two arrows. Below
+`tabsCollapseWidth` (44 cells) it collapses to the active filename alone,
+which is LAYOUT.md's own rule for narrow terminals.
+
+Wanted instead, VS-Code-style: keep **every** tab visible and make each
+one narrower, truncating the filenames rather than the strip.
+
+What makes it more than a width tweak:
+
+- `renderTabs` measures each tab at its natural width and then windows
+  the list. Shrinking means a second pass that divides the available
+  cells among N tabs and truncates each label to its share — with a
+  floor, because a two-cell tab is not a tab.
+- That floor decides where the two behaviours meet: past some number of
+  open files, shrinking has to give way to scrolling anyway, so this adds
+  a regime rather than replacing one.
+- `tabSpan` already records where each tab was drawn and `mouse.go`
+  hit-tests against it, so clicking and closing follow for free — but the
+  `×` needs a share of a narrower tab too, and at some width it is the
+  first thing that should go.
+- Truncation must be display-width aware (`runewidth.Truncate`, as
+  `paneBox` already does for titles), since a filename can contain CJK.
+
+Not urgent: the strip is correct and legible today, and the dirty marker
+and the active accent both survive the current behaviour. This is about it
+reading like a familiar editor rather than about information being lost.
 
 ### Demo recording
 Record the v1 demo script — **the one in `design/WORKFLOW.md` under "What done

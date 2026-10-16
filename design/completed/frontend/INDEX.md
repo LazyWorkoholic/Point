@@ -32,7 +32,9 @@ it passed.
 | F10c | Settings — Demo Mode | ✅ built + manually verified | `F10c-settings-demo-mode.md` |
 | F11 | Memory Popup | not started — blocked on B13 | — |
 | F12 | Workspace Manager + Lifecycle | ✅ built + manually verified | `F12-workspace-manager.md` |
-| F13–F17 | — | not started | — |
+| **F13a** | **Editor Core — the editing half (F13, SPLIT)** | 🟡 **built + manually verified — F13 NOT complete; F13b is the remainder** | `F13a-editor-core-editing.md` |
+| F13b | Editor — Save, Locks, Autosave | not started — depends on F13a (done) | — |
+| F14–F17 | — | not started | — |
 | F18 | Windowed History (bounded resident window) | ✅ built + manually verified | `F18-windowed-history.md` |
 
 **F1 and F2 were built and verified in one session** (`batchable: yes`).
@@ -49,6 +51,22 @@ only F5 and B18, both of which were already built and verified.
 shape method-for-method, not approximate it** — the three fields, the
 degrade-to-bottom rule and the pinned-to-bottom rule are all recorded in
 `F18-windowed-history.md`'s handoff.
+
+**F13 is split the way F9 is, but it split MID-BUILD rather than before any
+code was written.** F13a covers Done-when 3, 4, 5, 6 and the open half of 1 —
+the editing half, with NO save path anywhere in
+`frontend\internal\editor`. F13b covers 2, 7, 8, 9, 10, 11 and 12. F13a's own
+doc states the split in its first section and `gate_f13a.ps1`'s footer lists
+the seven uncovered Done-whens, so a green gate run there cannot be mistaken
+for a green F13. **Do not mark F13 complete on the strength of F13a's row
+above** — that is what the 🟡 is for.
+
+**F13a changed two behaviours F12 shipped**, both on Aryan's call and both with
+one of F12's own tests replaced: the global "any key to keep" idle rescue is
+gone, and the switcher readout is a clamped countdown. Recorded in
+`F12-workspace-manager.md`'s own "Superseded by F13 (Session 18a)" section
+rather than only in F13a's, because a reader arriving at F12 to learn how the
+lifecycle behaves would otherwise read two things that are no longer true.
 
 **F12 shipped without B15, deliberately.** Its Build section asks for a
 `workspace.unload(id)` wire event so Python can release a session's
@@ -85,9 +103,9 @@ is no Editor workspace to apply a diff into (F13), nothing parses the Filler's
 JSON reply into a structured proposal (B24), `context_attachments.source_type`
 is `file`-only so a task result cannot be attached, and nothing writes
 `memory_records` (B13). **All four are recorded with file:line evidence in
-`F09a-task-tray-cards.md`** so Sessions 18b and 23b do not re-derive them.
+`F09a-task-tray-cards.md`** so Sessions 18d and 23b do not re-derive them.
 
-F9 closes only when **F9b** (Session 18b — the diff card) and **F9c**
+F9 closes only when **F9b** (Session 18d — the diff card) and **F9c**
 (Session 23b — attach and save) land. Until then this row stays 🟡.
 
 **F10 is SPLIT, the same shape as F9, stopped before any code was

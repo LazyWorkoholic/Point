@@ -9,7 +9,7 @@ four of the episode's eight "Done when" criteria assume things that are not
 true, and this doc records them with evidence so the sessions that resume them
 do not re-derive any of it.**
 
-> 🟡 **SPLIT, not complete.** F9 closes only when F9b (Session 18b) and F9c
+> 🟡 **SPLIT, not complete.** F9 closes only when F9b (Session 18d) and F9c
 > (Session 23b) land. Two of eight Done-when criteria are met; six are
 > deferred, itemised below with what each is blocked on.
 >
@@ -76,15 +76,15 @@ structurally rather than by care.
 | 2 | Attach and save independently exercisable | ⛔ Session 23b |
 | 3 | Editing a memory changes what an attached reference renders | ⛔ Session 23b |
 | 4 | Saving produces `status=accepted`, `source=user_card` | ⛔ Session 23b |
-| 5 | Diff apply lands the **edited** text | ⛔ Session 18b |
-| 6 | Editor apply undone by a single `ctrl+z` | ⛔ Session 18b |
-| 7 | File changed on disk → apply refused with a reason | ⛔ Session 18b |
+| 5 | Diff apply lands the **edited** text | ⛔ Session 18d |
+| 6 | Editor apply undone by a single `ctrl+z` | ⛔ Session 18d |
+| 7 | File changed on disk → apply refused with a reason | ⛔ Session 18d |
 
 ---
 
 ## The four blockers, with evidence
 
-Recorded so **Session 18b and Session 23b do not have to re-derive them.**
+Recorded so **Session 18d and Session 23b do not have to re-derive them.**
 Line numbers are as of this episode; the named symbol is the stable reference.
 
 ### 1. There is no Editor workspace to apply a diff into
@@ -94,13 +94,13 @@ Line numbers are as of this episode; the named symbol is the stable reference.
   aliased at `frontend\internal\app\workspace.go:17`.
 - `frontend\internal\` contains eight packages and **no `editor`** one. The
   only `Workspace` implementation is `chat`.
-- F13 (Editor Core) is **WORKFLOW.md Session 18**; F15 depends on F13 *and*
+- F13 (Editor Core) is **WORKFLOW.md Session 18a**; F15 depends on F13 *and*
   F9. So the diff card's only specified apply target and its only specified
   trigger both belong to later sessions.
 - There is also no fallback, and that is correct: no `WriteProjectFile` event
   exists, so "apply" has nowhere to go but a buffer.
 
-**Blocks:** Done-when #5, #6, #7. **Resumes:** Session 18b (F9b).
+**Blocks:** Done-when #5, #6, #7. **Resumes:** Session 18d (F9b).
 
 ### 2. A task result cannot be attached
 
@@ -514,7 +514,7 @@ already exist in every palette and the transcript already uses them.
 
 ## Handoff
 
-### Session 18b — F9b, the diff card
+### Session 18d — F9b, the diff card
 
 Needs **F13's editor buffer** and **B24's `FillProposal` event** both landed.
 Three hazards, each one another episode already paid for:
@@ -579,4 +579,4 @@ package can re-fork it silently.
 `WriteProjectFile`, and the frontend writes exactly one file (`state.json`).
 F13's spec leans on B7's path guard, the file locks and `CheckFileStale`, all
 backend-side. Which side owns "save" is a real decision, flagged in
-WORKFLOW.md Session 18's prompt to be settled before F13 writes code.
+WORKFLOW.md Session 18a's prompt to be settled before F13 writes code.

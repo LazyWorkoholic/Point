@@ -111,7 +111,7 @@ the wire.
 
 ### 1 — The backend owns the write, and the read moves with it (pre-code)
 
-Settled during Session 18 (F13), which stopped before writing any code at its
+Settled during Session 18a (F13), which stopped before writing any code at its
 own "settle this before writing code" instruction. Six reasons, recorded in the
 task doc; the load-bearing two:
 
@@ -441,7 +441,7 @@ unchanged.
 
 ## Handoff
 
-- **F13 (Session 18) is unblocked and its scope is otherwise unchanged.** It
+- **F13 (Session 18a) is unblocked and its scope is otherwise unchanged.** It
   gains: `line_ending`/`crlf_count`/`lf_count`/`bom`/`trailing_newline` to
   display and preserve, `writable` for autosave rule 1,
   `decode_replacements` to open a non-round-trippable file read-only,
@@ -459,7 +459,7 @@ unchanged.
   otherwise.
 
 - **Four corrections to F13's own task doc, found while settling this episode
-  and already in WORKFLOW.md's Session 18 paste:** `runtime.py` is 88,425 bytes
+  and already in WORKFLOW.md's Session 18a paste:** `runtime.py` is 88,425 bytes
   not "21KB"; no 5,000-line file exists in this repo so Done-when #1 needs a
   generated fixture; **Done-when #7's "second Point instance" is unachievable as
   written** (`lockfile.py` refuses a second backend on the same profile, and two
@@ -469,7 +469,7 @@ unchanged.
   do); and the Editor has no project id, so it must resolve one from the opened
   file's own path via `ProjectResolve`, treating "no `.point\`" as read-only.
 
-- **F9b (18b) and F15 (19) inherit the write. `overwrite: true` is the one field
+- **F9b (18d) and F15 (19) inherit the write. `overwrite: true` is the one field
   in this payload that can destroy someone else's work, and the diff card must
   never send it without the user having pressed `[overwrite]`.** B24's handoff
   obligations are otherwise unchanged: session-scoped guard resolution before

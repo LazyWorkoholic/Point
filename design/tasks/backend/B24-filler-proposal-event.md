@@ -412,7 +412,7 @@ once the session is over.
 
 - **F9's diff card stays deferred after this episode closes.** This clears one
   of its four blockers. The other three are unchanged: there is no Editor
-  workspace to apply into (F13, Session 18), `context_attachments.source_type`
+  workspace to apply into (F13, Session 18a), `context_attachments.source_type`
   is `file`-only so a task result cannot be attached (`managers\context.py:564`
   refuses anything else outright), and nothing writes `memory_records` so
   `m save to memory` has no backend (B13, Session 23). F9's diff-card session

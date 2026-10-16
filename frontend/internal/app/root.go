@@ -126,6 +126,20 @@ type Root struct {
 	// assertable at all, which is Done-when #4b.
 	Now func() time.Time
 
+	// StatusLinger is how long a status message stays before its expiry
+	// fires. Zero means noticeLinger.
+	//
+	// Substitutable for the reason Now is, and for a sharper one: the
+	// expiry is now derived in Update (see expireStatusIfChanged), so it
+	// rides in the command batch of EVERY message that changes the
+	// status. tea.Batch returns a lone command unwrapped, so a test that
+	// executes what Update handed back executes a real tea.Tick and parks
+	// for the whole duration -- which is what turned
+	// TestHeaderAnimationRunsOnlyWhileStreaming into a six-second test
+	// the moment this was added. A suite that sleeps is a suite people
+	// stop running.
+	StatusLinger time.Duration
+
 	overlay Overlay
 
 	layout  layout.Layout
@@ -363,12 +377,15 @@ func New(opts Options) (*Root, error) {
 	}
 
 	r := &Root{
-		active:        active,
-		workspaces:    make(map[WorkspaceID]Workspace),
-		suspended:     make(map[WorkspaceID][]byte),
-		defByID:       make(map[WorkspaceID]WorkspaceDef),
-		lastActive:    make(map[WorkspaceID]time.Time),
-		idle:          idleState{warned: make(map[WorkspaceID]bool)},
+		active:     active,
+		workspaces: make(map[WorkspaceID]Workspace),
+		suspended:  make(map[WorkspaceID][]byte),
+		defByID:    make(map[WorkspaceID]WorkspaceDef),
+		lastActive: make(map[WorkspaceID]time.Time),
+		idle: idleState{
+			warned:       make(map[WorkspaceID]bool),
+			dirtyNoticed: make(map[WorkspaceID]bool),
+		},
 		lastWorkspace: opts.State.LastWorkspace,
 		cfg:           opts.Config,
 		theme:         opts.Theme,
@@ -493,6 +510,7 @@ func (r *Root) now() time.Time {
 // afterwards, once, is what keeps "the animation runs only while something
 // streams" from being a rule every new case has to remember.
 func (r *Root) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	statusBefore := r.status
 	model, cmd := r.update(msg)
 	// The same "ask once, afterwards" rule the animation uses below, and
 	// for the same reason. The right pane becomes visible or stops being
@@ -542,6 +560,42 @@ func (r *Root) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	// return one on.
 	if q := r.drainPendingQuit(); q != nil {
 		extra = append(extra, q)
+	}
+	// Asked here for the same "ask once, afterwards" reason, and it is
+	// the only place that can be.
+	//
+	// r.status is assigned DIRECTLY from about forty places in this
+	// package -- a refusal, a theme change, a backend transition, a
+	// settings result, a paste -- and statusExpireMsg's own doc says so
+	// and treats that as fine: "whatever wrote last wins". It was fine
+	// while the status bar's left half was the bindings hint, because a
+	// message that never faded only hid something recoverable from the
+	// palette and from Help.
+	//
+	// F13's StatusContributor changed the stakes. The left half is now
+	// the Editor's file segments -- name, line:col, language, line
+	// ending, indent, read-only reason -- and r.status outranks them, so
+	// a message that never expires permanently masks the only surface
+	// those appear on. Reported against the paste counter, which is set
+	// by a bare assignment in recordPaste and so never had a timer at
+	// all: pasting 300 lines left "pasted 300 lines as one event" on
+	// screen until something else happened to overwrite it, with the file
+	// segments gone the whole time. Pressing esc in the Editor does the
+	// same thing by a different route ("Browse Transcript is not
+	// available right now", from dispatchKey's unavailable-chord branch).
+	//
+	// So the expiry is derived here rather than added to forty call
+	// sites: Update is the one funnel every one of them passes through,
+	// and comparing the value before and after cannot miss a path --
+	// including the ones with no tea.Cmd to return a tick on, which is
+	// why several of them are bare assignments in the first place.
+	//
+	// expiringStatus's own callers now schedule two ticks for one
+	// message. That is harmless by statusExpireMsg's existing design: it
+	// clears only if the text still matches, so the second tick finds
+	// nothing to do.
+	if exp := r.expireStatusIfChanged(statusBefore); exp != nil {
+		extra = append(extra, exp)
 	}
 	if len(extra) > 0 {
 		return model, tea.Batch(append([]tea.Cmd{cmd}, extra...)...)
@@ -597,25 +651,24 @@ func (r *Root) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		//
 		//   - the active workspace never unloads, so every key resets
 		//     its clock;
-		//   - "any key to keep" rescues whatever is inside its grace
-		//     window.
+		//   - and that is ALL a key does: a workspace you are not
+		//     looking at is not kept alive by activity in one you are.
 		//
 		// Here rather than in dispatchKey, and the difference is not
 		// cosmetic: handleKey's paste-burst detector CONSUMES a lone
 		// pasteable key and holds it (paste.go), so a plain letter never
-		// reaches dispatchKey at all on the frame it is pressed. A
-		// grace warning that said "any key to keep" and then ignored
-		// every ordinary letter would be exactly the hint-that-lies this
-		// codebase has a standing rule against -- found by test, since
-		// the keys these rules are about are the ones the detector
-		// holds.
+		// reaches dispatchKey at all on the frame it is pressed, and the
+		// ACTIVE workspace's clock has to be reset whether or not the
+		// key gets that far.
+		//
+		// What is NOT here any more is the global grace rescue: a key
+		// pressed in one workspace used to reset the idle clock of every
+		// OTHER workspace inside its grace window, which made a
+		// backgrounded workspace unable to unload for as long as anybody
+		// was typing anywhere. See lifecycle.go, where keepWarnedAlive
+		// was.
 		r.touchActive()
-		keep := r.keepWarnedAlive()
-		model, cmd := r.handleKey(m)
-		if keep == nil {
-			return model, cmd
-		}
-		return model, tea.Batch(cmd, keep)
+		return r.handleKey(m)
 
 	case tea.MouseMsg:
 		return r.dispatchMouse(m)
@@ -692,6 +745,19 @@ func (r *Root) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case statusMsg:
 		r.status = string(m)
 		return r, nil
+
+	case WorkspaceStatusMsg:
+		// F13: the active workspace's one transient line. Given an expiry
+		// rather than left on screen, because a note is an event and the
+		// bindings hint or the workspace's own segments are what belong
+		// there the rest of the time. Same linger as an unload notice --
+		// long enough to read a sentence, short enough not to outlive
+		// what it is about.
+		if m.Text == "" {
+			return r, nil
+		}
+		r.status = m.Text
+		return r, r.expiringStatus(m.Text, r.statusLinger())
 
 	case PasteMsg:
 		r.recordPaste(m)
@@ -830,6 +896,17 @@ func (r *Root) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// the Popup's own Update, and setOverlay is "the ONE place
 		// r.overlay is ever assigned". So it asks, here.
 		r.OpenOverlay(m.o)
+		return r, nil
+
+	case OpenWorkspaceOverlayMsg:
+		// B9, F13b: the same destination, reached from OUTSIDE this
+		// package. The Editor's stale-save dialog is three buttons over a
+		// file and an mtime app knows nothing about, so it arrives built
+		// rather than named. OpenOverlay still applies the fit check, so
+		// a workspace cannot force one onto a terminal too small for it.
+		if m.Overlay != nil {
+			r.OpenOverlay(m.Overlay)
+		}
 		return r, nil
 
 	case cancelTaskMsg:
@@ -1195,6 +1272,31 @@ type statusExpireMsg struct{ text string }
 // current state.
 const noticeLinger = 6 * time.Second
 
+// expireStatusIfChanged schedules an expiry when this message left a NEW
+// status line on screen. See Update for the whole account.
+//
+// Only a CHANGE arms it, so a message that leaves the status untouched
+// does not keep pushing the expiry of whatever is already up -- otherwise
+// a stream of ticks would hold a line on screen indefinitely, which is
+// the bug in reverse.
+func (r *Root) expireStatusIfChanged(before string) tea.Cmd {
+	if r.status == "" || r.status == before {
+		return nil
+	}
+	text := r.status
+	return tea.Tick(r.statusLinger(), func(time.Time) tea.Msg {
+		return statusExpireMsg{text: text}
+	})
+}
+
+// statusLinger is StatusLinger, defaulted.
+func (r *Root) statusLinger() time.Duration {
+	if r.StatusLinger > 0 {
+		return r.StatusLinger
+	}
+	return noticeLinger
+}
+
 // expiringStatus shows a status line and schedules its removal.
 func (r *Root) expiringStatus(text string, d time.Duration) tea.Cmd {
 	r.status = text
@@ -1232,6 +1334,61 @@ func (r *Root) ensureStartupChooser() tea.Cmd {
 }
 
 func (r *Root) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
+	// A BARE MODIFIER key-down is not a keystroke. Dropped here, once,
+	// before anything can mistake it for typed text.
+	//
+	// # What arrives, and why
+	//
+	// bubbletea's Windows console reader (key_windows.go's readConInputs)
+	// skips key-UP records and VK_SHIFT, and nothing else. VK_CONTROL,
+	// VK_MENU, VK_LWIN and VK_CAPITAL all reach keyType, which has no case
+	// for any of them and ends in `return KeyRunes` -- and a modifier
+	// record's Char is 0. So pressing Ctrl on its own, BEFORE the chord it
+	// belongs to, delivers:
+	//
+	//	KeyMsg{Type: KeyRunes, Runes: []rune{0}}
+	//
+	// which every consumer of this app reads as "the user typed a
+	// character".
+	//
+	// # What it cost, measured
+	//
+	// All three of these were reported as separate editor bugs and are one
+	// NUL rune:
+	//
+	//   - a selection collapsed the instant Ctrl went down, before `v`
+	//     arrived: the NUL was spliced over it (record removed="hello
+	//     world" inserted="\x00");
+	//   - ctrl+z took two presses to undo one real edit: the NUL had
+	//     pushed an undo record of its own, so the first press undid the
+	//     invisible character and the second undid the edit. Redo was
+	//     cleared outright by the same push;
+	//   - the caret vanished and "skipped" characters: runewidth gives NUL
+	//     zero cells, so the caret drawn on one is a zero-width glyph, and
+	//     two different cursor columns map to the same display cell -- a
+	//     right-arrow that moves the caret and not the cursor.
+	//
+	// # Why here and not in each consumer
+	//
+	// Because it is an artefact of this platform's input layer, and this
+	// is the one function every key passes through. paste.go's pasteable()
+	// already carries `k.Runes[0] != 0` for exactly this reason -- F1 or
+	// F4 hit the same record and filtered it locally, on the paste path
+	// only. chat's query input has the same hazard through
+	// handleInputKey's rune insert and was one Ctrl press away from
+	// inserting a NUL into a draft. One filter, both workspaces, and any
+	// workspace added later.
+	//
+	// Only an ALL-NUL rune slice is dropped. A KeyRunes carrying real text
+	// alongside a NUL is not something the reader can produce (it writes
+	// exactly one rune per record), and a legitimate NUL is not something
+	// a keyboard can produce either -- but checking every rune rather than
+	// just the first means a future reader that batches runes cannot
+	// reintroduce this quietly.
+	if isBareModifier(k) {
+		return r, nil
+	}
+
 	// A multi-line paste is ONE event, never N key events.
 	//
 	// Two routes reach that. Where the terminal brackets its pastes, the
@@ -1294,6 +1451,15 @@ func (r *Root) dispatchKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		})
 	}
 
+	// F13: the ACTIVE workspace may own a key the chord table has already
+	// claimed. Asked HERE, after the leader (so leader → anything stays
+	// reachable from every workspace) and before the chord lookup (so a
+	// claim actually wins), through KeyCapturer — see that interface for
+	// why `tab` forced this and why moving pane.focus.next was rejected.
+	if kc, ok := r.current().(KeyCapturer); ok && kc.CapturesKey(key) {
+		return r.forwardKey(k)
+	}
+
 	if a, ok := r.actions.ByChord(key); ok {
 		if !a.Available(r) {
 			r.status = a.Name + " is not available right now"
@@ -1302,12 +1468,17 @@ func (r *Root) dispatchKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return r, a.Run(r)
 	}
 
-	// Only a key the workspace actually RECEIVES can have moved its
-	// position, so the blob is re-armed here rather than in Update's
-	// KeyMsg case. A chord an action consumed (ctrl+c, ctrl+q) scrolls
-	// nothing, and arming on it would also wrap every such key's command
-	// in a tea.Batch for no reason -- which is how this was first written
-	// and what TestCtrlCDoesNotQuit caught.
+	return r.forwardKey(k)
+}
+
+// forwardKey hands a key to the active workspace.
+//
+// Only a key the workspace actually RECEIVES can have moved its position,
+// so the blob is re-armed here rather than in Update's KeyMsg case. A chord
+// an action consumed (ctrl+c, ctrl+q) scrolls nothing, and arming on it
+// would also wrap every such key's command in a tea.Batch for no reason --
+// which is how this was first written and what TestCtrlCDoesNotQuit caught.
+func (r *Root) forwardKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 	save := r.schedulePositionSave()
 	ws, cmd := r.current().Update(k)
 	r.storeCurrent(ws)

@@ -3,6 +3,7 @@ package app
 import (
 	"strings"
 	"testing"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 
@@ -31,6 +32,13 @@ func newRoot(t *testing.T) *Root {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// A status expiry rides in the command batch of every message that
+	// changes the status (Update's expireStatusIfChanged), and tea.Batch
+	// returns a lone command unwrapped -- so any test that EXECUTES what
+	// Update handed back would park for the real noticeLinger. Compressed
+	// here for the whole package, the same way lifecycleRoot compresses
+	// Now: a suite that sleeps is a suite people stop running.
+	r.StatusLinger = time.Millisecond
 	return r
 }
 

@@ -361,6 +361,14 @@ clears `r.status` only if it still matches. Compared by text rather than by
 a generation counter because `r.status` is assigned directly from a dozen
 places and a counter would be a rule every one of them has to remember.
 
+> **Changed by F13 (Session 18a).** Two things in this decision no longer
+> hold as written: the warning's wording no longer promises "any key to
+> keep", and "assigned directly from a dozen places" is no longer the end
+> of the story — the expiry is now DERIVED in `Update` so that every one
+> of those assignments gets one, instead of each author remembering.
+> The text comparison is what makes that safe, exactly as argued here.
+> See **Superseded by F13 (Session 18a)** below.
+
 ### 4. `[workspace]` is the first table outside `[ui]` the Go side parses
 
 Held as a RAW `map[string]any`, not a struct, and that is the whole reason
@@ -512,6 +520,17 @@ floor. The leader key is deliberately NOT prefixed to the note: at 24 cells
 it cannot fit beside the readout, and bindings already have a home in the
 palette and Help.
 
+> **Changed by F13 (Session 18a).** The readout's FORMAT changed — it is
+> now clamped, and says `· pinned` when it is sitting at its limit. The
+> plumbing described here (`Decor`, the 72-cell wrapper, the unprefixed
+> note) is untouched. See **Superseded by F13 (Session 18a)** below.
+>
+> The note in that section about the rows being a snapshot taken when the
+> popup opens is also worth reading beside "the value changes while the
+> popup is open" above: `Decor` is re-read per render, but nothing
+> re-renders the switcher while it is up, so in practice the figure is
+> correct at open and then still.
+
 ### 5. The chooser was one cell too narrow for its own `last:` line
 
 Rendered as `last: Chat · position restored on op`. `MinSize` measured only
@@ -656,6 +675,159 @@ Fixed by a package-level `TestMain` scratch redirect in both `chat` and
 if the redirect is ever removed.
 
 ---
+
+## Superseded by F13 (Session 18a)
+
+**Two of this episode's shipped behaviours were changed by a later
+episode, both on Aryan's call during F13's verification rounds, and both
+with one of this doc's own tests replaced.** Recorded here rather than
+only in F13's notes, because a reader arriving at this file to learn how
+the lifecycle behaves would otherwise be reading two things that are no
+longer true.
+
+### 1. The global "any key to keep" rescue is gone (round 3)
+
+**Was:** `keepWarnedAlive`, called from `Root.Update`'s `KeyMsg` case,
+reset the idle clock of every workspace currently inside its grace
+window — from any key, in any workspace. This episode argued the scoping
+was already narrow: only the WARNED workspaces, not every loaded one,
+"which would make the whole mechanism unreachable while the user types
+anywhere in the app".
+
+**Why that argument proved too little.** It makes the mechanism
+unreachable anyway, just later. Once a backgrounded workspace enters its
+grace window, one keystroke anywhere resets it to a FULL timeout — so
+while anybody is typing, the warned workspace cycles idle → warn →
+rescued → idle → warn → rescued and can never unload. Reproduced by
+hand: open the Editor, visit Chat, come back, wait for "Chat unloads in
+29s", then keep typing in the Editor; Chat's countdown returns to full,
+indefinitely.
+
+A keypress in the Editor is not evidence of interest in Chat at 29
+seconds remaining for exactly the reason it is not at four seconds.
+
+**Now:** `keepWarnedAlive` is deleted. A key affects only the ACTIVE
+workspace's own accounting (`touchActive`, unchanged in intent).
+**Switching to a workspace is the only rescue** — `switchWorkspace`
+already clears its clock, and that is the one act that evidences
+interest. The grace warning names the switcher's own binding instead of
+promising a key:
+
+```
+Chat unloads in 29s — ctrl+w w to keep it
+```
+
+resolved from the action registry rather than hardcoded, so the sentence
+cannot drift from the binding.
+
+**Test replaced:** `TestAnyKeyKeepsAWarnedWorkspaceAndOnlyThatOne` →
+`TestAKeyInOneWorkspaceDoesNotRescueAnother`, which asserts the inverse
+and that the backgrounded workspace goes on to unload *while* the active
+one is being typed in. Added alongside it:
+`TestSwitchingToAWarnedWorkspaceKeepsIt`, and
+`TestTheGraceWarningNamesTheSwitcherNotAKey`.
+
+### 2. The idle readout is a clamped countdown (rounds 4 and 5)
+
+**Was:** `idle 1m30s of 5m00s`, raw elapsed against the budget.
+
+**The problem.** Elapsed can legitimately exceed the budget, so the
+readout could print a number past its own denominator — `idle 2m35s of
+1m00s` — which reads as the app being broken when nothing is wrong.
+Two things produce it, and F13 introduced the first:
+
+- a workspace **pinned by unsaved work** never unloads however long it
+  idles. F13 taught `walkIdle` to skip a workspace whose
+  `DirtyBufferCount()` is non-zero rather than discard its edits — with
+  no save path in 18a, an idle unload would have been the only
+  unrecoverable action in the app. `DirtyBuffers`, declared by this
+  episode with no implementors (Decision 6), is implemented by the
+  Editor;
+- the switcher's rows are a **snapshot** taken when the popup opens and
+  nothing re-renders them while it is up (`app\chooser.go`, this
+  episode's) — so the figure is also still. **That part is unchanged and
+  remains this episode's**, deliberately out of F13's scope.
+
+**Now, after two passes.** Round 4 replaced the countdown with plain
+`active` / `loaded` / `not loaded`. Round 5 reinstated the countdown with
+a clamp, which is what ships:
+
+```
+active                           the one on screen
+not loaded                       no instance in memory
+loaded · stays loaded            idle_unload_minutes = 0
+idle 0m23s of 1m00s              counting up, normally
+idle 1m00s of 1m00s · pinned     clamped, and said to be clamped
+```
+
+Both sides carry a minutes field at every value — `idle 0m01s of 1m00s`,
+not `idle 1s of 1m00s`. `shortDuration` had an under-a-minute special
+case (`if total < 60`) that contradicted its own doc comment and, because
+the readout formats both sides with it, produced a line in two formats.
+It is now unconditional `%dm%02ds`.
+
+That briefly moved the grace warning with it, to `unloads in 0m29s`, and
+that part was **reverted**: the warning is a countdown to an imminent
+event, bounded by `idleGrace` and so never more than seconds, and `in 29s`
+is how a countdown that short reads. It has its own `graceSeconds` at its
+own single call site — NOT the under-a-minute branch put back inside
+`shortDuration`, which is the special case that caused the bug. Two
+formatters for two purposes; the paired one stays unconditional because
+its output is read as a pair, and the other has no pair.
+
+The readout also needed a note column of its own. `idle 1m00s of 1m00s ·
+pinned` is 28 cells against `rowWidths`' 24-cell ceiling, so Popup
+truncated the pinned label away and the row read `idle 1m00s of 1m00s …`.
+`PopupConfig.NoteW` lets a popup declare what its note needs, clamped
+against the NAME column rather than against a third of the row — the
+third-of-the-row rule stays the default for the palette and Help, whose
+names are the content. Measured while fixing it: `rowWidths(86)` still
+answered 24, so extra popup width could never have fixed it.
+
+The clamp and the `· pinned` label come as a pair: clamping alone would
+read as "about to unload" for the one workspace that definitely will
+not. The clamp is unconditional rather than pinned-only, because a
+workspace is also briefly over budget between the timeout elapsing and
+the next one-second tick unloading it.
+
+`WorkspaceStatus` gained a `Pinned bool`, populated by
+`WorkspaceStatuses` through the same `DirtyBuffers` interface `walkIdle`
+asks, so the readout and the sweep cannot disagree about which
+workspaces are pinned. `Idle` and `Timeout` are unchanged and still
+carry the RAW values — only the rendering clamps.
+
+**Test replaced:** `TestTheIdleReadoutDistinguishesActiveIdleAndNotLoaded`
+→ `TestTheIdleReadoutCountsDownAndNamesTheOtherStates`. Added:
+`TestTheIdleReadoutClampsElapsedToTheBudget`,
+`...ClampsEvenWhenNotPinned`, `...NeverRendersElapsedPastItsBudget`
+(every budget × elapsed × pinned combination), and
+`TestTheIdleReadoutSaysSoWhenAWorkspaceNeverUnloads`.
+
+### 3. Three smaller changes to this episode's files, for the record
+
+- **`resetIdle`** — `switchWorkspace`, `touchActive` and
+  `unloadWorkspace` each cleared `lastActive` and `idle.warned` by hand.
+  F13 added a second latch (`idle.dirtyNoticed`, for the pinned notice)
+  to only one of those three places, so the notice fired once per loaded
+  lifetime instead of once per idle period. All three now call one
+  `resetIdle(id)`, which is what "this workspace's idle accounting
+  starts over" means in one place.
+- **The status expiry is derived in `Update`** — see the note on
+  Decision 3 above. `r.status` is still assigned directly from about
+  forty places; `expireStatusIfChanged` compares the value before and
+  after each message and arms a tick when it changed, so none of those
+  sites has to remember. `Root.StatusLinger` makes the duration
+  substitutable, for the same reason `Root.Now` is: the derived tick
+  rides in every status-changing message's command batch, and a test
+  that executes what `Update` returned would otherwise park for the real
+  linger.
+- **`propagateTheme` reaches every loaded workspace**, not just
+  `r.current()`. A loaded-but-inactive workspace never heard about a
+  theme change, and `loadWorkspace` (construction) was the only other
+  caller of `SetTheme` — so the Editor kept the palette it was last
+  active under. Not strictly this episode's bug, but it is this
+  episode's file and this episode's lifecycle that made a non-active
+  loaded workspace possible at all.
 
 ## Handoff — what later episodes inherit
 

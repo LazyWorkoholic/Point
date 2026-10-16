@@ -34,16 +34,17 @@ All printed commands must be **PowerShell**.
 | F7 | Popup Framework | P1 | no | F1 | — |
 | F8 | @ Picker + Attachments | P1 | no | F7 | B7, B12 |
 | F9a | Task Tray + Result Cards | P1 | no | F7, F8 | B11, B12 |
-| F9b | Diff Card | P1 | no | F9a, F13 | B24 |
+| F9b | Diff Card | P1 | no | F9a, F13a | B24 |
 | F9c | Result Card Attach + Save | P1 | no | F9a | B13 + a B12 attachment-source ext (unspecced) |
 | F10 | Provider Chooser, Credentials, Providers+Appearance Tabs (F10, narrowed) | P1 | no | F7 | B6, B25 |
 | F10b | Settings — Behaviour Overrides + `doctor` in About | P1 | no | F10 | a not-yet-scoped backend episode (runtime override layer + a `doctor` wire event) |
 | F10c | Settings — Demo Mode | P1 | no | F10 | B28 ✅ (provider + fixtures + sample project), B30 ✅ (project binding via `SetSessionProvider`, found mid-episode) |
 | F11 | Memory Popup | P2 | no | F7 | B13 |
 | F12 | Workspace Manager + Lifecycle | P1 | no | F6 | B15 |
-| F13 | Editor Core | P1 | no | F12 | B7 |
-| F14 | Editor Terminal | P2 | no | F13 | — |
-| F15 | Filler-Explainer Integration | P1 | no | F13, F9b | B11, B24 |
+| **F13a** | **Editor Core — the editing half (F13, SPLIT)** | P1 | no | F12 | B7, B32 | <!-- F13a-editor-core-editing.md; DONE, recorded in completed/frontend/F13a-editor-core-editing.md -->
+| F13b | Editor — Save, Locks, Autosave (F13, SPLIT) | P1 | no | **F13a (done)** | B7, B32 |
+| F14 | Editor Terminal | P2 | no | F13a | — |
+| F15 | Filler-Explainer Integration | P1 | no | F13a, F9b | B11, B24 |
 | F16 | Polish | P2 | no | all | — | <!-- also owns F9a's deferred result-card code-block rendering: syntax colour + box frame, blocked on markdown-renderer packaging, see F16-polish.md -->
 | F17 | Web Preview | P2 | no | F14 | — |
 | F18 | windowed history | P1 | no | F5+B18 | B18 |
@@ -51,11 +52,28 @@ All printed commands must be **PowerShell**.
 **F1–F5 can start today** — they need only B1–B5, which are built.
 
 **F9 is split.** F9a (tray + result cards) ships against what exists today;
-F9b needs F13's editor buffer and B24's parsed Filler proposal on the wire;
+F9b needs F13a's editor buffer (now built — `doc.ApplyRegion` is its entry
+point, one splice and one undo step, deliberately with no caller) and B24's
+parsed Filler proposal on the wire;
 F9c needs B13 and an extension to `context_attachments.source_type`, which is
 `file`-only today and has no episode yet. See WORKFLOW.md sessions 15, 17b,
-18b and 23b, and `design/completed/frontend/F09a-task-tray-cards.md` for the
+18d and 23b, and `design/completed/frontend/F09a-task-tray-cards.md` for the
 four blockers with their evidence.
+
+**F13 is split, and unlike F9 and F10 it split MID-BUILD.** Its own task doc
+sanctioned it ("The largest frontend episode. It may take two sessions — if so,
+stop at a working point, record what is done, `/clear`, and resume with a
+note."). F13a is the editing half — buffer, cursor, selection, indent, undo,
+tab strip, file tree, highlighting, status bar — and is **done and verified**:
+Done-when 3, 4, 5, 6 and the open half of 1. F13b is the save half: Done-when
+2, 7, 8, 9, 10, 11, 12. The seam is the save path, which is exactly what needs
+the holder key, the lock lifecycle and three overlays that do not exist yet.
+**Both halves have a task doc**, `F13a-editor-core-editing.md` and
+`F13b-editor-save-locks.md`, each carrying its requirements verbatim from
+the combined doc rather than re-derived; `F13a`'s is retroactive, written
+after the session it describes, because the split happened mid-build. The
+combined `F13-editor-core.md` was retired once both existed — see
+WORKFLOW.md's "Splitting an episode".
 
 **F10 is split, the same shape as F9, stopped before any code was written.**
 Session 16 started against F10's full spec (`F10-settings-first-run.md`) and
@@ -103,7 +121,10 @@ already supports end to end once B25 lands. See WORKFLOW.md sessions 15c
 Handoff for the full account.
 
 **Ordering:** F1–F5 are strictly serial. F7 before F6 (the right pane's expanded
-context card is a popup). F12 needs F6. F13–F15 are an independent block.
+context card is a popup). F12 needs F6. F13a–F15 are an independent block,
+and F13b is scheduled between F13a and F15 — **not** because F15 calls
+the save path (it writes nothing to disk), but because F15 is the last
+P1 episode and v1 is not feature-complete while F13 is still open.
 F18 needs B18 and F5; must land before F12 (anchor lives in the Suspend blob).
 
 ## Cross-cutting rules — apply in every episode

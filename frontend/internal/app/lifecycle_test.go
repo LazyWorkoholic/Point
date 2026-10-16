@@ -144,6 +144,7 @@ func lifecycleRootWithState(t *testing.T, st config.State, cfg config.Config, id
 		t.Fatal(err)
 	}
 	r.Now = func() time.Time { return f.clock }
+	r.StatusLinger = time.Millisecond // see newRoot
 	r.SaveWorkspaceStateFn = func(last string, blobs map[string]json.RawMessage) error {
 		copied := make(map[string]json.RawMessage, len(blobs))
 		for k, v := range blobs {
@@ -635,8 +636,15 @@ func TestTheGraceWarningFiresOnceAndExpires(t *testing.T) {
 	if !strings.Contains(f.root.status, "Chat unloads in") {
 		t.Fatalf("status is %q, want a grace warning naming Chat", f.root.status)
 	}
-	if !strings.Contains(f.root.status, "any key to keep") {
+	// It names the SWITCHER, not a key. The rescue a key used to perform
+	// is gone -- see lifecycle.go where keepWarnedAlive was -- and a
+	// toast promising a key that does nothing is the hint-that-lies this
+	// codebase refuses.
+	if !strings.Contains(f.root.status, "to keep it") {
 		t.Fatalf("the warning does not say what to do: %q", f.root.status)
+	}
+	if strings.Contains(f.root.status, "any key") {
+		t.Fatalf("the warning still promises any key: %q", f.root.status)
 	}
 	warning := f.root.status
 
@@ -659,10 +667,20 @@ func TestTheGraceWarningFiresOnceAndExpires(t *testing.T) {
 	}
 }
 
-// "Any keypress resets that workspace's timer" — the warned one, and not
-// every loaded workspace, which would make the whole mechanism unreachable
-// while the user types anywhere in the app.
-func TestAnyKeyKeepsAWarnedWorkspaceAndOnlyThatOne(t *testing.T) {
+// A keystroke in the ACTIVE workspace has ZERO effect on a backgrounded
+// workspace's idle countdown.
+//
+// This is the inverse of what F12 shipped. keepWarnedAlive reset the clock
+// of every workspace inside its grace window from any key in any
+// workspace, which meant a backgrounded workspace could never unload while
+// anybody was typing: it cycled idle -> warn -> rescued -> idle, forever.
+// Reproduced by hand as "stay in the Editor and type; Chat's countdown
+// returns to full".
+//
+// Switching to a workspace is still a rescue, and is the only one -- it is
+// the one act that evidences interest in it, and it is what the warning
+// names.
+func TestAKeyInOneWorkspaceDoesNotRescueAnother(t *testing.T) {
 	f := lifecycleRootWithState(t,
 		config.State{Provider: &config.ProviderDefault{Provider: "mock", Model: "mock"}},
 		idleCfg(1, map[string]int{"data": 5}), "chat", "editor", "data")
@@ -679,33 +697,77 @@ func TestAnyKeyKeepsAWarnedWorkspaceAndOnlyThatOne(t *testing.T) {
 	if f.root.idle.warned["data"] {
 		t.Fatal("data was warned 4+ minutes from its own timeout")
 	}
-	dataIdleBefore := f.clock.Sub(f.root.lastActive["data"])
+	chatIdleBefore := f.clock.Sub(f.root.lastActive["chat"])
 
-	f.root.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}})
-
-	if f.root.idle.warned["chat"] {
-		t.Error("chat is still marked warned after being kept")
-	}
-	if got := f.clock.Sub(f.root.lastActive["chat"]); got > time.Second {
-		t.Errorf("chat's timer was not reset: idle %s", got)
-	}
-	if got := f.clock.Sub(f.root.lastActive["data"]); got < dataIdleBefore {
-		t.Errorf("data's timer was reset by a key it was not warned about: %s -> %s",
-			dataIdleBefore, got)
+	// Type in the Editor, which is where the user actually is.
+	for i := 0; i < 10; i++ {
+		f.root.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}})
 	}
 
-	// And it can warn again later, which is what makes "keep" meaningful
-	// rather than a one-shot reprieve.
+	if !f.root.idle.warned["chat"] {
+		t.Error("typing elsewhere cleared chat's warning latch")
+	}
+	if got := f.clock.Sub(f.root.lastActive["chat"]); got < chatIdleBefore {
+		t.Errorf("typing elsewhere reset chat's clock: %s -> %s", chatIdleBefore, got)
+	}
+
+	// ...and it goes on to unload, which is the whole point.
+	f.advance(25 * time.Second)
+	f.root.walkIdle(f.clock)
+	if _, loaded := f.root.workspaces["chat"]; loaded {
+		t.Error("chat never unloaded despite being idle past its timeout")
+	}
+
+	// The ACTIVE workspace is still kept alive by its own keys -- a
+	// different rule, and the one that has to stay true.
+	if _, ok := f.root.lastActive["editor"]; ok {
+		t.Error("the active workspace has an idle clock running")
+	}
+}
+
+// Switching to a warned workspace is the rescue the warning names.
+func TestSwitchingToAWarnedWorkspaceKeepsIt(t *testing.T) {
+	f := lifecycleRootWithState(t,
+		config.State{Provider: &config.ProviderDefault{Provider: "mock", Model: "mock"}},
+		idleCfg(1, nil), "chat", "editor")
+	f.start(t)
+	f.root.switchWorkspace("chat")
+	f.root.switchWorkspace("editor")
+
 	f.advance(40 * time.Second)
 	f.root.walkIdle(f.clock)
 	if !f.root.idle.warned["chat"] {
-		t.Error("chat never warned a second time after being kept")
+		t.Fatal("chat was not warned")
+	}
+
+	f.root.switchWorkspace("chat")
+	if f.root.idle.warned["chat"] {
+		t.Error("switching to chat left its warning latched")
+	}
+	if _, ok := f.root.lastActive["chat"]; ok {
+		t.Error("switching to chat left an idle clock running on it")
+	}
+
+	// And leaving again starts a fresh full countdown rather than
+	// resuming the old one.
+	f.root.switchWorkspace("editor")
+	f.advance(10 * time.Second)
+	f.root.walkIdle(f.clock)
+	if f.root.idle.warned["chat"] {
+		t.Error("chat warned 50s before its own timeout")
+	}
+	if _, loaded := f.root.workspaces["chat"]; !loaded {
+		t.Error("chat unloaded 50s early")
 	}
 }
 
 // The idle readout, which is the other affordance F12 requires alongside
 // the timer "or unloading feels like the app losing your work at random".
-func TestTheIdleReadoutDistinguishesActiveIdleAndNotLoaded(t *testing.T) {
+//
+// A countdown, CLAMPED so elapsed can never print larger than the budget
+// it counts against -- see WorkspaceStatus.Label for why the clamp and the
+// pinned label come as a pair.
+func TestTheIdleReadoutCountsDownAndNamesTheOtherStates(t *testing.T) {
 	f := lifecycleRootWithState(t,
 		config.State{Provider: &config.ProviderDefault{Provider: "mock", Model: "mock"}},
 		idleCfg(5, nil), "chat", "editor", "data")
@@ -723,6 +785,139 @@ func TestTheIdleReadoutDistinguishesActiveIdleAndNotLoaded(t *testing.T) {
 	for _, s := range f.root.WorkspaceStatuses(f.clock) {
 		if got := s.Label(); got != want[s.Def.ID] {
 			t.Errorf("%s reads %q, want %q", s.Def.ID, got, want[s.Def.ID])
+		}
+	}
+}
+
+// A workspace configured never to unload has nothing to count down to.
+func TestTheIdleReadoutSaysSoWhenAWorkspaceNeverUnloads(t *testing.T) {
+	f := lifecycleRootWithState(t,
+		config.State{Provider: &config.ProviderDefault{Provider: "mock", Model: "mock"}},
+		idleCfg(0, nil), "chat", "editor")
+	f.start(t)
+	f.root.switchWorkspace("chat")
+	f.root.switchWorkspace("editor")
+	f.advance(10 * time.Minute)
+
+	for _, st := range f.root.WorkspaceStatuses(f.clock) {
+		if st.Def.ID != "chat" {
+			continue
+		}
+		if got := st.Label(); got != "loaded · stays loaded" {
+			t.Errorf("chat reads %q, want %q", got, "loaded · stays loaded")
+		}
+	}
+}
+
+// THE CLAMP. Elapsed is never displayed larger than the budget, however
+// far past it the raw figure has run -- and the pinned case says why it is
+// sitting at its limit rather than implying an unload that is not coming.
+func TestTheIdleReadoutClampsElapsedToTheBudget(t *testing.T) {
+	f := lifecycleRootWithState(t,
+		config.State{Provider: &config.ProviderDefault{Provider: "mock", Model: "mock"}},
+		idleCfg(1, nil), "chat", "editor")
+	f.start(t)
+	f.root.switchWorkspace("chat")
+	f.root.switchWorkspace("editor")
+
+	// Chat holds unsaved work, so the sweep pins it rather than unloading
+	// it -- which is the only way elapsed genuinely outruns the budget.
+	f.ws["chat"].dirty = 2
+
+	for _, elapsed := range []time.Duration{
+		90 * time.Second, 2*time.Minute + 35*time.Second, time.Hour,
+	} {
+		f.clock = time.Date(2026, 10, 15, 12, 0, 0, 0, time.UTC)
+		f.root.lastActive["chat"] = f.clock.Add(-elapsed)
+		f.root.walkIdle(f.clock)
+
+		var chat WorkspaceStatus
+		for _, st := range f.root.WorkspaceStatuses(f.clock) {
+			if st.Def.ID == "chat" {
+				chat = st
+			}
+		}
+
+		if _, loaded := f.root.workspaces["chat"]; !loaded {
+			t.Fatalf("elapsed %s: a dirty workspace was unloaded", elapsed)
+		}
+		if !chat.Pinned {
+			t.Errorf("elapsed %s: chat is not reported pinned", elapsed)
+		}
+		if chat.Idle < elapsed {
+			t.Errorf("elapsed %s: the raw Idle field reads %s, want it unclamped",
+				elapsed, chat.Idle)
+		}
+
+		want := "idle 1m00s of 1m00s · pinned"
+		if got := chat.Label(); got != want {
+			t.Errorf("elapsed %s: reads %q, want %q", elapsed, got, want)
+		}
+	}
+}
+
+// The clamp is unconditional, not pinned-only: a workspace is also over
+// its budget in the window between the timeout elapsing and the next
+// one-second tick unloading it, and a readout that printed `of` backwards
+// for one frame is not worth a special case.
+func TestTheIdleReadoutClampsEvenWhenNotPinned(t *testing.T) {
+	f := lifecycleRootWithState(t,
+		config.State{Provider: &config.ProviderDefault{Provider: "mock", Model: "mock"}},
+		idleCfg(1, nil), "chat", "editor")
+	f.start(t)
+	f.root.switchWorkspace("chat")
+	f.root.switchWorkspace("editor")
+	f.advance(5 * time.Minute) // over budget, and NOT dirty
+
+	for _, st := range f.root.WorkspaceStatuses(f.clock) {
+		if st.Def.ID != "chat" {
+			continue
+		}
+		if st.Pinned {
+			t.Error("a clean workspace is reported pinned")
+		}
+		if got := st.Label(); got != "idle 1m00s of 1m00s" {
+			t.Errorf("reads %q, want the clamped countdown with no pinned label", got)
+		}
+		// The raw field is untouched -- only the rendering clamps.
+		if st.Idle < 5*time.Minute {
+			t.Errorf("Idle reads %s, want the raw elapsed time", st.Idle)
+		}
+	}
+}
+
+// Whatever the inputs, the rendered elapsed never exceeds the rendered
+// budget. Stated as the invariant rather than as the three cases above.
+func TestTheIdleReadoutNeverRendersElapsedPastItsBudget(t *testing.T) {
+	budgets := []time.Duration{30 * time.Second, time.Minute, 5 * time.Minute}
+	elapsed := []time.Duration{
+		0, time.Second, 29 * time.Second, time.Minute,
+		3 * time.Minute, time.Hour, 24 * time.Hour,
+	}
+	for _, budget := range budgets {
+		for _, el := range elapsed {
+			for _, pinned := range []bool{false, true} {
+				st := WorkspaceStatus{
+					Def:     WorkspaceDef{ID: "x", Name: "X"},
+					Loaded:  true,
+					Idle:    el,
+					Timeout: budget,
+					Pinned:  pinned,
+				}
+				label := st.Label()
+				shown := el
+				if shown > budget {
+					shown = budget
+				}
+				want := "idle " + shortDuration(shown) + " of " + shortDuration(budget)
+				if pinned {
+					want += " · pinned"
+				}
+				if label != want {
+					t.Errorf("budget %s elapsed %s pinned %v: %q, want %q",
+						budget, el, pinned, label, want)
+				}
+			}
 		}
 	}
 }
@@ -1086,9 +1281,9 @@ func TestTheSwitcherRendersTheIdleReadoutNotJustStoresIt(t *testing.T) {
 
 	// Rendered at the size the app actually gives it. MinSize is the
 	// refusal floor (50 cells), where rowWidths caps the note column at
-	// a third of the row and the readout elides to "idle 1m30s of…" --
-	// the one value this popup exists to show. The real width comes from
-	// PreferredSize, exactly as overlayRect applies it.
+	// a third of the row and a long readout would elide -- the one value
+	// this popup exists to show. The real width comes from PreferredSize,
+	// exactly as overlayRect applies it.
 	p := newSwitcherOverlay(f.root)
 	if minW, _ := p.MinSize(); minW != 50 {
 		t.Errorf("MinSize width is %d, want the unchanged 50-cell floor", minW)

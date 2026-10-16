@@ -29,16 +29,23 @@ below is byte-level, and it has to be *run*, not reviewed.
 `check_stale`, the four lock methods, the `file_locks` table), B6 (the
 envelope, the dispatcher, `appconfig.config_value`).
 
-**Consumed by:** F13 Editor Core (WORKFLOW.md Session 18), which is **stopped
-before any code** because of this gap. Then F9b's diff-card apply (18b) and
-F15's Filler integration (19) — both land an agent-proposed region in a buffer
-that the user then saves through this event.
+**Consumed by:** F13 Editor Core — which was **stopped before any code**
+by this gap when this doc was written, and has since **split in two**:
+**F13a** (the editing half, WORKFLOW.md Session 18a) is built and
+verified and deliberately ships NO save path, and **F13b** (Session 18b)
+is the half that calls this event. F13a carries every field this episode
+reports — `line_ending`, `crlf_count`/`lf_count`, `bom`,
+`trailing_newline`, `writable` — through unchanged and un-re-derived, so
+F13b has the values to write back without returning to the wire. Then
+F9b's diff-card apply (18d) and F15's Filler integration (19) — both
+land an agent-proposed region in a buffer that the user then saves
+through this event.
 
 ---
 
 ## Why this episode exists
 
-Session 18 (F13) was started against its full spec and stopped at its "settle
+Session 18a (F13) was started against its full spec and stopped at its "settle
 this before writing code" instruction, exactly as F9a (15), F10 (16) and F10c
 (16d) were. Save ownership was the question it was told to settle. **Three
 further findings came out of settling it**, two of them blockers F13 cannot
@@ -67,7 +74,7 @@ refuse.
 
 ### Finding 2 — `ReadProjectFile` destroys CRLF, so F13 cannot detect line endings either
 
-Not in Session 18's brief, and the more consequential of the two blockers.
+Not in Session 18a's brief, and the more consequential of the two blockers.
 
 `ProjectManager.read_file` uses `resolved.read_text(encoding="utf-8",
 errors="replace")` (`project_manager.py:269`). `read_text` opens in
@@ -108,7 +115,7 @@ doc needs that number corrected when F13 runs.)
 
 ## The decision: the backend owns the write, and the read moves with it
 
-Settled with Aryan during Session 18, before any code was written. CLAUDE.md's
+Settled with Aryan during Session 18a, before any code was written. CLAUDE.md's
 first hard rule bans writes from an **agent** path; a user saving their own
 buffer is not that, so both answers were permitted and this one is chosen on
 its merits.
@@ -495,7 +502,7 @@ the seven new metadata fields, before the `---` separator.
 
 B32 is backend-only and adds no Go code. These names are fixed here so F13
 does not invent different ones — the same service B24's doc did for Session
-18b:
+18d:
 
 ```go
 CmdWriteProjectFile  = "WriteProjectFile"     // protocol/types.go, after CmdReadProjectFile
@@ -509,7 +516,7 @@ EvProjectFileWritten = "ProjectFileWritten"   // protocol/types.go, after EvProj
 
 ## The `holder` contract
 
-Aryan's Session 18 decision, as amended by his Decision 1 before this episode
+Aryan's Session 18a decision, as amended by his Decision 1 before this episode
 was built. Recorded here because the backend is where the value is compared,
 and because F13 is written against it:
 
@@ -557,7 +564,7 @@ and because F13 is written against it:
 - **Do not add a `WriteFile` tool, a Coding-Assistant write path, or a
   checkpoint commit.** That is D29/D80 and v2.
 - **Do not build any frontend.** No buffer, no editor, no tab strip, no save
-  key. F13 is Session 18 and it is a separate session.
+  key. F13 is Session 18a and it is a separate session.
 - **Do not add a filesystem watcher.** F13's spec declines one explicitly; the
   save-time check is v1's answer.
 - **Do not change `index.max_file_kb`**, or `_build_index`'s cache key, or
@@ -718,12 +725,12 @@ alarming and is correct behaviour.
 
 ## Handoff
 
-- **F13 (Session 18) unblocks completely when this lands**, and its scope is
+- **F13 (Session 18a) unblocks completely when this lands**, and its scope is
   unchanged otherwise. It gains: `line_ending`/`bom`/`trailing_newline` to
   display and preserve, `writable` for autosave rule 1, `decode_replacements`
   to open a non-round-trippable file read-only, `WriteProjectFile` for save and
   autosave, and the `stale`/`locked` slugs its two refusal UIs render from.
-- **Four F13-doc corrections to make when Session 18 runs**, all found while
+- **Four F13-doc corrections to make when Session 18a runs**, all found while
   settling this episode and none of them product work:
   1. Its manual verification calls `backend\runtime\runtime.py` "21KB"; it is
      88,425 bytes.
@@ -743,7 +750,7 @@ alarming and is correct behaviour.
      `.point\`, and treat "no `.point\` found" as read-only — is F13's to
      implement via `ProjectResolve`; the backend half is already enforced here
      by `write_file` requiring a `Project`.
-- **F9b (18b) and F15 (19) inherit the write, and B24's handoff obligations
+- **F9b (18d) and F15 (19) inherit the write, and B24's handoff obligations
   are unchanged by it.** The apply path still owes: session-scoped guard
   resolution before anything commits, a `(mtime, size)` captured at region
   generation rather than re-derived at apply time, and a card state transition

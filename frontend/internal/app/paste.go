@@ -375,3 +375,23 @@ func itoa(n int) string {
 func (r *Root) pasteInFlight() bool {
 	return r.paste.active || r.paste.held != nil
 }
+
+// isBareModifier reports whether this KeyMsg is a modifier key-down with no
+// character behind it — see handleKey for the whole account of where it
+// comes from and what it cost.
+//
+// It is in this file because pasteable() below is the other half of the
+// same story: that function's `k.Runes[0] != 0` is the same guard applied
+// to the paste path alone, and keeping the two together is what stops the
+// next person from "simplifying" one without the other.
+func isBareModifier(k tea.KeyMsg) bool {
+	if k.Type != tea.KeyRunes || len(k.Runes) == 0 {
+		return false
+	}
+	for _, r := range k.Runes {
+		if r != 0 {
+			return false
+		}
+	}
+	return true
+}

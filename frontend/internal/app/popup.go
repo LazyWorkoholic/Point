@@ -215,6 +215,22 @@ type PopupConfig struct {
 	Hint func() string
 
 	MinW, MinH int
+
+	// NoteW is the width the note column wants, in cells. Zero takes
+	// rowWidths' default.
+	//
+	// The default caps the note at a third of the row, which is right
+	// for a popup whose NAMES are the content: the palette's rows are
+	// action names with a short binding beside them, and a note that
+	// grew would eat the thing the reader is scanning. It is wrong for
+	// the workspace switcher, where the names are "Chat" and "Editor"
+	// and the readout IS the content -- `idle 1m00s of 1m00s · pinned`
+	// is 28 cells against a 24-cell ceiling, so the pinned label was
+	// truncated away entirely and the row rendered `idle 1m00s of 1m00s
+	// …`. Measured, not inferred: rowWidths(86) still answers 24,
+	// because the 24-cell cap binds before the third-of-the-row rule
+	// does, so no amount of extra popup width could have fixed it.
+	NoteW int
 }
 
 // NewPopup builds a Popup and loads its first tab.
@@ -771,12 +787,35 @@ func (p *Popup) footerLine(th theme.Theme, width int) string {
 // between them is whatever is left over, so neither column needs a fixed
 // x-position. The ceilings exist only so a pathologically long name can
 // never grow far enough to collide with the binding.
-func rowWidths(avail int) (nameW, bindW int) {
+func rowWidths(avail, want int) (nameW, bindW int) {
 	const maxName, maxBind = 40, 24
 
-	bindW = maxBind
-	if half := avail / 3; bindW > half {
-		bindW = half
+	// minName is what the name column keeps whatever the note asked for.
+	// It is the guard a declared NoteW is clamped against, and it is the
+	// RIGHT invariant: "a note never takes more than a third of the row"
+	// protects nothing a caller cares about, while "a name is still
+	// readable" is the thing that would actually break. Measured while
+	// fixing the switcher -- a third of the row answered 27 cells at a
+	// 90-column popup, one short of the 28 its readout needs, and
+	// chasing that with more popup width is the layout wagging the text.
+	const minName = 16
+
+	if want > 0 {
+		bindW = want
+		if room := avail - minName - 1; bindW > room {
+			bindW = room
+		}
+	} else {
+		// The DEFAULT, unchanged: a third of the row, capped. Right for
+		// a popup whose names are the content -- the palette and Help --
+		// where a note that grew would eat what the reader is scanning.
+		bindW = maxBind
+		if third := avail / 3; bindW > third {
+			bindW = third
+		}
+	}
+	if bindW < 1 {
+		bindW = 1
 	}
 	nameW = avail - bindW - 1 // at least one cell of gap between them
 	if nameW > maxName {
@@ -826,7 +865,7 @@ func (p *Popup) renderRow(th theme.Theme, row array.Row, selected bool, width in
 	if avail < 1 {
 		avail = 1
 	}
-	nameW, bindW := rowWidths(avail)
+	nameW, bindW := rowWidths(avail, p.cfg.NoteW)
 
 	// Name flush LEFT, note flush RIGHT, gap between them — the same
 	// left/right composition footerLine uses. With the description column

@@ -113,12 +113,87 @@ type UI struct {
 	HistoryBatch int `toml:"history_batch"`
 }
 
+// Editor is the `[editor]` table (F13b / D90).
+//
+//	[editor]
+//	autosave = "off" | "after_delay" | "on_focus_change"
+//	autosave_delay_ms = 1000
+type Editor struct {
+	// Autosave is one of the three modes. An unrecognised value is
+	// treated as the default rather than as "off", because a typo'd
+	// config key silently disabling the thing that saves your work is the
+	// worst of the available failures -- see AutosaveMode.
+	Autosave string `toml:"autosave"`
+
+	// AutosaveDelayMs is how long after typing STOPS a save fires.
+	//
+	// 1000 is VS Code's number and F13's own doc gives the reason it was
+	// taken rather than chosen: it is long enough that you rarely save
+	// mid-token, which matters because an autosave with the preview
+	// running (F17) reloads the browser on a possibly-broken file.
+	AutosaveDelayMs int `toml:"autosave_delay_ms"`
+}
+
+// The three autosave modes, as F13's own doc spells them.
+const (
+	AutosaveOff           = "off"
+	AutosaveAfterDelay    = "after_delay"
+	AutosaveOnFocusChange = "on_focus_change"
+)
+
+// DefaultAutosaveDelayMs is `[editor] autosave_delay_ms` when absent.
+const DefaultAutosaveDelayMs = 1000
+
+// AutosaveMode is the configured mode, normalised.
+//
+// An absent value and an UNRECOGNISED value both give the default
+// (after_delay), which is deliberate and is the one place this differs
+// from IdleUnload's "ignored, next level used": there is no next level
+// here, and the alternatives for a typo are "off" or "after_delay". Off
+// means a misspelt key silently stops saving your work and nothing says
+// so; after_delay means a misspelt key leaves the default behaviour in
+// place, which is what the user had before they typed it. Only an exact
+// "off" turns it off.
+func (c Config) AutosaveMode() string {
+	switch c.Editor.Autosave {
+	case AutosaveOff, AutosaveAfterDelay, AutosaveOnFocusChange:
+		return c.Editor.Autosave
+	default:
+		return AutosaveAfterDelay
+	}
+}
+
+// AutosaveDelay is the after_delay interval. A non-positive value in the
+// file falls back to the default rather than producing a timer that fires
+// on the next tick -- which would be a save per keystroke, i.e. exactly
+// the thing Done-when 10 ("one save at the end, not thirty") forbids.
+func (c Config) AutosaveDelay() time.Duration {
+	ms := c.Editor.AutosaveDelayMs
+	if ms <= 0 {
+		ms = DefaultAutosaveDelayMs
+	}
+	return time.Duration(ms) * time.Millisecond
+}
+
 // Config is the whole file, reduced to what the frontend reads. Keys the
 // backend owns (database, providers, …) are deliberately absent: this side
 // never needed them, and parsing them here would create a second place they
 // could disagree.
 type Config struct {
 	UI UI `toml:"ui"`
+
+	// Editor is F13b's `[editor]` table: autosave and its delay. Like
+	// `[workspace]`, these are FRONTEND keys -- the timer is a Bubble Tea
+	// tick in this process and nothing in backend\appconfig.py reads
+	// either of them.
+	//
+	// `editor.max_file_kb` is NOT here and must not be added: that one is
+	// the backend's (appconfig.py's EDITOR_MAX_FILE_KB_DEFAULT, enforced
+	// in ProjectManager.write_file's step 3), and a second copy on this
+	// side would be a number that can disagree with the one actually
+	// doing the refusing. The editor learns the limit from the
+	// `too_large` refusal itself, which reports `limit_kb`.
+	Editor Editor `toml:"editor"`
 
 	// Workspace is F12's `[workspace]` table, held RAW rather than as a
 	// struct, and that is the whole reason it is a map.
@@ -200,10 +275,15 @@ func tomlInt(v any) (int64, bool) {
 
 // Defaults is what an absent config.toml means.
 func Defaults() Config {
-	return Config{UI: UI{
-		Theme: "turquoise", Background: "transparent",
-		Scrollback: 500, StreamTimeout: 120, HistoryBatch: 100,
-	}}
+	return Config{
+		UI: UI{
+			Theme: "turquoise", Background: "transparent",
+			Scrollback: 500, StreamTimeout: 120, HistoryBatch: 100,
+		},
+		Editor: Editor{
+			Autosave: AutosaveAfterDelay, AutosaveDelayMs: DefaultAutosaveDelayMs,
+		},
+	}
 }
 
 // Load reads config.toml.

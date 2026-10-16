@@ -25,6 +25,92 @@ failed check. The boundary is the episode, not the message count.
 Only `F1+F2` shares a session. B6 and B7 used to — B6 grew too large in the
 Session 0 audit, so they are now one episode each.
 
+### Splitting an episode
+
+**An episode that turns out to need more than one build session splits into
+lettered sub-episodes — `F13a`, `F13b` — and each half gets its own doc.**
+
+The rule the split exists to protect: `completed/` is the only place
+completion is claimed, so a doc must be entirely true or entirely absent.
+One shared doc for a half-built episode is half-true, which is worse than
+either.
+
+So:
+
+1. **Pick a seam, not a stopping point.** The half that ships has to be
+   complete in itself — nothing in it provisional pending the rest. F13's
+   seam was the save path: the editing half is fully testable without it.
+2. **Both halves get a task doc**, `tasks/frontend/Fxxa-<slug>.md` and
+   `tasks/frontend/Fxxb-<slug>.md`, each carrying its requirements
+   **verbatim** from the combined doc. Do not re-derive or re-word them —
+   the original wording is what was reviewed. `Fxxb`'s metadata says
+   **Depends on: Fxxa (done)**. Writing `Fxxa`'s after the fact feels
+   redundant when the work is already done; write it anyway. **F9a is
+   the counterexample this step exists for:** it split before any code
+   was written, got `completed/frontend/F09a-task-tray-cards.md`, and
+   never got a matching task doc — `tasks/frontend/F09-task-tray-cards.md`
+   still describes all three thirds, so there is no document anywhere
+   stating what F9a alone was asked to do. (B1–B5 and S12b also have
+   completed docs with no task doc; those predate the `tasks/` tree and
+   are not a precedent.)
+3. **Write the finished half into `completed/frontend/Fxxa-<slug>.md`**,
+   stating in its first section which Done-whens it covers and which it
+   does not, by number.
+4. **Retire the combined task doc** once both halves exist. Three
+   documents describing overlapping scope is how they drift; git keeps
+   the history.
+5. **Both INDEXes get a row**, and the finished half is 🟡 not ✅ —
+   "built and verified; the episode is NOT complete; Fxxb is the
+   remainder". F9a's row is the model.
+6. **The gate names what it does not cover.** `gate_f13a.ps1`'s footer
+   lists the seven Done-whens that are F13b's, so a green run cannot be
+   mistaken for a green episode.
+
+Precedents: **F9 → F9a/F9b/F9c** and **F10 → F10/F10b/F10c** both split
+*before* any code was written. **F13 → F13a/F13b** is the first to split
+**mid-build**, which is the case this section is really for — and F13's
+own task doc had sanctioned it in advance ("may take two sessions").
+
+**Session labels and episode letters are separate namespaces, but when a
+split episode can have them line up, make them line up.** `16b`–`16h`,
+`17b`, `17c`, `18d` and `23b` are *interleaved sessions* — a different
+episode slotted between numbered ones — not sub-episodes of 16, 17, 18
+or 23. F13's split collided with one of those: F9b already held `18b`.
+Rather than leave F13's halves on mismatched labels, **F9b was moved to
+`18d`**, so F13a is Session 18a and F13b is Session 18b — doc letter and
+session letter the same character. A label is only a position in this
+file; moving one costs a few references and buys a reader never having to
+remember which session letter maps to which doc letter.
+
+**That renumbering is safe, and here is the whole dependency chain so it
+does not have to be inferred:**
+
+```
+18a  F13a  editing half          needs F12, B7, B32 — all landed. DONE.
+18b  F13b  save half             needs 18a only (buffer, doc, tab strip).
+18d  F9b   diff card             needs 18a only — specifically
+                                 doc.ApplyRegion, which 18a shipped with
+                                 no caller for exactly this. Plus B24 (17b).
+19   F15   filler-explainer      CALLS F13a's buffer and F9b's diff
+                                 function; writes nothing to disk. 18b is
+                                 a SCHEDULING prerequisite only — v1 is
+                                 not feature-complete while F13 is open.
+```
+
+`18b` and `18d` are mutually independent — neither reads the other's code
+— so either may run first; `18b` before `18d` is only the natural reading
+order, and 19 is the first session that both must precede. Nothing that previously
+depended on F9b-at-18b depends on it being *second*; it depended on it
+being after the editor buffer, and 18d still is.
+
+Note the session blocks below are in the order they were slotted, not
+alphabetical — 18d sits physically between 18a and 18b, the same way
+`16d`, `16g`, `16h`, `16e`, `16b` appear in that order. The label, not the
+position, is what orders a session.
+
+Refer to a split episode by its **doc name** (`F13a`, `F13b`), which is
+unambiguous either way.
+
 ---
 
 ## Phase 0 — Setup (you, ~10 minutes)
@@ -1053,7 +1139,7 @@ evidence is in `design/completed/frontend/F09a-task-tray-cards.md`; the short
 version:
 
 1. **No Editor workspace exists.** `WorkspaceEditor` is a bare `layout`
-   constant; there is no second `Workspace` implementation. F13 (Session 18)
+   constant; there is no second `Workspace` implementation. F13 (Session 18a)
    builds it, and F15 (Session 19) depends on both F13 *and* F9. So the diff
    card's only specified apply target and its only specified trigger both
    belong to later sessions. There is also no `WriteProjectFile` event, which
@@ -1089,7 +1175,7 @@ backend-resolves / frontend-renders split this project has kept through
 `parse_invocation`, `ContextReport` and `ListDirectory` — in the worst place
 for it, since the input is adversarial by nature and the consumer is a
 destructive write path. **Session 17b (B24) fixes that**, and F9's diff-card
-work resumes at Session 18b.
+work resumes at Session 18d.
 
 **Paste:**
 ```
@@ -1148,7 +1234,7 @@ and how they were fixed, and what the next episode inherits. Add a row
 to design/completed/frontend/INDEX.md's status table, marked SPLIT --
 not complete -- and naming F9b/F9c as the remainder.
 
-Record the four blockers with their file:line evidence, so Session 18b
+Record the four blockers with their file:line evidence, so Session 18d
 and Session 23b do not have to re-derive them.
 
 Record exactly how a finished task's result text is retrieved -- the
@@ -1956,7 +2042,7 @@ answerable in Go, because the frontend never learns what the shown region was.
 Full trace in `design/tasks/backend/B24-filler-proposal-event.md`'s "Why this
 episode exists".
 
-**Placed here, before F13**, so that F9's diff-card session (18b) has both its
+**Placed here, before F13**, so that F9's diff-card session (18d) has both its
 dependencies — this event and the Editor — the moment it starts. B24 itself
 has no frontend dependency and could run earlier; it is next to its consumer
 on purpose.
@@ -1999,7 +2085,7 @@ row to that INDEX.md's status table.
 
 Record the exact FillProposal payload shape -- every field name,
 including shown_start/shown_end -- and the full list of rejection
-reason slugs. Session 18b is written against these exact names.
+reason slugs. Session 18d is written against these exact names.
 
 Record the MEASURED compliance rate out of five runs, and the model it
 was measured against. That number is unrecoverable after this session
@@ -2017,7 +2103,7 @@ write event in the backend, and the frontend writes nothing but `state.json`
 and its two log files — so every save, autosave and refusal path in F13's
 spec is written against a path that does not exist.
 
-**Why this episode exists.** Session 18 (F13) was started against its full
+**Why this episode exists.** Session 18a (F13) was started against its full
 spec and **stopped before any code** at its own "settle this before writing
 code" instruction. Save ownership was settled: **the backend owns the write,
 and the read moves with it.** `pathguard.py`'s own docstring already names
@@ -2037,7 +2123,7 @@ line ending from and F13's Done-when #2 cannot pass; and `index.max_file_kb`
 invisible in the file tree. Full trace in
 `design/tasks/backend/B32-write-project-file.md`'s "Why this episode exists".
 
-**Placed here, before F13**, for the same reason 17b (B24) sits before 18b:
+**Placed here, before F13**, for the same reason 17b (B24) sits before 18d:
 the consumer should find its dependency already landed. Unlike B24, this one
 is **mandatory** — F13 does not start without it.
 
@@ -2082,7 +2168,7 @@ and how they were fixed, and what the next episode inherits. Add a row
 to that INDEX.md's status table.
 
 Record the exact ProjectFileWritten payload shape -- every field name --
-and the full list of refusal reason slugs. Session 18 (F13) and 18b
+and the full list of refusal reason slugs. Session 18a (F13a) and 18d
 (F9b) are both written against these exact names.
 
 Record the seven new ReadProjectFile metadata fields and what each one
@@ -2096,19 +2182,41 @@ once the session is over.
 
 ---
 
-# SESSION 18 — F13 Editor Core
+# SESSION 18a — F13a Editor Core: the Editing Half  ✅ DONE
 
-**Goal:** the largest frontend episode. **May take two sessions** — if so, stop at
-a working point, record what is done, `/clear`, and resume with a note.
+**Goal:** the largest frontend episode. **It did take two sessions**, exactly as
+this entry anticipated: it split mid-build at the save path. This session is
+**F13a — the editing half**, and it is complete and verified (seven rounds).
+The save half is **Session 18b (F13b)** below.
 
-**Prerequisite, mandatory:** Session 17c (B32). The save path did not exist
-when this episode was first written; B32 builds it, and every field name below
-comes from B32's completed doc. If B32 has not landed, this session does not
-start.
+> Read `design/completed/frontend/F13a-editor-core-editing.md` before 18b.
+> It records the thirteen pre-code decisions (A1–A3, B1–B10), the five
+> Build-section assumptions that did not hold, and what each of the seven
+> rounds actually fixed. See also "Splitting an episode" above.
+
+**Prerequisites, all three** — the same three the INDEX row lists
+(`F12` + `B7, B32`). Recorded for consistency with 18b/18d/19; this
+session is done, so nothing here gates anything now:
+
+1. **F12** (Session 17) — the workspace registry and lifecycle the Editor
+   is registered into. `LeaderKey: "e"`, `MinSize{70,16}`, the idle
+   timers, and the dirty-buffer skip are all F12's surface.
+2. **B7** (Session 2) — `project.list_files` for the file tree, plus
+   `pathguard.resolve_path` and `ProjectManager.read_file` behind the
+   open path.
+3. **B32** (Session 17c) — **for its READ path, not its write path.** The
+   save path did not exist when this episode was first written, and B32
+   builds it; what F13a actually consumes is the metadata B32 added to
+   `ReadProjectFile` (`line_ending`, `crlf_count`/`lf_count`, `bom`,
+   `trailing_newline`, `decode_replacements`, `writable`), which it
+   carries through un-re-derived so 18b can write back without
+   returning to the wire. Every field name in the paste below comes from
+   B32's completed doc.
 
 **Paste:**
 ```
-Read CLAUDE.md, design/tasks/frontend/LAYOUT.md, and F13-editor-core.md.
+Read CLAUDE.md, design/tasks/frontend/LAYOUT.md, and
+design/completed/frontend/F13a-editor-core-editing.md.
 Then read design/completed/backend/B32-write-project-file.md -- the save
 path's real shape, which this episode is written against field for
 field.
@@ -2178,7 +2286,7 @@ thirty — read the file's mtime, do not watch the dirty marker.
 
 **Record:**
 ```
-Write design/completed/frontend/F13-editor-core.md following the format
+Write design/completed/frontend/F13a-editor-core-editing.md following the format
 in design/completed/backend/INDEX.md. Include the bugs we hit and how
 they were fixed, and what the next episode inherits. Add a row to
 design/completed/frontend/INDEX.md's status table. If this took two
@@ -2201,15 +2309,31 @@ the next reader of it is not misled the same way.
 
 ---
 
-# SESSION 18b — F9b Diff Card (F9 resumed)
+# SESSION 18d — F9b Diff Card (F9 resumed)
+
+> **This session was `18b` until F13 split.** It moved to `18d` so F13's
+> two halves could be `18a`/`18b` and match their doc letters. Nothing
+> about its dependencies changed — see "Splitting an episode" above.
+> Older docs may still say "Session 18b" for this; they mean this block.
 
 **Goal:** the second third of F9. Every agent-proposed change is reviewed,
 editable, and reversible before it touches a buffer.
 
-**Prerequisites, all three mandatory:** F13's editor buffer (Session 18) to
-apply into, B24's `FillProposal` event (Session 17b) to compute a diff from,
-and `CheckFileStale` for the refusal. If any is not landed, this session does
-not start.
+**Prerequisites, all four mandatory** — the same four the INDEX row
+lists (`F9a, F13a` + `B24`):
+
+1. **F9a** (Session 15, done) — the task tray and result cards this card
+   is rendered inside. This session is the second third of F9, so F9a is
+   a prerequisite even though the Goal line only implies it.
+2. **F13a's editor buffer** (Session 18a, done) to apply into —
+   `doc.ApplyRegion` is the entry point it shipped, one splice and one
+   undo step, deliberately with no caller.
+3. **B24's `FillProposal` event** (Session 17b) to compute a diff from.
+4. **`CheckFileStale`** for the refusal.
+
+If any is not landed, this session does not start. **F13b (18b) is NOT a
+prerequisite:** the card applies into a buffer, and saving that buffer is
+the user's next keypress, not this session's concern.
 
 **Runs before Session 19 (F15)**, which reuses this card's diff mechanism for
 the Filler's inline diff and needs a real function to call.
@@ -2303,11 +2427,83 @@ shows after a failed apply. That is the part most likely to rot.
 
 ---
 
+# SESSION 18b — F13b Editor: Save, Locks, Autosave (F13 closed)
+
+**Goal:** close F13. Done-when 2, 7, 8, 9, 10, 11, 12 — the half F13a
+deliberately did not build.
+
+**Prerequisites, mandatory** — the same three the INDEX row lists
+(`F13a (done)` + `B7, B32`):
+
+1. **F13a** (Session 18a), done. Read
+   `design/completed/frontend/F13a-editor-core-editing.md` first: it
+   names the three things this session inherits unbuilt (A2's holder key,
+   B9's `OpenWorkspaceOverlayMsg`, B10's `[diff]` view) and the one
+   decision still open (B4's save-side mixed-ending policy).
+2. **B32** (Session 17c) — `WriteProjectFile` itself. There is no
+   file-write event in the backend without it, and CLAUDE.md's first hard
+   rule means this session cannot add one from Go.
+3. **B7** (Session 2) — `pathguard.resolve_path`, `check_stale`, the four lock
+   methods and the `file_locks` table. Every lock behaviour in Done-when
+   7 and 11 is B7's surface, not new work here.
+
+**Numbered 18b so the session letter matches the doc letter.** F9b held
+`18b` and was moved to `18d` to free it — see "Splitting an episode"
+above for the full chain. Order: **18a** (F13a) → **18b** (F13b, this
+session, needs 18a only) → **18d** (F9b, needs 18a's `doc.ApplyRegion`,
+independent of this session) → **19** (F15, which calls neither this
+session's code nor the save path, but cannot be "v1 feature-complete"
+while F13 is open). 18d's block sits physically above this one in the file;
+that is slotting order, not dependency order.
+
+**Paste:**
+```
+Read CLAUDE.md, design/tasks/frontend/F13b-editor-save-locks.md, and
+design/completed/frontend/F13a-editor-core-editing.md -- what is already
+built and what this session inherits unbuilt.
+Then read design/completed/backend/B32-write-project-file.md for the
+save path's real shape: WriteProjectFile's nine ordered steps, its seven
+refusal slugs, and why a successful write's reply carries the new mtime
+(autosave rule 2, and why no follow-up CheckFileStale is needed).
+
+Start from backend\tests\gate_f13a.ps1 rather than CLAUDE.md's snippet:
+it already has the scratch-profile setup, the fixtures, the Assert-That
+accumulator and the Continue preference B32 established for any gate
+that provokes backend stderr.
+
+Stop at the verification gate with PowerShell checks.
+```
+
+**Record:**
+```
+Write design/completed/frontend/F13b-editor-save-locks.md. Include the
+CRLF/BOM round-trip evidence (hashes before and after), which ending a
+mixed file is written with and why, the holder key's persisted shape,
+and any Windows Terminal key combinations that did not arrive.
+Move F13a's row in design/completed/frontend/INDEX.md from the split
+note to a plain F13 ✅, and add F13b's own row.
+```
+
+**Then:** commit · `/clear`
+
+---
+
 # SESSION 19 — F15 Filler-Explainer Integration
 
 **Goal:** v1 feature-complete.
 
-**Paste:**
+**Prerequisites:** **F13a** (Session 18a, done) for the buffer, ghost
+text, apply-into-buffer and undo; **F9b** (Session 18d) for the diff
+function this episode calls rather than re-implements; **B11** and
+**B24** (Session 17b) for the agent and its parsed, validated proposal.
+
+**F13b (Session 18b) is a scheduling prerequisite, not a technical one.**
+F15 writes nothing to disk in any phase — its own Do-NOT says so, apply
+goes into the UNSAVED buffer, and Done-when 5 is verified by comparing
+`LastWriteTime` across apply-then-undo, which never saves. But F15 is the
+last P1 episode and "v1 feature-complete" is not true while F13 is still
+open, so **18b runs before 19** regardless. The INDEX row reads `F13a,
+F9b` for the same reason: it records what this episode calls.
 ```
 Read CLAUDE.md, design/tasks/frontend/F15-explainer-integration.md,
 design/completed/backend/B24-filler-proposal-event.md for the parsed
@@ -2320,7 +2516,7 @@ diff card; applying goes into the UNSAVED buffer so Ctrl+Z undoes it.
 Nothing writes to disk.
 
 F9 was SPLIT during its own session; this episode's dependency is F9b
-(the diff card, Session 18b), not "F9". The fill reply is no longer raw
+(the diff card, Session 18d), not "F9". The fill reply is no longer raw
 model text either: B24 (Session 17b) parses and VALIDATES it in the
 backend into a structured proposal with the shown region attached, and
 F9b computes the diff from that. Do not parse the model's JSON here,
@@ -2447,6 +2643,15 @@ diff the two files to find out.
 ---
 
 # SESSION 22 — F14 Editor Terminal
+
+<!-- KNOWN GAP, deliberately not fixed: this block states no prerequisites,
+     while F14's INDEX row lists `F13a`. Found during the F13-split
+     renumbering audit (18a/18b/18d/19 were reconciled; this was left
+     alone as out of scope). It is a real mismatch of the kind
+     "Splitting an episode" asks blocks to avoid, NOT a new bug — do not
+     re-report it as one. Fix it when F14 is next touched: F14 needs
+     F13a's editor workspace, and the "nothing depends on it" line below
+     is about what depends on F14, not what F14 depends on. -->
 
 **Cuttable.** If time is short, skip it — nothing depends on it.
 
