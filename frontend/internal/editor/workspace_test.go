@@ -275,7 +275,7 @@ func TestOpeningAFileSendsTheProjectIDForAnInProjectPath(t *testing.T) {
 }
 
 // Opening a file already open focuses its tab rather than loading it twice.
-func TestOpeningAnAlreadyOpenFileFocusesIt(t *testing.T) {
+func TestOpeningAnAlreadyOpenFileSwitchesToItsTab(t *testing.T) {
 	ws, rec := newWorkspaceWithRecorder()
 	ws.projectID, ws.projectRoot = "p1", "C:\\p"
 	reply(t, ws, queryReadFile, protocol.EvProjectFile, map[string]any{

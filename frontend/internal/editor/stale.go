@@ -89,10 +89,35 @@ func newStaleDialog(d *doc, diskMtime float64) *staleDialog {
 	}
 }
 
-// MinSize is LAYOUT.md's "confirm 40x7" floor widened for a third
-// button. Three bracketed labels plus two gaps do not fit forty cells,
-// and Confirm's own naturalWidth bug (a widget that truncates its only
-// controls) is the one this avoids by measuring rather than guessing.
+// staleBody is the dialog's text, as rows, so MinSize, PreferredSize
+// and View all count the SAME rows.
+//
+// It is a method returning the lines rather than three places that each
+// know how tall the dialog is. That duplication is what produced the
+// rendering bug below, and a shared accessor is what stops it coming
+// back the next time a line is added.
+func (s *staleDialog) staleBody() []string {
+	return []string{
+		s.name + " changed on disk since you opened it.",
+		"",
+		"Nothing has been written. Choose what to keep:",
+		"  reload     throw away your edits, take the file on disk",
+		"  overwrite  throw away the change on disk, write your buffer",
+		"  diff       see what is different first",
+	}
+}
+
+// chromeRows is what View adds below the body: a blank row, the button
+// row, and the key hint.
+const chromeRows = 3
+
+// MinSize is the REFUSAL threshold -- the size below which Root declines
+// to open this at all -- not the rendered size. See PreferredSize.
+//
+// Width is measured from the button row rather than guessed, which is
+// the trap Confirm's own naturalWidth doc records: a widget that
+// truncates its only two controls is broken for every future caller.
+// Three bracketed labels plus two gaps do not fit forty cells.
 func (s *staleDialog) MinSize() (int, int) {
 	w := 4 // box.go's fitCells padding plus the border
 	for i, l := range staleLabels {
@@ -101,10 +126,80 @@ func (s *staleDialog) MinSize() (int, int) {
 			w += len(buttonGapCells)
 		}
 	}
-	if w < 54 {
-		w = 54
+	if w < staleMinW {
+		w = staleMinW
 	}
-	return w, 9
+	// The floor stays LAYOUT.md's "confirm 40x7" height. Raising it
+	// would mean terminals that can open this today stop being able to,
+	// and a dialog that warns about losing work must not vanish instead
+	// -- F06's own "Known limitation" note, and Confirm's reason for
+	// splitting the two sizes.
+	return w, confirmFloorRows
+}
+
+// staleMinW and confirmFloorRows: the dialog's own floors.
+const (
+	staleMinW        = 60
+	confirmFloorRows = 7
+)
+
+// PreferredSize is what makes this a MaximisedOverlay, and it is the fix
+// for a real rendering bug the gate found.
+//
+// # What was wrong
+//
+// MinSize returned a flat height of 9. For a plain Overlay, overlayRect
+// treats MinSize as the ACTUAL rendered size (overlay.go), so the box
+// got 9 - 2 = SEVEN content rows -- while View emits nine. Measured, by
+// rendering it:
+//
+//	row 0..5  the body
+//	row 6     the blank
+//	row 7     "[ reload ]   overwrite   diff"      <- CUT
+//	row 8     "<-/-> move  return choose  ..."     <- CUT
+//
+// Both reported symptoms fall out of that one number. The three options
+// "render as plain unbracketed text" because rows 3-5 ARE plain
+// unbracketed text -- the body's own explanatory list -- and the
+// bracketed, accented button row that would have shown which one had
+// focus was below the fold. The missing footer is the same cut, one row
+// further down.
+//
+// So it was neither a width bug nor a generic popup component rendering
+// the wrong convention: this is a bespoke overlay whose declared height
+// was two rows short of its own output.
+//
+// # Why PreferredSize rather than a taller MinSize
+//
+// Exactly Confirm's reasoning, which fixed this identical defect on
+// this identical axis ("MinSize returned a FLAT height of 7 ... Same
+// defect, one axis over"). MinSize is also the refusal threshold, so
+// raising it shrinks the set of terminals that can show the dialog at
+// all. PreferredSize lets it ask for what it needs and leaves the floor
+// alone; overlayRect clamps the answer to [MinSize, terminal], so a
+// terminal too short to fit clips rather than refuses -- the previous
+// behaviour, now reached only when it is genuinely necessary.
+func (s *staleDialog) PreferredSize(availW, availH int) (int, int) {
+	w, _ := s.MinSize()
+	// ...and the same accounting on the WIDTH axis, for the same reason.
+	// The explanatory lines are what tell the user what each button
+	// DOES, so losing their tails to padCells is losing the only place
+	// the difference between reload and overwrite is written down.
+	// Measured from the longest line rather than assumed: the widest is
+	// the overwrite row at 61 cells, which a 60-cell floor cuts.
+	for _, line := range s.staleBody() {
+		if need := visibleWidth(line) + 4; need > w {
+			w = need
+		}
+	}
+	if availW > 0 && w > availW {
+		w = availW
+	}
+	h := len(s.staleBody()) + chromeRows + 2 // +2 for the border
+	if h < confirmFloorRows {
+		h = confirmFloorRows
+	}
+	return w, h
 }
 
 func (s *staleDialog) Title() string { return "Changed on disk" }
@@ -165,23 +260,20 @@ func (s *staleDialog) View(th theme.Theme, w, h int) string {
 		textW = 1
 	}
 	var b strings.Builder
-	body := []string{
-		s.name + " changed on disk since you opened it.",
-		"",
-		"Nothing has been written. Choose what to keep:",
-		"  reload     throw away your edits, take the file on disk",
-		"  overwrite  throw away the change on disk, write your buffer",
-		"  diff       see what is different first",
-	}
-	for _, line := range body {
-		b.WriteString(th.Style(theme.TextPrimary).Render(padCells(line, textW)))
+	for _, line := range s.staleBody() {
+		b.WriteString(th.Style(theme.TextPrimary).Render(padCells(truncateCells(line, textW), textW)))
 		b.WriteByte('\n')
 	}
 	b.WriteByte('\n')
 	b.WriteString(centreCells(s.renderButtons(th), textW))
 	b.WriteByte('\n')
+	// Short enough to fit the 60-cell floor less its four cells of box
+	// and padding. The previous hint was 57 characters against a 50-cell
+	// budget and lost its tail to padCells' silent cut -- the same
+	// no-ellipsis truncation popup.go's renderRow doc warns about, and
+	// a key hint that stops mid-word is worse than a shorter one.
 	b.WriteString(th.Style(theme.TextDim).Render(
-		padCells("←/→ move   ⏎ choose   r/o/d direct   esc leave it refused", textW)))
+		padCells(truncateCells("←/→ move   ⏎ choose   r/o/d direct   esc cancel", textW), textW)))
 	return b.String()
 }
 

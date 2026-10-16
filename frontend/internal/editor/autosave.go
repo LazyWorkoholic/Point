@@ -122,10 +122,29 @@ func (w *Workspace) armAutosave(d *doc) tea.Cmd {
 	if w.autosaveMode != config.AutosaveAfterDelay {
 		return nil
 	}
-	if d.autosaveBlocked || !d.canSave() {
+	if !d.canSave() {
 		// Rule 1, applied before the timer rather than at its end:
 		// scheduling a tick that is certain to refuse is how "does not
 		// spam refusals" becomes "refuses silently once a second".
+		//
+		// RECORDED, not just skipped. This early return used to fire
+		// before saveDoc -- the only place that set autosaveBlocked --
+		// so a file held by another holder was silently never
+		// autosaved and the status bar's "autosave stopped" segment,
+		// which is gated on that flag, never appeared. The file stayed
+		// correctly untouched and nothing said why, which is the
+		// hint-that-lies failure in reverse: silence where a state
+		// exists. Found by gate_f13b step 7.
+		//
+		// canSave() is exactly the right predicate to latch on: every
+		// reason it returns false for -- read-only, held by another
+		// holder, no path -- is a reason that cannot change without an
+		// event that clears the flag again (a reload, a successful
+		// write, a lock taken back, a manual save).
+		d.autosaveBlocked = true
+		return nil
+	}
+	if d.autosaveBlocked {
 		return nil
 	}
 	gen, path := d.autosaveGen, d.path

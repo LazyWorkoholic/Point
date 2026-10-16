@@ -236,9 +236,19 @@ func TestTreeEnsureVisibleLeavesAnUnrequestedScrollAlone(t *testing.T) {
 
 	// ...but an out-of-range top is still pulled back, whether or not a
 	// reveal was requested: a blank window is not a scroll position.
+	//
+	// Clamped to len-ROWS, not len-1. This test asserted len-1 until a
+	// manual report of a rendering glitch at the end of both the tree
+	// and the code pane, which was exactly that bound: it leaves ONE
+	// row visible however tall the viewport is, and a wheel notch back
+	// then shows four. len-rows leaves a full window showing, so the
+	// one-row state is unreachable. See textutil.go's clampTop.
 	tr.top = 9999
 	tr.ensureVisible(10)
-	if tr.top != len(tr.rows)-1 {
-		t.Errorf("top = %d, want it clamped to %d", tr.top, len(tr.rows)-1)
+	if want := len(tr.rows) - 10; tr.top != want {
+		t.Errorf("top = %d, want it clamped to %d (a FULL 10-row window)", tr.top, want)
+	}
+	if visible := len(tr.rows) - tr.top; visible != 10 {
+		t.Errorf("%d rows visible in a 10-row viewport, want 10", visible)
 	}
 }

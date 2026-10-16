@@ -232,7 +232,32 @@ func (w *Workspace) closeTab(i int) (string, tea.Cmd) {
 }
 
 // confirmCloseDirty builds C3's two-button dialog.
+//
+// # It PAUSES this document's autosave first, and has to
+//
+// Found by gate_f13b step 5. The dialog asks a question whose whole
+// point is whether these edits survive, and the window it is open for
+// is longer than the autosave debounce -- so a tick armed by the last
+// keystroke would land while the user was still reading, write the
+// edits, and make both buttons meaningless: Close would discard a
+// buffer whose contents were already on disk, and C3's "Close
+// DISCARDS, no implicit save" would be false.
+//
+// Paused the same way every other refusal is -- autosaveBlocked, which
+// armAutosave checks -- plus a generation bump, which is what retires
+// the tick that is ALREADY in flight. The flag alone is not enough:
+// armAutosave is consulted when a timer is SET, and the dangerous tick
+// here was set a moment ago by the keystroke that made the file dirty.
+// onAutosaveTick compares generations, so bumping it makes that tick a
+// no-op on arrival.
+//
+// Cancel resumes it (see onCloseCancelled). Close makes it moot -- the
+// document is gone, and docByPath then finds nothing for any tick that
+// was still outstanding.
 func (w *Workspace) confirmCloseDirty(d *doc) tea.Cmd {
+	d.autosaveBlocked = true
+	d.autosaveGen++
+
 	path, name := d.path, d.name()
 	body := name + " has unsaved changes.\n\n" +
 		"Close discards them. Cancel, then ctrl+s, keeps them."
@@ -243,8 +268,24 @@ func (w *Workspace) confirmCloseDirty(d *doc) tea.Cmd {
 		body += "\n\nAutosave is stopped for this file — see the status bar."
 	}
 	c := app.NewConfirm("Close without saving?", body, "Close", "Cancel",
-		func() tea.Msg { return closeDirtyMsg{path: path} })
+		func() tea.Msg { return closeDirtyMsg{path: path} }).
+		OnCancel(func() tea.Msg { return closeCancelledMsg{path: path} })
 	return func() tea.Msg { return app.OpenWorkspaceOverlayMsg{Overlay: c} }
+}
+
+// closeCancelledMsg: the user kept the tab. Resume its autosave.
+type closeCancelledMsg struct{ path string }
+
+func (w *Workspace) onCloseCancelled(m closeCancelledMsg) tea.Cmd {
+	d := w.docByPath(m.path)
+	if d == nil || !d.dirty {
+		return nil
+	}
+	// Unblocked and re-armed, so the edits the user just chose to keep
+	// are written on the ordinary schedule rather than sitting unsaved
+	// until the next keystroke happens to arm a new timer.
+	d.autosaveBlocked = false
+	return w.armAutosave(d)
 }
 
 // closeDirtyMsg is the confirmed discard.

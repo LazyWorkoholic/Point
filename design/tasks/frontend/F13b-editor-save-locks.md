@@ -219,6 +219,29 @@ autosave rule 2 ("record Point's own write mtimes"), so a save needs no
 follow-up `CheckFileStale` — B32 built the reply that way for this reason.
 `CmdCheckFileStale` exists and may stay unused.
 
+## Spun out of this episode's testing — F19 and B33
+
+Manual testing after this episode found three things that are **not on
+F13's Done-when list** and are therefore not this episode's:
+
+- **F19** (`F19-editor-keymap-scroll.md`) — the tree's h/j/k/l vim
+  motions were undocumented, closing a tab had no one-key binding, and
+  the scroll offset in both the code pane and the tree was bounded by
+  `count-1` instead of `count-rows` (so the end of any list showed one
+  item). F19 depends on F13a and F13b and reuses C3's confirm.
+- **B33** (`../backend/B33-transport-utf8.md`) — `backend\main.py`
+  read stdin and wrote stdout in the ANSI codepage, not UTF-8, so a
+  save of any file with non-ASCII bytes was silently mojibake'd (and
+  REPORTED as success) or dropped outright. This is why
+  `design\GIT_STRATEGY.md` and `design\project_idea.md` would not save
+  while `runtime.py` appeared to. Live since B6; nothing in this
+  episode or B32 caused it, and nothing here can fix it — the defect is
+  below the wire.
+
+Neither reopens this episode. **Done-when 2's byte-exactness is only
+true for a non-ASCII file once B33 has landed**, which is worth knowing
+before reading this episode's own gate as proof of it.
+
 ## Handoff
 
 State after this episode: **F13 is complete.** The editor is a correct

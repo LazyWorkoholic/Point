@@ -113,17 +113,15 @@ func (w *Workspace) onLockResult(req pendingReq, env protocol.Envelope) tea.Cmd 
 	}
 
 	if p.OK {
-		was := d.lock
 		d.lock = lockHeld
 		d.lockedBy, d.lockedAge = "", 0
-		if req.kind == queryTakeOverLock {
+		if req.kind == queryRetakeLock {
 			// A take-over is the one lock transition worth announcing:
 			// the user asked for it explicitly, and the file goes from
 			// refusing saves to accepting them.
 			d.autosaveBlocked = false
 			return w.say("took over the lock on " + d.name())
 		}
-		_ = was
 		return nil
 	}
 
@@ -131,6 +129,13 @@ func (w *Workspace) onLockResult(req pendingReq, env protocol.Envelope) tea.Cmd 
 	d.lock = lockHeldByOther
 	d.lockedBy = p.Holder
 	d.lockedAge = p.AgeSeconds
+	if req.kind == queryRetakeLock {
+		// The backend just re-checked the age against its own clock and
+		// said no. This is the authoritative answer, unlike the one the
+		// frontend used to give from d.lockedAge.
+		return w.say(d.name() + " is " + d.lockLabel() +
+			" — still live, so the lock was not taken")
+	}
 	return w.say(d.name() + " is " + d.lockLabel() + " — opened read-only")
 }
 
@@ -259,16 +264,35 @@ func (w *Workspace) ReleaseLocks() {
 	w.heartbeatOn = false
 }
 
-// takeOverActive is ctrl+shift+l: steal a lock the status bar says is
-// stale.
+// takeOverActive is f6: take a lock whose holder has gone quiet.
 //
-// Refused while the other holder's beat is FRESH, and refused here
-// rather than by the backend -- take_over_lock steals unconditionally by
-// design ("calling take_over is the caller declaring they already
-// decided to steal it"), so the staleness judgement has to be made by
-// whoever offers the button. Offering it on a live lock would make
-// "[take over]" a way to yank a file out from under a colleague who is
-// actively editing it.
+// # Two bugs the gate found here, and what replaced them
+//
+//  1. IT WAS BOUND TO ctrl+shift+l, WHICH DOES NOT EXIST. On Windows,
+//     bubbletea's console-record reader produces the same control
+//     character for Ctrl+L and Ctrl+Shift+L (0x0C), so both arrive as
+//     `ctrl+l` -- and ctrl+l is app.redraw's shipped chord, which
+//     dispatchKey consults BEFORE the workspace. So this function was
+//     unreachable by its own advertised binding, and Done-when 7's
+//     take-over half had never actually run. Exactly the class of finding
+//     F13a recorded for ctrl+tab, which collapses onto `tab` for the same
+//     reason. f6 is free in the registry, needs no KeyCapturer claim, and
+//     is reachable -- the same reasoning that put re-index on f5.
+//
+//  2. IT JUDGED STALENESS FROM A SNAPSHOT. d.lockedAge is whatever the
+//     refusal reported when it arrived and is never refreshed, so the
+//     comparison against lockStaleAfter was against a number that could
+//     be minutes out of date in either direction. The frontend had to
+//     make that judgement at all only because take_over_lock steals
+//     unconditionally.
+//
+// So the action now sends ACQUIRE, not take-over. acquire_lock is
+// self-validating: it steals a row older than B7's 60s window and
+// refuses a live one, which is precisely this feature's semantics with
+// the backend as the single judge. Nothing here reads lockedAge.
+//
+// lockStaleAfter survives for the status bar's OFFER only, which is
+// advisory by construction -- see its own comment.
 func (w *Workspace) takeOverActive() tea.Cmd {
 	if len(w.docs) == 0 {
 		return nil
@@ -277,10 +301,10 @@ func (w *Workspace) takeOverActive() tea.Cmd {
 	if d.lock != lockHeldByOther {
 		return w.say("no other holder has " + d.name())
 	}
-	if d.lockedAge < lockStaleAfter.Seconds() {
-		return w.say(d.name() + " is " + d.lockLabel() +
-			" — still live; take-over is offered once a lock goes 60s without a heartbeat")
+	if !w.lockable(d) {
+		return nil
 	}
-	w.send(protocol.CmdTakeOverFileLock, queryTakeOverLock, w.lockPayload(d))
+	d.lock = lockPending
+	w.send(protocol.CmdAcquireFileLock, queryRetakeLock, w.lockPayload(d))
 	return w.startHeartbeat()
 }

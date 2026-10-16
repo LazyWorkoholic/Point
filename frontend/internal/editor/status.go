@@ -35,7 +35,7 @@ func (w *Workspace) StatusSegments() []string {
 		if w.projectID == "" {
 			return []string{"no project", "ctrl+p palette", "ctrl+w w workspace"}
 		}
-		return []string{"no file open", "ctrl+o tree", "f5 re-index",
+		return []string{"no file open", ctrlOHint, "f5 re-index",
 			"ctrl+p palette", "ctrl+w w workspace"}
 	}
 
@@ -97,7 +97,10 @@ func (w *Workspace) StatusSegments() []string {
 		segs = append(segs, "autosave stopped")
 	}
 
-	segs = append(segs, "ctrl+o tree", "ctrl+p palette")
+	// f7 goes LAST so fitHints -- which drops whole parts from the end
+	// -- sheds it first on a narrow terminal. Discoverable when there is
+	// room, never at the cost of a segment that describes the file.
+	segs = append(segs, ctrlOHint, "ctrl+p palette", "f7 close")
 	return segs
 }
 
@@ -105,7 +108,7 @@ func (w *Workspace) StatusSegments() []string {
 //
 //	lock: you                     this process holds it
 //	held by aryan (12s ago)       someone else does, and is alive
-//	held by aryan (4m ago) · ctrl+shift+l takes over
+//	held by aryan (4m ago) · f6 takes over
 //	                              someone else does, and has gone quiet
 //
 // Empty for a document that cannot hold a lock at all -- no project
@@ -125,13 +128,30 @@ func lockSegment(d *doc) string {
 		return "lock: …"
 	case lockHeldByOther:
 		if d.lockedAge >= lockStaleAfter.Seconds() {
-			return d.lockLabel() + " · ctrl+shift+l takes over"
+			return d.lockLabel() + " · f6 takes over"
 		}
 		return d.lockLabel()
 	default:
 		return ""
 	}
 }
+
+// ctrlOHint is the ctrl+o hint, STATIC, everywhere it appears.
+//
+// It names both targets and does not change with the current focus,
+// deliberately. A label that flipped between "tree" and "file"
+// depending on which pane held the keyboard would be a third place
+// focus state has to be tracked correctly -- and this episode has
+// already shipped that bug twice: the stored focus flag that drifted
+// the moment a document arrived by a path which forgot to update it,
+// and the "closed <file>" note that was rendered by a surface with no
+// expiry. A fixed string needs no tracking, so it cannot drift.
+//
+// It reads as a destination pair rather than an action for the same
+// reason the rest of the status line does: these segments go through
+// fitHints, which drops whole parts, so each one has to be legible on
+// its own.
+const ctrlOHint = "ctrl+o tree/file"
 
 // lineEndingLabel is B32's line_ending, displayed and never re-derived.
 //

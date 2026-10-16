@@ -167,18 +167,57 @@ func TestATreeRefusalStaysOnTheCard(t *testing.T) {
 	}
 }
 
-// say() keeps a copy for the empty state, so a refusal that leaves nothing
-// open is still explained by the screen the user ends up looking at.
-func TestTheEmptyStateStillRepeatsTheLastNote(t *testing.T) {
+// A note reaches the STATUS BAR and only the status bar.
+//
+// This replaces F13a's TestTheEmptyStateStillRepeatsTheLastNote, which
+// asserted the opposite: that the empty state kept its own copy "so a
+// refusal that leaves nothing open is still explained by the screen the
+// user ends up looking at". The cost of that copy was that it never
+// went away. Every other transient line in this app expires through
+// r.status (app\root.go's expireStatusIfChanged); this one expired
+// never, so after closing the last tab the placeholder read "closed
+// lf.py" permanently, underneath a hint about opening a file.
+//
+// One surface, with the expiry already on it. The note still travels --
+// through WorkspaceStatusMsg, which is what the first half of this
+// test now checks -- it is just not rendered twice with two different
+// lifetimes.
+func TestANoteReachesTheStatusBarAndNotTheEmptyState(t *testing.T) {
 	ws, _ := newWorkspaceWithRecorder()
 	ws.projectID, ws.projectRoot = "p1", "C:/p"
 	ws.pending["c1"] = pendingReq{kind: queryReadFile}
-	ws.handleEnvelope(protocol.Envelope{
+	cmd := ws.handleEnvelope(protocol.Envelope{
 		CorrID: "c1", Type: protocol.EvError,
 		Payload: []byte(`{"code":"x","message":"Not a file: C:/p/nope"}`),
 	})
+
+	// It goes to Root, which expires it.
+	if said := saidBy(cmd); !strings.Contains(said, "Not a file") {
+		t.Errorf("the refusal did not reach the status bar: %q", said)
+	}
+
+	// And it is NOT burned into the placeholder, where nothing expires.
 	frame := stripANSI(ws.View(layoutFor(ws, 120, 30)))
-	if !strings.Contains(frame, "Not a file") {
-		t.Error("the empty state does not repeat the refusal")
+	if strings.Contains(frame, "Not a file") {
+		t.Error("the empty state has its own copy of the note; it would never clear")
+	}
+}
+
+// The reported shape, exactly: close the last tab and the placeholder
+// must not keep naming the file that was closed.
+func TestClosingTheLastTabLeavesNoStaleLineInThePlaceholder(t *testing.T) {
+	ws := testWorkspace(t, "a", 120, 30)
+	note := ws.dropTab(0)
+	if !strings.Contains(note, "closed") {
+		t.Fatalf("precondition: dropTab said %q", note)
+	}
+	ws.say(note) // what the real caller does with it
+
+	frame := stripANSI(ws.View(layoutFor(ws, 120, 30)))
+	if !strings.Contains(frame, "No file open") {
+		t.Fatal("precondition: the empty state is not showing")
+	}
+	if strings.Contains(frame, "closed") {
+		t.Errorf("the placeholder still names the closed file:\n%s", frame)
 	}
 }

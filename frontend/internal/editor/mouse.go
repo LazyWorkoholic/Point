@@ -105,10 +105,10 @@ func (w *Workspace) dragTo(x, y int) {
 	d := w.docs[w.active]
 	switch {
 	case y < w.textArea.Y:
-		d.scrollBy(-1)
+		d.scrollBy(-1, w.textArea.H)
 		y = w.textArea.Y
 	case y >= w.textArea.Y+w.textArea.H:
-		d.scrollBy(+1)
+		d.scrollBy(+1, w.textArea.H)
 		y = w.textArea.Y + w.textArea.H - 1
 	}
 	d.cursor = d.buf.Clamp(w.posAt(d, x, y))
@@ -129,7 +129,7 @@ func (w *Workspace) wheel(m tea.MouseMsg, lines int) tea.Cmd {
 		return nil
 	}
 	if len(w.docs) > 0 {
-		w.docs[w.active].scrollBy(lines)
+		w.docs[w.active].scrollBy(lines, w.textArea.H)
 	}
 	return nil
 }

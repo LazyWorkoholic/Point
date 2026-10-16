@@ -271,6 +271,8 @@ func (w *Workspace) Update(msg tea.Msg) (app.Workspace, tea.Cmd) {
 		return w, w.onStaleOverwrite(m)
 	case closeDirtyMsg:
 		return w, w.onCloseDirty(m)
+	case closeCancelledMsg:
+		return w, w.onCloseCancelled(m)
 	case app.BehaviourOverridesSetMsg:
 		// index.respect_gitignore is one of the keys B26 accepts and
 		// F10b's Behaviour tab sets. The tree does not own that toggle
@@ -306,6 +308,56 @@ func (w *Workspace) Update(msg tea.Msg) (app.Workspace, tea.Cmd) {
 // definition not on screen whenever a file is open. Returning a tea.Cmd
 // rather than writing anything is what keeps Root the sole owner of the
 // status bar.
+// effectiveFocus is which pane actually has the keyboard.
+//
+// DERIVED, not stored, and that is the whole point. With no file open
+// the buffer pane has nothing to type into, so the tree holds the
+// keyboard; the moment a document exists, w.focus -- the user's own
+// choice via ctrl+o -- governs again.
+//
+// # Why not a field set when the doc list changes
+//
+// It was, for one iteration, and it broke immediately: a workspace
+// whose documents arrive by any path that forgets to update the field
+// keeps the tree focused and swallows every keystroke. Six tests
+// caught it, and they were right to -- "set this flag everywhere the
+// list changes" is the shape of F13a's dirty-notice latch, where one
+// flag cleared in one place stood in for state three places could
+// move.
+//
+// # What it replaces
+//
+// F13a kept focus on the buffer with nothing open and had bufferKey
+// FORWARD the arrow keys to the tree, so "an editor that ignores every
+// key until a file is open" would not read as frozen. The keys worked
+// and the focus ring lied about why: the buffer pane was drawn focused
+// while the tree was the thing moving, and ctrl+o looked inert.
+// Reported as "arrow keys leak to the file tree even when the editor
+// pane has focus", which is precisely what it was. Deriving it gives
+// the same working arrows with the focus ring on the pane they move.
+// Two cases decide it, and only the first is here:
+//
+//  1. NOTHING OPEN -> the tree, whatever w.focus says. Derived, below.
+//  2. A DOCUMENT WAS JUST OPENED and the user never asked for the
+//     editor -> the tree. NOT a case in this function: it is handled
+//     where it belongs, by onFile carrying the effective focus across
+//     the append instead of overwriting it with focusBuffer. By the
+//     time this function is asked, w.focus already says "tree", so
+//     there is nothing extra to derive.
+//
+// Putting (2) here was the first design and it cannot work: this
+// function is a pure read with no way to know whether the active
+// document is "just opened" without a timestamp or a flag -- which is
+// the stored-state-that-drifts shape again. Moving the decision to the
+// one transition that creates the condition keeps this a one-line
+// derivation.
+func (w *Workspace) effectiveFocus() focusTarget {
+	if len(w.docs) == 0 {
+		return focusTree
+	}
+	return w.focus
+}
+
 func (w *Workspace) say(text string) tea.Cmd {
 	if text == "" {
 		return nil

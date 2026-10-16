@@ -91,7 +91,7 @@ func (w *Workspace) saveDoc(d *doc, reason saveReason, overwrite bool) tea.Cmd {
 
 	if d.lock == lockHeldByOther {
 		if reason == saveManual {
-			return w.say(d.name() + " is " + d.lockLabel() + " — [take over] with ctrl+shift+l")
+			return w.say(d.name() + " is " + d.lockLabel() + " — f6 takes it over once the holder goes quiet")
 		}
 		// Rule 1 and Done-when 11, which is the same rule stated twice:
 		// autosave must not fire on a file held by another holder AND
@@ -297,7 +297,7 @@ func (w *Workspace) onWriteRefused(d *doc, p wireWritten) tea.Cmd {
 		d.lockedBy = p.Holder
 		d.lockedAge = p.AgeSeconds
 		d.autosaveBlocked = true
-		return w.say(d.name() + " is " + d.lockLabel() + " — [take over] with ctrl+shift+l")
+		return w.say(d.name() + " is " + d.lockLabel() + " — f6 takes it over once the holder goes quiet")
 
 	case "read_only":
 		// The read reported `writable: true` and the attribute has been

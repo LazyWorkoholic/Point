@@ -83,7 +83,23 @@ const (
 	queryAcquireLock
 	queryHeartbeatLock
 	queryReleaseLock
-	queryTakeOverLock
+	// queryRetakeLock is a DELIBERATE re-acquire of a lock this editor
+	// has already been refused once -- f6's take-over.
+	//
+	// It sends CmdAcquireFileLock, not CmdTakeOverFileLock, and the
+	// distinction is the whole of the fix for a bug the gate found.
+	// acquire_lock is SELF-VALIDATING: it steals a row whose heartbeat is
+	// older than B7's 60s window and refuses one that is still live, so
+	// the backend is the only thing judging staleness. take_over_lock
+	// steals unconditionally ("calling take_over is the caller declaring
+	// they already decided"), which meant the frontend had to make that
+	// judgement -- and it made it from d.lockedAge, a snapshot taken when
+	// the refusal arrived and never refreshed.
+	//
+	// CmdTakeOverFileLock is therefore unused by this episode, the same
+	// way CmdCheckFileStale is: the event exists for a caller that wants
+	// an unconditional steal, and this is not one.
+	queryRetakeLock
 	queryReloadFile
 )
 
@@ -189,7 +205,7 @@ func (w *Workspace) handleEnvelope(env protocol.Envelope) tea.Cmd {
 		return w.onFile(env)
 	case queryWriteFile:
 		return w.onWritten(req, env)
-	case queryAcquireLock, queryTakeOverLock:
+	case queryAcquireLock, queryRetakeLock:
 		return w.onLockResult(req, env)
 	case queryHeartbeatLock:
 		return w.onHeartbeatResult(req, env)
@@ -327,8 +343,9 @@ func (w *Workspace) onFileList(env protocol.Envelope) {
 func (w *Workspace) openPath(abs string) {
 	for i, d := range w.docs {
 		if d.path == abs {
+			// Switches which document is ACTIVE and nothing else.
+			// Opening does not move the keyboard -- see onFile.
 			w.active = i
-			w.focus = focusBuffer
 			return
 		}
 	}
@@ -358,9 +375,38 @@ func (w *Workspace) onFile(env protocol.Envelope) tea.Cmd {
 	// read-only, for a file that has one.
 	d := newDoc(p.File, w.projectRoot, !p.File.OutsideProject)
 	prev := w.activeDoc()
+
+	// Opening a file does NOT move the keyboard to the editor. Browsing
+	// and opening several files for later should not throw you out of
+	// the tree each time -- the VS Code explorer convention. The editor
+	// takes focus only when asked: ctrl+o, or a click into its pane or
+	// tab strip.
+	//
+	// # Why this is captured rather than stored
+	//
+	// It has to be read BEFORE the append, and that is the whole trick.
+	// While nothing is open, effectiveFocus IGNORES w.focus and derives
+	// the tree (there is nothing to type into), so the stored value is
+	// meaningless -- and its zero value happens to be focusBuffer. The
+	// instant this append lands, that meaningless stored value becomes
+	// authoritative, and a fresh workspace would jump to the buffer on
+	// its very first open.
+	//
+	// So the effective focus is carried across the one transition where
+	// the stored field changes from ignored to binding. It is a
+	// derivation evaluated at that instant -- from len(w.docs) and
+	// w.focus, both read here -- not a flag kept in step with reality
+	// by every call site that could move either. That distinction is
+	// the one the arrow-key leak turned on: a stored "the tree has it"
+	// boolean drifted the moment a document arrived by a path that
+	// forgot to update it, and six tests caught it.
+	keptByTree := w.effectiveFocus() == focusTree
+
 	w.docs = append(w.docs, d)
 	w.active = len(w.docs) - 1
-	w.focus = focusBuffer
+	if keptByTree {
+		w.focus = focusTree
+	}
 	w.note = ""
 	w.applyResumeTo(d)
 

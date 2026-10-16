@@ -197,14 +197,20 @@ func TestScrollByDoesNotMoveTheCaret(t *testing.T) {
 	d := testDoc(t, string(sb))
 	d.moveTo(Pos{5, 0}, false)
 	before := d.cursor
-	d.scrollBy(40)
+	// An explicit viewport height, because the bound is now
+	// count-rows rather than count-1 (textutil.go's clampTop).
+	const rows = 10
+	d.scrollBy(40, rows)
 	if d.cursor != before {
 		t.Errorf("the wheel moved the caret to %+v", d.cursor)
 	}
 	if d.top != 40 {
 		t.Errorf("top = %d, want 40", d.top)
 	}
-	d.scrollBy(-1000)
+	if visible := d.buf.Lines() - d.top; visible < rows {
+		t.Errorf("%d lines visible in a %d-row viewport", visible, rows)
+	}
+	d.scrollBy(-1000, rows)
 	if d.top != 0 {
 		t.Errorf("top = %d, want clamped to 0", d.top)
 	}

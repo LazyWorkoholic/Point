@@ -48,7 +48,7 @@ func (w *Workspace) View(l layout.Layout) string {
 		if r.IsZero() || i >= len(titles) {
 			continue
 		}
-		focused := i == 0 && w.focus == focusTree
+		focused := i == 0 && w.effectiveFocus() == focusTree
 		cards = append(cards, paneBox(w.edge(focused), w.label(focused), r, titles[i], bodies[i](r), 1))
 	}
 
@@ -86,7 +86,7 @@ func gutterWidth(lines int) int {
 // codeFileBox draws the tab strip and the text area.
 func (w *Workspace) codeFileBox(r layout.Rect) string {
 	title := "Code File"
-	focused := w.focus == focusBuffer
+	focused := w.effectiveFocus() == focusBuffer
 	if r.IsZero() {
 		return ""
 	}
@@ -391,18 +391,27 @@ func (w *Workspace) emptyState(width, rows int) []string {
 		)
 	} else {
 		lines = append(lines,
-			dim.Render("ctrl+o   focus the file tree, ⏎ opens"),
+			dim.Render("ctrl+o   move between tree and file, ⏎ opens"),
+			dim.Render("in the tree: j/k or arrows move, l expand/open, h collapse"),
 			dim.Render("ctrl+n   next tab        ctrl+b  previous"),
-			dim.Render("f5       re-index the project"),
+			dim.Render("f5       re-index        f6  take over a stale lock"),
+			dim.Render("f7       close the tab   ctrl+s  save"),
 		)
 	}
-	// The last thing say() emitted, repeated here. The line the user
-	// actually reads is in the status bar; this is the empty state's own
-	// copy, for the case where a refusal is the reason there is nothing
-	// open.
-	if w.note != "" {
-		lines = append(lines, "", th.Style(theme.Warning).Render(w.note))
-	}
+	// NO note here, deliberately, and this is a change from F13a.
+	//
+	// It used to repeat the last thing say() emitted, "for the case
+	// where a refusal is the reason there is nothing open". The cost
+	// was that the line never went away: every other transient message
+	// in this app expires through r.status (app\root.go's
+	// expireStatusIfChanged), and this copy expired never -- so after
+	// closing the last tab the placeholder read "closed lf.py"
+	// permanently, under a hint about opening one.
+	//
+	// The status bar is the one surface for a transient line, and it
+	// already has the expiry. w.note stays as the field say() writes,
+	// because WorkspaceStatusMsg carries it to Root from there; nothing
+	// renders it twice.
 	_ = width
 	if len(lines) > rows {
 		lines = lines[:rows]
@@ -429,7 +438,7 @@ func (w *Workspace) terminalBox(r layout.Rect) string {
 
 func (w *Workspace) treeCard(r layout.Rect) []string {
 	w.treeRect = r
-	return w.tree.render(w.theme, r.W-4, r.H-2, w.focus == focusTree)
+	return w.tree.render(w.theme, r.W-4, r.H-2, w.effectiveFocus() == focusTree)
 }
 
 // taskCard is the same global snapshot Root pushes to every workspace --

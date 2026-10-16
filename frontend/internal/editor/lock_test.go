@@ -149,25 +149,43 @@ func TestASecondHolderOpensReadOnlyWithTheHolderNamed(t *testing.T) {
 	}
 }
 
-// Take-over is refused while the other holder's beat is FRESH.
-// take_over_lock steals unconditionally by design, so the staleness
-// judgement belongs to whoever offers the button -- offering it on a
-// live lock makes it a way to yank a file from a working colleague.
-func TestTakeOverIsRefusedWhileTheOtherHoldersBeatIsFresh(t *testing.T) {
+// Take-over is refused while the other holder's beat is FRESH -- and
+// the BACKEND is what refuses it.
+//
+// This test originally asserted a local refusal, computed from
+// d.lockedAge against lockStaleAfter. gate_f13b found the flaw: that
+// field is a snapshot from whenever the refusal arrived and is never
+// refreshed, so the comparison could be minutes out of date in either
+// direction. acquire_lock already answers the same question against its
+// own clock -- stealing a row past the 60s window and refusing a live
+// one -- so the request goes out and the reply decides.
+//
+// CmdTakeOverFileLock is deliberately NOT what is sent: it steals
+// unconditionally, which is what forced the judgement onto this side.
+func TestTakeOverIsRefusedByTheBackendWhileTheBeatIsFresh(t *testing.T) {
 	ws, rec := lockWorkspace(t)
 	d := openFile(t, ws, "x.py", wireFile{Writable: true})
 	d.lock, d.lockedBy, d.lockedAge = lockHeldByOther, "sam@other", 12
 	rec.sent = nil
 
-	said := saidBy(ws.takeOverActive())
+	ws.takeOverActive()
 
+	if len(rec.sent) != 1 || rec.sent[0].cmd != protocol.CmdAcquireFileLock {
+		t.Fatalf("sent %+v, want one AcquireFileLock", rec.sent)
+	}
 	for _, q := range rec.sent {
 		if q.cmd == protocol.CmdTakeOverFileLock {
-			t.Fatal("took over a live lock")
+			t.Fatal("sent an unconditional steal")
 		}
 	}
+
+	said := saidBy(replyFor(t, ws, queryRetakeLock, d.path, protocol.EvFileLockResult,
+		map[string]any{"ok": false, "holder": "sam@other", "age_seconds": 12.0}))
 	if !strings.Contains(said, "still live") {
 		t.Errorf("said %q", said)
+	}
+	if d.lock != lockHeldByOther {
+		t.Errorf("lock = %v after a refused retake", d.lock)
 	}
 	if strings.Contains(lockSegment(d), "takes over") {
 		t.Error("the status bar offered take-over on a live lock")
@@ -182,16 +200,16 @@ func TestTakeOverWorksOnceTheLockIsStale(t *testing.T) {
 	d.autosaveBlocked = true
 	rec.sent = nil
 
-	if !strings.Contains(lockSegment(d), "ctrl+shift+l takes over") {
+	if !strings.Contains(lockSegment(d), "f6 takes over") {
 		t.Errorf("stale lock segment = %q, want the offer", lockSegment(d))
 	}
 
 	ws.takeOverActive()
-	if len(rec.sent) != 1 || rec.sent[0].cmd != protocol.CmdTakeOverFileLock {
-		t.Fatalf("sent %+v", rec.sent)
+	if len(rec.sent) != 1 || rec.sent[0].cmd != protocol.CmdAcquireFileLock {
+		t.Fatalf("sent %+v, want one AcquireFileLock", rec.sent)
 	}
 
-	said := saidBy(replyFor(t, ws, queryTakeOverLock, d.path, protocol.EvFileLockResult,
+	said := saidBy(replyFor(t, ws, queryRetakeLock, d.path, protocol.EvFileLockResult,
 		map[string]any{"ok": true}))
 
 	if d.lock != lockHeld {
@@ -361,7 +379,7 @@ func TestTheLockSegmentSaysWhichStateItIsIn(t *testing.T) {
 			"held by sam (abcdefgh) (12s ago)"},
 		{"someone else's, stale",
 			&doc{lock: lockHeldByOther, lockedBy: "sam@abcdefghij", lockedAge: 240},
-			"held by sam (abcdefgh) (4m ago) · ctrl+shift+l takes over"},
+			"held by sam (abcdefgh) (4m ago) · f6 takes over"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

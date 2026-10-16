@@ -226,7 +226,9 @@ try {
         "  with 'File Tree' and 'Task' cards in the right pane",
         "the Terminal box says 'the terminal arrives in F14' — three inert rows (B8)",
         "the File Tree lists the repo: backend\, design\, frontend\ collapsed",
-        "the status bar's LEFT half reads 'no file open   ctrl+o tree   f5 re-index …'",
+        "the status bar's LEFT half reads 'no file open   ctrl+o tree/file",
+        "  f5 re-index …' -- F13b made the ctrl+o hint static and name",
+        "  BOTH targets, so this reads tree/file now, not tree",
         "  — NOT 'ctrl+p palette  ctrl+q quit  ctrl+w ? help', which is Chat's line"
     )
     Fails @(

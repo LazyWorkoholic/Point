@@ -447,3 +447,42 @@ func TestNoOtherCallerPassesOverwriteTrue(t *testing.T) {
 		}
 	}
 }
+
+// A MANUAL save on a CLEAN document still goes out to the wire.
+//
+// Load-bearing for two separate reasons, which is why it is pinned here
+// rather than left as an implementation detail:
+//
+//   - It is how a user resolves a file that changed on disk under them.
+//     With autosave on, the buffer is clean within a second of the last
+//     keystroke, so by the time anyone notices an external change there
+//     is nothing dirty to save. Skipping the write would leave ctrl+s
+//     doing nothing and the stale dialog permanently unreachable.
+//   - gate_f13b.ps1's step 4 depends on it. The gate lets autosave settle
+//     before changing the file underneath the editor -- deliberately, to
+//     make the baseline known -- so the ctrl+s that must be refused is
+//     pressed on a clean buffer.
+//
+// The dirty check in saveDoc is gated on saveAuto for exactly this.
+func TestAManualSaveOnACleanDocumentStillGoesOut(t *testing.T) {
+	ws, rec, d := savableWorkspace(t)
+	if d.dirty {
+		t.Fatal("precondition: the fixture document is already dirty")
+	}
+
+	ws.saveDoc(d, saveManual, false)
+	if len(rec.sent) != 1 || rec.sent[0].cmd != protocol.CmdWriteProjectFile {
+		t.Fatalf("a manual save on a clean document sent %+v, want one write — "+
+			"ctrl+s would do nothing and the stale dialog would be unreachable", rec.sent)
+	}
+
+	// And the autosave half of the same question: a timer must NOT fire on
+	// a clean document, or every open file would be rewritten once per
+	// debounce for as long as Point is running.
+	d.saving = false
+	rec.sent = nil
+	ws.saveDoc(d, saveAuto, false)
+	if len(rec.sent) != 0 {
+		t.Errorf("autosave wrote a clean document: %+v", rec.sent)
+	}
+}

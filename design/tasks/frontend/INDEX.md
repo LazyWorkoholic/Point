@@ -48,6 +48,7 @@ All printed commands must be **PowerShell**.
 | F16 | Polish | P2 | no | all | — | <!-- also owns F9a's deferred result-card code-block rendering: syntax colour + box frame, blocked on markdown-renderer packaging, see F16-polish.md -->
 | F17 | Web Preview | P2 | no | F14 | — |
 | F18 | windowed history | P1 | no | F5+B18 | B18 |
+| F19 | Editor keymap docs, one-key close, scroll bound | P1 | no | F13a, F13b | — |
 
 **F1–F5 can start today** — they need only B1–B5, which are built.
 

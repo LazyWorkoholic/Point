@@ -290,12 +290,7 @@ func (t *fileTree) ensureVisible(rows int) {
 	if rows <= 0 {
 		return
 	}
-	if max := len(t.rows) - 1; t.top > max {
-		t.top = max
-	}
-	if t.top < 0 {
-		t.top = 0
-	}
+	t.top = clampTop(t.top, len(t.rows), rows)
 	if !t.reveal {
 		return
 	}
@@ -306,9 +301,7 @@ func (t *fileTree) ensureVisible(rows int) {
 	if t.sel >= t.top+rows {
 		t.top = t.sel - rows + 1
 	}
-	if t.top < 0 {
-		t.top = 0
-	}
+	t.top = clampTop(t.top, len(t.rows), rows)
 }
 
 // render draws the card's content lines.

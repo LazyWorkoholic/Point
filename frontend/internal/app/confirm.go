@@ -20,6 +20,17 @@ type Confirm struct {
 	title, body string
 	yes, no     string
 	onConfirm   tea.Cmd
+	// onCancel runs when the user DECLINES -- esc, "n", or Enter on the
+	// focused No. Optional, and nil for every caller that predates it.
+	//
+	// Added by F13b because declining can have work to undo. Its
+	// dirty-close confirm pauses that document's autosave before opening
+	// (a tick landing mid-dialog would save the very edits Close exists
+	// to discard), and Cancel has to put it back. Before this, all three
+	// decline paths returned `nil, nil`, so there was no signal to hang
+	// that on at all and the only alternatives were a side effect in a
+	// render path or a timer the caller polled.
+	onCancel tea.Cmd
 
 	// focusYes is false by default — "No is focused by default" is F07's own
 	// rule, so an Enter pressed out of habit never fires the destructive path.
@@ -35,6 +46,18 @@ func NewConfirm(title, body, yes, no string, onConfirm tea.Cmd) *Confirm {
 		no = "No"
 	}
 	return &Confirm{title: title, body: body, yes: yes, no: no, onConfirm: onConfirm}
+}
+
+// OnCancel attaches a command to the decline paths and returns the
+// Confirm, so it chains onto NewConfirm at the call site.
+//
+// A separate setter rather than a sixth parameter on NewConfirm: five
+// existing call sites would otherwise all gain a `nil`, and the one
+// thing worse than a long signature is a long signature most of whose
+// arguments are nil.
+func (c *Confirm) OnCancel(cmd tea.Cmd) *Confirm {
+	c.onCancel = cmd
+	return c
 }
 
 // MinSize is LAYOUT.md's "confirm 40×7" as a FLOOR, widened when this
@@ -144,15 +167,15 @@ func (c *Confirm) Update(msg tea.Msg) (Overlay, tea.Cmd) {
 		if c.focusYes {
 			return nil, c.onConfirm
 		}
-		return nil, nil
+		return nil, c.onCancel
 	case tea.KeyEsc:
-		return nil, nil
+		return nil, c.onCancel
 	case tea.KeyRunes:
 		switch strings.ToLower(string(k.Runes)) {
 		case "y":
 			return nil, c.onConfirm
 		case "n":
-			return nil, nil
+			return nil, c.onCancel
 		}
 	}
 	return c, nil
