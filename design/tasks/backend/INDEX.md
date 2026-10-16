@@ -51,6 +51,7 @@ fix this table.
 | B30 | Let `SetSessionProvider` Also Bind a Session's Project | P1 | no | B12, B4/B6 | ✅ built |
 | B31 | Validate `project_id` in `CreateSession`/`SetSessionProvider` | P1 | no | B7, B12, B30 | ✅ built |
 | B32 | `WriteProjectFile` — the Editor's Save Path | P1 | no | B7, B6 | ✅ built |
+| B33 | The protocol channel is UTF-8 | P1 | no | B6 | built + gate green (14/14), **no completed doc yet** — `main.py` read stdin/wrote stdout in the ANSI codepage, so a non-ASCII save was silently mojibake'd (reported as success) or dropped. Found from F13b's outside-in testing; live since B6 |
 
 **B1–B5 are frozen.** Additive changes only — new columns, new optional fields.
 Never refactors.

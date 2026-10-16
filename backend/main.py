@@ -33,15 +33,121 @@ from runtime.runtime import Runtime
 
 _log = get_logger("main")
 
+# The protocol channel is UTF-8, and it has to be said out loud.
+#
+# On Windows, sys.stdin/sys.stdout over a PIPE default to the ANSI
+# codepage (cp1252 on an en-GB/en-US install), not UTF-8 -- verified on
+# this machine:  reads 'cp1252' when stdin is not a
+# console. Replies happened to survive that by accident, because
+# json.dumps defaults to ensure_ascii=True and so emits pure ASCII. The
+# REQUEST direction did not: Go's encoding/json writes raw UTF-8, and
+# cp1252 either mis-decodes it or cannot decode it at all.
+#
+# Measured end to end through a real pipe, before this line existed:
+#
+#   content with an em-dash (U+2014, e2 80 94)
+#     -> every byte is defined in cp1252, so it decodes to mojibake
+#     -> the write REPORTS ok: True and puts Ã¢â¬â
+#        on disk. Silent corruption, reported as success. This is what
+#        happened to design\GIT_STRATEGY.md.
+#
+#   content with U+240F (e2 90 8f), whose bytes 0x90 and 0x8f are
+#   UNDEFINED in cp1252
+#     -> UnicodeDecodeError inside the stdin reader thread
+#     -> the line is dropped, no reply is ever emitted, the process
+#        stays alive. Silent failure. This is why design\project_idea.md
+#        would not save at all: it contains both of those bytes.
+#
+# So B32 made the byte layer exact and the transport threw it away one
+# layer further out. errors="strict" is deliberate: a decode that
+# cannot be trusted must raise where it can be logged, not quietly
+# substitute U+FFFD into a payload that is about to be written to
+# someone's file.
+# Both halves, explicitly. stdout survived cp1252 only by luck:
+# json.dumps defaults to ensure_ascii=True, so every reply happened to
+# be pure ASCII. That is a property of a default somebody could change
+# in one keystroke -- an ensure_ascii=False for readability, or a stray
+# print of a non-ASCII path -- and it would reopen this exact bug on
+# the other side of the pipe, where the symptom (Go seeing mojibake in
+# a file it is about to show) is just as quiet.
+#
+# errors="strict" on both, deliberately: a decode or encode that cannot
+# be trusted must raise where it can be logged, not quietly substitute
+# U+FFFD into a payload that is about to become somebody's file.
+#
+# BE PRECISE ABOUT WHAT EACH OF THESE TWO LINES ACTUALLY DOES TODAY.
+# Neither is what makes the regression test pass, and pretending
+# otherwise is how a line survives a refactor that breaks it:
+#
+#   stdin  is superseded by _stdin_reader_thread, which reads
+#          sys.stdin.BUFFER and owns the decode itself -- measured:
+#          removing this line leaves tests\manual_transport_encoding.py
+#          fully green. It stays because nothing should be able to read
+#          this process's stdin as TEXT and get the locale codepage,
+#          and because the reader's own decode is the thing under test
+#          rather than a thing to be assumed.
+#
+#   stdout cannot be made to fail today at all, because json.dumps
+#          defaults to ensure_ascii=True and so every reply is pure
+#          ASCII. That accident IS the hazard: one ensure_ascii=False
+#          for readability, or one print of a non-ASCII path, reopens
+#          this bug on the other half of the pipe where the symptom is
+#          just as quiet. This line is the reason that change would be
+#          safe instead of a regression, which is worth a line of code
+#          that no test can currently turn red.
+sys.stdin.reconfigure(encoding="utf-8", errors="strict")
+sys.stdout.reconfigure(encoding="utf-8", errors="strict")
+
 # How long to keep working after stdin closes, so a request that arrived
 # on the last line still gets its answer written out.
 _DRAIN_TIMEOUT_S = 5.0
 
 
 def _stdin_reader_thread(loop: asyncio.AbstractEventLoop, queue: asyncio.Queue) -> None:
-    """Runs in a separate OS thread. Blocking reads are fine here."""
-    for line in sys.stdin:
-        line = line.strip()
+    """Runs in a separate OS thread. Blocking reads are fine here.
+
+    Reads BYTES and decodes each line itself, rather than iterating
+    sys.stdin as text, so one undecodable line cannot take the reader
+    down with it.
+
+    Iterating the text wrapper raised the decode INSIDE this thread with
+    nothing to catch it, and the consequences went well past losing the
+    one request. Measured against this backend before the change, by
+    feeding it a single line containing the bytes 0xff 0xfe:
+
+        1. baseline request answered  : True
+        2. reply to the malformed line: False
+        3. request AFTER the bad line : False   <- the thread was dead
+        4. clean shutdown on EOF      : False   <- hung forever
+
+    Line 3 is a deaf backend: the thread had exited, so nothing was
+    reading stdin any more and every later request was ignored in
+    silence. Line 4 is worse, and is why this is a correctness fix
+    rather than a robustness nicety -- the EOF signal below is the last
+    statement in the function the exception escaped, so
+    read_stdin_loop stayed blocked on `await queue.get()` for ever.
+    This file's own header explains what that costs: EOF ending the
+    process is what closes the database and releases the
+    single-instance lock, so a bad byte left the lock held by a live
+    pid and every later launch would refuse to start.
+
+    A malformed line is logged and SKIPPED, exactly as read_stdin_loop
+    already treats a malformed JSON line one layer down. There is
+    deliberately no error reply: the bytes did not decode, so there is
+    no envelope id to correlate one to, and an uncorrelated Error is
+    something the frontend can only log as unroutable. Stderr is the
+    honest destination -- stdout is the protocol channel (CLAUDE.md).
+    """
+    for raw in sys.stdin.buffer:
+        try:
+            line = raw.decode("utf-8").strip()
+        except UnicodeDecodeError as exc:
+            # Resuming the text wrapper after a failed decode is not
+            # reliable -- the buffer sits mid-sequence and the
+            # incremental decoder keeps state -- which is why this
+            # reads bytes and owns the decode.
+            _log.warning("Discarded undecodable line from stdin: %s", exc)
+            continue
         if line:
             # put_nowait must happen on the event loop thread, so we
             # schedule it via call_soon_threadsafe rather than calling
