@@ -2427,10 +2427,25 @@ shows after a failed apply. That is the part most likely to rot.
 
 ---
 
-# SESSION 18b — F13b Editor: Save, Locks, Autosave (F13 closed)
+# SESSION 18b — F13b Editor: Save, Locks, Autosave (F13 closed)  ✅ DONE
 
 **Goal:** close F13. Done-when 2, 7, 8, 9, 10, 11, 12 — the half F13a
-deliberately did not build.
+deliberately did not build. **It did, across five rounds**: one build plus
+four of gate-driven repairs, all in one session per the episode-boundary
+rule. F13 is complete.
+
+> Read `design/completed/frontend/F13b-editor-save-locks.md` before any
+> session that touches the editor. It records the five pre-session
+> decisions (C1—C5), what each of the four verification rounds
+> actually fixed, and the six things still owed. Commits `65cb6dc` (the
+> build) and `6e28f6b` (the repairs).
+>
+> **Two episodes were spun out of its testing and are NOT part of it:**
+> **B33** (the protocol channel ran in the ANSI codepage, so any
+> non-ASCII save was silently corrupted or dropped — Done-when 2's
+> byte-exactness was only true for an ASCII file until it landed) and
+> three items now in **F16** (two shipped in `6e28f6b`, one reverted and
+> deferred there with its measured numbers and known fix).
 
 **Prerequisites, mandatory** — the same three the INDEX row lists
 (`F13a (done)` + `B7, B32`):
@@ -2482,6 +2497,58 @@ mixed file is written with and why, the holder key's persisted shape,
 and any Windows Terminal key combinations that did not arrive.
 Move F13a's row in design/completed/frontend/INDEX.md from the split
 note to a plain F13 ✅, and add F13b's own row.
+```
+
+**Then:** commit · `/clear`
+
+---
+
+# SESSION 18e — B33 The Protocol Channel Is UTF-8  ✅ DONE
+
+**Goal:** `backend\main.py` read stdin and wrote stdout in the platform's
+ANSI codepage, never UTF-8, so a non-ASCII payload was either silently
+mojibake'd (and the write REPORTED success) or dropped with no reply.
+Pinning stdin then moved the failure into the reader thread, which died
+and left the process hung with the single-instance lock held.
+
+**Numbered 18e** because it was found during 18b's testing and belongs
+beside it, not after F15 — see "Splitting an episode" on session
+labels being positions in this file rather than an ordering claim. It is
+a BACKEND episode in a frontend-numbered slot for that reason alone.
+
+> Read `design/completed/backend/B33-transport-utf8.md`. It records why
+> nothing in the repo caught this from B6 to F13b: `cli.py` and every
+> `manual_*` test build a Runtime in-process and never cross the
+> stdin/stdout boundary. `backend\tests\manual_transport_encoding.py`
+> is the first test that spawns `main.py` over pipes, and a future
+> transport change extends it rather than adding a second one.
+
+**Then:** commit · `/clear`
+
+---
+
+# SESSION 18f — B34 A Declared Line-Ending Policy  (not started)
+
+**Goal:** this repo has no `.gitattributes` and `core.autocrlf` is `true`
+from the SYSTEM config, so every blob is LF while 45 tracked files are
+CRLF in the working tree and one (`backend\runtime\errors.py`) is MIXED
+— the one case B32 says cannot round-trip byte-exact. Commits stay
+correct only by accident of that setting, and `gofmt -l` cannot be used
+as a gate on a fresh Windows checkout.
+
+**Paste:**
+```
+Read CLAUDE.md and design/tasks/backend/B34-line-ending-policy.md.
+
+Scope only. The doc already names the recommended shape (explicit
+per-type `text eol=lf`, NOT `* text=auto`) and why, the files that would
+normalise, and the two-commit split it requires. Do not combine the
+.gitattributes commit with the renormalise commit.
+
+Verify both PowerShell gates still parse with zero errors and still
+report BOM present, ASCII-only, zero CRLF afterwards.
+
+Stop at the verification gate with PowerShell checks.
 ```
 
 **Then:** commit · `/clear`

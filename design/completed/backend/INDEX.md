@@ -40,6 +40,7 @@ it passed.
 | B30 | Let `SetSessionProvider` Also Bind a Session's Project | ✅ built + manually verified | `B30-set-session-project.md` |
 | B31 | Validate `project_id` in `CreateSession`/`SetSessionProvider` | ✅ built + manually verified | `B31-validate-project-id.md` |
 | B32 | `WriteProjectFile` — the Editor's Save Path | ✅ built + manually verified | `B32-write-project-file.md` |
+| B33 | The protocol channel is UTF-8 | ✅ built + gate green (14/14) | `B33-transport-utf8.md` |
 
 ## Verified file structure — end of Episode 11
 

@@ -312,7 +312,34 @@ SESSION  EPISODE                          MODEL         WHY
                                                         colour from emitted bytes,
                                                         the 6ms paste gate, fitHints'
                                                         drop boundary, rowWidths(86)).
-18b      F13b editor save + locks        Opus high     the remaining Done-whens: 2,
+18b      F13b editor save + locks        Opus high     SPENT. Five rounds: one build
+                                                        plus four of gate-driven
+                                                        repairs, in one session per
+                                                        the episode-boundary rule.
+                                                        Opus was right and the rounds
+                                                        say why: two of the four
+                                                        found bugs in this episode's
+                                                        OWN earlier fixes, and one
+                                                        traced a reported product
+                                                        bug to the GATE rather than
+                                                        the code twice over (a lock
+                                                        aging out during a
+                                                        human-paced step; a ctrl+o
+                                                        toggle pressed twice in one
+                                                        session). Measurement settled
+                                                        five of them -- the mojibake
+                                                        bytes on disk, the FS-watcher
+                                                        event kinds per NotifyFilter,
+                                                        the dialog's rendered row
+                                                        count, the lock-age sawtooth,
+                                                        and the byte-identical round
+                                                        trip. One change was BACKED
+                                                        OUT for being unobservable,
+                                                        which is the same discipline
+                                                        in reverse.
+                                                        ORIGINAL ESTIMATE AND NOTE
+                                                        FOLLOW, unchanged:
+18b      (F13b, as first planned)        Opus high     the remaining Done-whens: 2,
          (F13, SPLIT)                                   7, 8, 9, 10, 11, 12. Still
                                                         Opus: every one of them is a
                                                         correctness claim about
@@ -369,6 +396,27 @@ SESSION  EPISODE                          MODEL         WHY
                                                         estimate is for the EPISODE
                                                         and was not spent on the
                                                         pass that stopped.
+18e      B33 transport is UTF-8          Sonnet high   SPENT. Two reconfigure calls
+                                                        and one loop that reads
+                                                        bytes -- eleven lines. The
+                                                        DIAGNOSIS was the work, and
+                                                        it was still Sonnet's: the
+                                                        measurements are mechanical
+                                                        (byte profiles, a pipe
+                                                        probe, a revert check) and
+                                                        none of it needed a
+                                                        judgement call. A useful
+                                                        counterexample to "found
+                                                        from the outside in, so
+                                                        escalate" -- the symptom was
+                                                        baffling and the method was
+                                                        not.
+18f      B34 line-ending policy          Sonnet high   one new file, one renormalise
+                                                        pass, and a decision about
+                                                        what to declare. The
+                                                        decision is written down in
+                                                        the task doc already, so the
+                                                        session is execution.
 18d      F9b diff card                   Opus high     was Opus MEDIUM as part of
                                                        F9; raised. The apply path is
                                                        destructive, and its three
@@ -432,5 +480,16 @@ kept below them, labelled `(18)` because the plain number is retired, rather
 than deleted — it records the pass that stopped before
 writing code, which is itself a data point about estimating. See WORKFLOW.md's
 "Splitting an episode".
+
+**An episode that turns out to be two polish items does not need a
+number.** F19 was written up as its own episode (keymap docs, a one-key
+close, a scroll bound), and retired three prompts later: two items went
+into `F16-polish.md` where small polish items already live, and the
+third was reverted and deferred there. The cost of the detour was two
+docs and two INDEX rows, which is cheap -- but the lesson is that
+"found during testing, not on the Done-when list" argues for the
+polish bucket first and a new number only if the work is structural.
+B33, by contrast, earned its number: a transport fix with its own
+permanent test is not polish.
 
 If your quota gets tight mid-project, the four to protect at Opus are B6, B8, F1+F2, and F13. Everything else has a spec detailed enough that Sonnet plus your verification gate will catch the difference.
