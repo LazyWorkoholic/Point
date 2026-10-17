@@ -42,13 +42,12 @@ All printed commands must be **PowerShell**.
 | F11 | Memory Popup | P2 | no | F7 | B13 |
 | F12 | Workspace Manager + Lifecycle | P1 | no | F6 | B15 |
 | **F13a** | **Editor Core — the editing half (F13, SPLIT)** | P1 | no | F12 | B7, B32 | <!-- F13a-editor-core-editing.md; DONE, recorded in completed/frontend/F13a-editor-core-editing.md -->
-| F13b | Editor — Save, Locks, Autosave (F13, SPLIT) | P1 | no | **F13a (done)** | B7, B32 |
+| F13b | Editor — Save, Locks, Autosave (F13, SPLIT) | P1 | no | **F13a (done)** | B7, B32 |  <!-- DONE: completed/frontend/F13b-editor-save-locks.md, commits 65cb6dc (build) + 6e28f6b (verification repairs) -->
 | F14 | Editor Terminal | P2 | no | F13a | — |
 | F15 | Filler-Explainer Integration | P1 | no | F13a, F9b | B11, B24 |
 | F16 | Polish | P2 | no | all | — | <!-- also owns F9a's deferred result-card code-block rendering: syntax colour + box frame, blocked on markdown-renderer packaging, see F16-polish.md -->
 | F17 | Web Preview | P2 | no | F14 | — |
 | F18 | windowed history | P1 | no | F5+B18 | B18 |
-| F19 | Editor keymap docs, one-key close, scroll bound | P1 | no | F13a, F13b | — |
 
 **F1–F5 can start today** — they need only B1–B5, which are built.
 

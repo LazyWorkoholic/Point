@@ -32,8 +32,8 @@ it passed.
 | F10c | Settings — Demo Mode | ✅ built + manually verified | `F10c-settings-demo-mode.md` |
 | F11 | Memory Popup | not started — blocked on B13 | — |
 | F12 | Workspace Manager + Lifecycle | ✅ built + manually verified | `F12-workspace-manager.md` |
-| **F13a** | **Editor Core — the editing half (F13, SPLIT)** | 🟡 **built + manually verified — F13 NOT complete; F13b is the remainder** | `F13a-editor-core-editing.md` |
-| F13b | Editor — Save, Locks, Autosave | not started — depends on F13a (done) | — |
+| F13a | Editor Core — the editing half (F13, SPLIT) | ✅ built + manually verified | `F13a-editor-core-editing.md` |
+| F13b | Editor — Save, Locks, Autosave (F13, SPLIT) | ✅ built + manually verified — **F13 is complete** | `F13b-editor-save-locks.md` |
 | F14–F17 | — | not started | — |
 | F18 | Windowed History (bounded resident window) | ✅ built + manually verified | `F18-windowed-history.md` |
 

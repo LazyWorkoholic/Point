@@ -219,16 +219,20 @@ autosave rule 2 ("record Point's own write mtimes"), so a save needs no
 follow-up `CheckFileStale` — B32 built the reply that way for this reason.
 `CmdCheckFileStale` exists and may stay unused.
 
-## Spun out of this episode's testing — F19 and B33
+## Spun out of this episode's testing — F16 and B33
 
 Manual testing after this episode found three things that are **not on
 F13's Done-when list** and are therefore not this episode's:
 
-- **F19** (`F19-editor-keymap-scroll.md`) — the tree's h/j/k/l vim
-  motions were undocumented, closing a tab had no one-key binding, and
-  the scroll offset in both the code pane and the tree was bounded by
-  `count-1` instead of `count-rows` (so the end of any list showed one
-  item). F19 depends on F13a and F13b and reuses C3's confirm.
+- **F16** (`F16-polish.md`) — three items, which were briefly their
+  own episode (F19) before being folded into the polish bucket where
+  they belong. Two are SHIPPED in `6e28f6b`: the tree's h/j/k/l vim
+  motions documented, and `f7` closing a tab through this episode's own
+  C3 confirm. The third is DEFERRED and live: the scroll offset in both
+  the code pane and the tree is bounded by `count-1` instead of
+  `count-rows`, so the end of any list shows one item and a wheel notch
+  back flashes four. F16 carries the measured numbers and the known
+  fix.
 - **B33** (`../backend/B33-transport-utf8.md`) — `backend\main.py`
   read stdin and wrote stdout in the ANSI codepage, not UTF-8, so a
   save of any file with non-ASCII bytes was silently mojibake'd (and
