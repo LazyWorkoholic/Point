@@ -166,44 +166,6 @@ func colAtDisplay(runes []rune, want int) int {
 	return len(runes)
 }
 
-// clampTop is the ONE place a scroll offset is bounded.
-//
-// The maximum is count-rows, NOT count-1, and that distinction is the
-// whole of a reported rendering glitch in both the file tree and the
-// code pane. With count-1, scrolling to the end of a list leaves ONE
-// item visible however tall the viewport is -- measured, before the
-// fix: a ten-line file in a twenty-row viewport (which should not
-// scroll at all) came to rest with `top=9, 1 line visible`, and one
-// wheel notch back showed four, which is exactly the "single-frame
-// flash of the last 4 items" in the report. The wheel moves three
-// lines at a time.
-//
-// It was the same expression in THREE places -- doc.scrollBy,
-// doc.ensureVisible and fileTree.ensureVisible -- not a shared
-// viewport component with one bug. Extracted here so the bound cannot
-// be written three ways again, which is the same reason this episode
-// derived effectiveFocus instead of storing it.
-//
-// rows < 1 is treated as 1: a viewport with no rows is a layout
-// mid-resize, and returning a negative maximum would put top past the
-// end.
-func clampTop(top, count, rows int) int {
-	if rows < 1 {
-		rows = 1
-	}
-	max := count - rows
-	if max < 0 {
-		max = 0
-	}
-	if top > max {
-		top = max
-	}
-	if top < 0 {
-		top = 0
-	}
-	return top
-}
-
 // centreCells centres one already-styled line in a field of display
 // cells, truncating rather than overflowing when it does not fit.
 //

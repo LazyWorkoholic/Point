@@ -233,7 +233,12 @@ func (d *doc) ensureVisible(rows, cells int) {
 	if rows <= 0 || cells <= 0 {
 		return
 	}
-	d.top = clampTop(d.top, d.buf.Lines(), rows)
+	if d.top > d.buf.Lines()-1 {
+		d.top = d.buf.Lines() - 1
+	}
+	if d.top < 0 {
+		d.top = 0
+	}
 	if !d.reveal {
 		return
 	}
@@ -244,7 +249,9 @@ func (d *doc) ensureVisible(rows, cells int) {
 	if d.cursor.Line >= d.top+rows {
 		d.top = d.cursor.Line - rows + 1
 	}
-	d.top = clampTop(d.top, d.buf.Lines(), rows)
+	if d.top < 0 {
+		d.top = 0
+	}
 
 	cell := displayCol(d.buf.Runes(d.cursor.Line), d.cursor.Col)
 	if cell < d.left {
@@ -265,10 +272,12 @@ func (d *doc) ensureVisible(rows, cells int) {
 // nothing else. The caret is deliberately left where it is: a wheel scroll
 // that dragged the caret along would lose the user's place the moment they
 // looked somewhere else in the file.
-func (d *doc) scrollBy(lines, rows int) {
-	// rows is passed in rather than remembered: the viewport height is
-	// the layout's, recorded during View, and a scroll that clamped
-	// against a stale copy would be the drifting-state bug again. The
-	// caller has it (w.textArea.H) at the moment of the scroll.
-	d.top = clampTop(d.top+lines, d.buf.Lines(), rows)
+func (d *doc) scrollBy(lines int) {
+	d.top += lines
+	if max := d.buf.Lines() - 1; d.top > max {
+		d.top = max
+	}
+	if d.top < 0 {
+		d.top = 0
+	}
 }

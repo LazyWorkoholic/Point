@@ -67,6 +67,132 @@ elsewhere, memory proposals, save failures, lock take-overs.
 - First-launch hint line in an empty chat naming exactly two things:
   `type a message` and `^P palette`. **Not a tour.**
 
+### Editor keymap documentation and a one-key close -- ALREADY SHIPPED in 6e28f6b
+
+**These two are DONE. They are recorded here, in the polish bucket they
+belong to, rather than as an episode of their own.**
+
+Both were found during F13b's manual verification and are not on F13's
+Done-when list. They were briefly written up as a separate episode (F19)
+and that episode was retired: two documentation-and-binding items are
+exactly what this file is for, and a third episode number for them was
+more bookkeeping than they are worth. The code is committed and correct;
+only the grouping changed. Nothing here is outstanding.
+
+#### The file tree's vim motions, documented
+
+Reported as "`l` behaves like Enter -- intentional vim-motion binding
+that isn't documented, or a stray keymap entry?". **Intentional, and a
+complete set** that `treeKey` has had since F13a, mirroring chat's own
+browse keys (`keys_test.go`'s `TestTreeNavigationKeys` says so):
+
+```
+up    k        down  j
+right l        expand a folder, or open a file
+left  h        collapse
+enter          open a file, or expand a folder
+pgup/pgdown    home/end
+```
+
+`l` and Enter are genuinely equivalent -- on a file `toggle()` reports
+false so both fall through to `openSelected`, and on a folder both
+expand it. Two spellings for the hand, not two behaviours.
+
+The keymap was right and the documentation was absent, so removing the
+motions would have been a regression for anyone using them since F13a.
+`treeKey`'s own doc comment now carries the table, and `render.go`'s
+empty state shows `in the tree: j/k or arrows move, l expand/open, h
+collapse` -- the screen a new user actually reads.
+
+#### `f7` closes the active tab
+
+Routed through the **same `closeTab`** the tab strip's `x` uses, so a
+dirty file still gets F13b's C3 confirm (`[ Close ] [ Cancel ]`, Cancel
+focused, Close discards). No second close path and no second confirm.
+
+Neither obvious binding was available, and both reasons are worth
+keeping written down:
+
+- **`ctrl+w` is the leader** (`actions.Leader`), intercepted before the
+  workspace sees a key. That is what makes `ctrl+w e` and `ctrl+w w`
+  work, so it cannot also mean close.
+- **`ctrl+shift+w` is not a key Windows delivers.** bubbletea's
+  console-record reader produces the same control character for `Ctrl+W`
+  and `Ctrl+Shift+W`, so it arrives as `ctrl+w` -- the leader again, and
+  close-tab would open the leader hint. Measured for `Ctrl+Shift+L`
+  during F13b, which is why the lock take-over is on `f6`.
+
+So `f7`, which keeps the editor's function keys contiguous and in a
+memorable order: **f5 re-index, f6 take over a stale lock, f7 close the
+tab.** Nothing in the chord registry claims it, so it needs no
+`KeyCapturer` claim and F13a's claim list stays at two keys. **`f8` is
+the next free one** -- F14's terminal should continue the block rather
+than reach for a chord.
+
+It is advertised in the empty-state list and appended **last** to the
+status line, so `fitHints` -- which drops whole parts from the end --
+sheds it first on a narrow terminal rather than a segment describing the
+file.
+
+### The scroll offset is bounded by count-1, not count-rows -- carried forward from F13b, DEFERRED
+
+**This one is NOT done. It was fixed and the fix was deliberately backed
+out, so the bug is live and this entry is the record of exactly what it
+is and what the fix was.**
+
+Both the code pane and the file tree bound their scroll offset by
+`count-1`, so scrolling to the end of any list leaves ONE item visible
+however tall the viewport is. Measured:
+
+```
+10-line file in a 20-row viewport (which should not scroll at all):
+  scrolled to the end  -> top=9, 1 line visible
+  one wheel notch back -> top=6, 4 lines visible     <- the reported "flash"
+  another notch back   -> top=3, 7 lines visible
+tree, 6 rows in a 4-row viewport -> top=5, 1 row visible
+```
+
+The wheel moves three lines at a time, which is where "a flash of the
+last four items" comes from: the first scroll attempts do nothing
+because `top` is already at its ceiling, and the next one jumps three.
+These numbers were re-measured after the fix was reverted and are
+identical, so the bug is in its original shape rather than a new one.
+
+**It is the same expression in three places, not a shared viewport
+component with one bug** -- the tree and the doc each own their `top`,
+for good reasons (different content, different reveal semantics):
+
+- `motion.go` `scrollBy`: `if max := d.buf.Lines() - 1`
+- `motion.go` `ensureVisible`: `if d.top > d.buf.Lines()-1`
+- `tree.go` `ensureVisible`: `if max := len(t.rows) - 1`
+
+**The fix, which is known to work and is not in the tree:** extract one
+`clampTop(top, count, rows int) int` into `textutil.go`, bounding at
+`count-rows` floored at 0, and call it from all three. `scrollBy` has to
+take `rows` as a parameter rather than remembering it -- the viewport
+height is the layout's, recorded during `View`, and a scroll clamped
+against a stale copy is the drifting-state bug F13b hit twice. The
+caller has `w.textArea.H` at the moment of the scroll.
+
+`ensureVisible` needs the clamp **before** its reveal gate as well as
+after, which is load-bearing on two paths `scrollBy` never touches: a
+**resize** (the viewport grows and nothing calls `scrollBy`) and
+**Resume** (`applyResumeTo` assigns `d.top` straight from the suspend
+blob, written against whatever height that session had). A test for that
+must set `reveal = false`, or the post-reveal clamp covers it and the
+test passes against the unfixed code -- which is what happened the first
+time.
+
+Three existing tests assert the OLD bound and will need retargeting:
+`tree_test.go`'s `TestTreeEnsureVisibleLeavesAnUnrequestedScrollAlone`
+(`want it clamped to len(t.rows)-1`), `motion_test.go`'s wheel test, and
+`highlight_test.go`'s benchmark, which only needs the new parameter.
+
+**Interacts with "Horizontal scrolling in the Code File box" below** --
+that item moves `doc.left` rather than `doc.top`, so the two are
+independent, but whoever does one should do the other and share the
+helper.
+
 ### Responsive audit
 Test every screen at:
 ```
@@ -355,6 +481,13 @@ Terminal profile.
 **Expect:** all readable; error and warning obviously distinct from the palette.
 
 ## Handoff
+
+**Three entries here came from F13b's verification rather than from this
+episode's own planning**: the two shipped keymap/close items above
+(done, in `6e28f6b`), and the deferred scroll bound (live, with its
+known fix written out). They are marked as such so picking one up does
+not mean rediscovering why it was or was not done at the time -- the
+rule this file's Purpose section already states.
 
 State after this episode: v1 is finished — not feature-complete, **finished**.
 Everything beyond this point is in the parking lots.
