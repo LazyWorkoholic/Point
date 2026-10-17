@@ -18,3 +18,8 @@ wheels/
 *.db-wal
 *.db-shm
 .point/
+
+# I manually added these below three files. These are ment for research paper work for this project.
+Research.md 
+Point_IEEE_Paper_with_Contributions.docx
+Point_IEEE_Paper.docx
