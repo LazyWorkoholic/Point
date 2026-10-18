@@ -1,0 +1,24 @@
+# Every blob in this repo is LF and must stay LF. The working tree is LF
+# too, so gofmt, go vet and the byte-exactness B32/F13 guarantee all see
+# the same bytes git stores -- on every machine, regardless of
+# core.autocrlf.
+*.go    text eol=lf
+*.py    text eol=lf
+*.md    text eol=lf
+*.toml  text eol=lf
+*.json  text eol=lf
+*.mod   text eol=lf
+*.sum   text eol=lf
+*.ps1   text eol=lf
+*.css   text eol=lf
+*.html  text eol=lf
+.gitignore      text eol=lf
+.gitattributes  text eol=lf
+.python-version text eol=lf
+uv.lock text eol=lf
+VERSION text eol=lf
+makefile        text eol=lf
+
+# No binary entries yet: `git ls-files` currently lists no binary file.
+# Add one explicitly the first time a font, image or fixture blob arrives,
+# rather than relying on detection.
