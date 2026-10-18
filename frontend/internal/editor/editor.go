@@ -287,6 +287,10 @@ func (w *Workspace) Update(msg tea.Msg) (app.Workspace, tea.Cmd) {
 		return w, w.onStaleReload(m)
 	case staleOverwriteMsg:
 		return w, w.onStaleOverwrite(m)
+	case diffApplyMsg:
+		// F9b: the DiffCard asks, this workspace applies. The card never
+		// touches a document itself -- see diffcard.go's onDiffApply.
+		return w, w.onDiffApply(m)
 	case closeDirtyMsg:
 		return w, w.onCloseDirty(m)
 	case closeCancelledMsg:
