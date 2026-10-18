@@ -146,6 +146,30 @@ unambiguous either way.
 Then open Claude Code with **`D:\Projects\Point`** as the working directory. Open
 a subfolder and `CLAUDE.md` will not auto-load.
 
+### Windows console encoding
+
+Found during the B35 re-check (2026-10-18): a correctly-encoded em-dash in
+`design/completed/frontend/F05-streaming-queue.md` rendered as `â€”` in a
+PowerShell console and looked exactly like the real corruption B33/B35
+fixed. It wasn't — see that doc's correction note. In order of preference:
+
+a. **Policy, applies no matter which fix below is in place:** never trust
+   `Get-Content`/`Select-String` console output to judge a file's
+   encoding. Pipe to a file and inspect with `Format-Hex`, or decode the
+   bytes explicitly, instead — that is what actually caught the false
+   alarm above.
+b. **Recommended fix:** upgrade to PowerShell 7 (`pwsh`) — it defaults to
+   UTF-8 console I/O, no per-session config needed.
+c. **Optional machine-wide fix:** Windows Settings → Region →
+   Administrative → Change system locale → enable "Use Unicode UTF-8 for
+   worldwide language support" (requires reboot).
+d. **Fallback, staying on PowerShell 5.1 without the system toggle:** add
+   to `$PROFILE`:
+   ```powershell
+   [Console]::OutputEncoding = [Text.Encoding]::UTF8
+   chcp 65001
+   ```
+
 ---
 
 # SESSION 0 — Verification pass (no code)

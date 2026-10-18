@@ -288,3 +288,47 @@ tracked files): 0 corruption, all hits deliberate prose (listed above).
   cause (the `CLAUDE.md` byte repair + B33 correction as one; the two JSON
   deletions as the other) — not `git add --renormalize`, which is B34's
   operation and would pull unrelated line-ending churn into either commit.
+
+---
+
+## Correction (2026-10-18) — a second file was suspected, and was not corrupted
+
+> **Correction:** `design/completed/frontend/F05-streaming-queue.md` was
+> suspected to carry the same mojibake this episode fixed in `CLAUDE.md` —
+> it showed as `â€”` in a PowerShell `Select-String` match. A byte-level
+> `Format-Hex` check on the file found the underlying bytes are `E2 80 94`,
+> the correct UTF-8 encoding of an em-dash. **No corruption existed.** This
+> is recorded here, append-only, rather than reopening the section above,
+> for the same reason B33's own correction was appended rather than
+> rewritten: it records what was true of a check performed after this
+> doc was written, without disturbing the claims this doc made about what
+> it had verified at the time.
+
+- **Root cause: a display artifact, not a file-encoding bug.** PowerShell
+  5.1's console codepage defaults to the system ANSI codepage, not UTF-8,
+  so `Get-Content`, `Select-String`, and even `Format-Hex`'s text column
+  all misrender any multi-byte UTF-8 character on screen. `F05-streaming-
+  queue.md` carries 68 correctly-encoded em-dashes (plus en-dashes,
+  arrows, and other symbols) in its committed blob and its working-tree
+  copy alike; none of them are mojibake by any byte-level test. The
+  console simply drew them wrong. This is a different bug from the one
+  B33 and this episode fixed — that one wrote corrupted bytes to disk;
+  this one reads correct bytes and paints the wrong glyphs — and it was
+  only caught because the check moved from the console to the bytes
+  themselves.
+- **Fix applied locally**, not yet repo-wide: the console was set to
+  UTF-8 (`[Console]::OutputEncoding = [Text.Encoding]::UTF8` and
+  `chcp 65001`), persisted in `$PROFILE` so it survives new sessions.
+  See `design/WORKFLOW.md`'s "Windows console encoding" section
+  (Phase 0) for the full set of options and why piping to `Format-Hex`
+  is the policy regardless of which one is in effect.
+- **Process gap this re-check exposed:** B35's own verification scripts
+  (the literal-signature scan and the cp1252 round-trip scan, described
+  above) were never committed — ad hoc, per this doc's own account. When
+  this was re-checked, there was no way to tell a genuine re-run of B35's
+  original scan from a prose-reconstruction of it from this doc's
+  description, because the only artifact either way is this doc's text.
+  **Recommended follow-up:** commit the scan script under
+  `backend\tests\` so a "zero new corruption" claim is something the next
+  person can re-run, not something they have to take on faith or
+  rebuild from a description.
