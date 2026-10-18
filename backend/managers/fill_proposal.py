@@ -52,10 +52,16 @@ _FENCE_RE = re.compile(r"^```[a-zA-Z]*$")
 
 @dataclass(frozen=True)
 class FillProposal:
-    """The parsed, validated shape. All seven fields travel together on
+    """The parsed, validated shape. All nine fields travel together on
     the wire (`to_dict()`), no subset -- B20's rule, for B20's reason: a
     consumer that only gets some fields cannot tell a missing one from
-    an omitted one."""
+    an omitted one.
+
+    B36 added `mtime`/`size`: the stat captured at the SAME disk read
+    that produced `shown_start`/`shown_end`'s region
+    (`_render_editor_context`, via `RegisteredEditorContext`), never
+    recomputed here -- same reasoning as `shown_start`/`shown_end`
+    themselves."""
 
     file: str              # as the model returned it, before resolution
     start_line: int        # 1-based inclusive
@@ -64,6 +70,8 @@ class FillProposal:
     note: Optional[str]
     shown_start: int       # the region the model was actually shown
     shown_end: int
+    mtime: float           # stat of the file at the region-generation read
+    size: int
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -74,6 +82,8 @@ class FillProposal:
             "note": self.note,
             "shown_start": self.shown_start,
             "shown_end": self.shown_end,
+            "mtime": self.mtime,
+            "size": self.size,
         }
 
 
@@ -91,7 +101,7 @@ FillParseResult = Union[FillProposal, FillParseFailure]
 
 
 def parse_fill_proposal(
-    text: str, *, file: str, shown_start: int, shown_end: int,
+    text: str, *, file: str, shown_start: int, shown_end: int, mtime: float, size: int,
 ) -> FillParseResult:
     """Parse `text` (the Filler's full reply) against the region it was
     actually shown (`shown_start`/`shown_end`, carried from the context
@@ -99,7 +109,12 @@ def parse_fill_proposal(
     `resolve_scope()` is deterministic given the same lines, but the
     file may have changed on disk between the build and this call, and
     recomputing would then validate against a different region than the
-    model saw)."""
+    model saw).
+
+    `mtime`/`size` (B36) are carried the same way and for the same
+    reason -- not validated against anything here (that is
+    `CheckFileStale`'s job, against a LATER read), only passed through
+    onto the resulting `FillProposal` unchanged."""
     stripped = _strip_single_fence(text)
 
     try:
@@ -139,6 +154,8 @@ def parse_fill_proposal(
         note=note,
         shown_start=shown_start,
         shown_end=shown_end,
+        mtime=mtime,
+        size=size,
     )
 
 

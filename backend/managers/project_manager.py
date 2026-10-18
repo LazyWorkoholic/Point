@@ -593,17 +593,34 @@ class ProjectManager:
         raw_path: str,
         recorded_mtime: float,
         *,
+        recorded_size: Optional[int] = None,
         allow_outside_project: bool = False,
     ) -> bool:
         """True if the file changed on disk since `recorded_mtime` (the
         mtime read_file() reported at open) -- including if it was
         deleted. Saving over a changed file must be refused, not
-        silently done; this is the check that refusal is built on."""
+        silently done; this is the check that refusal is built on.
+
+        B36: `recorded_size` is optional, and that is the whole
+        backward-compatibility story -- a caller that supplies only
+        `recorded_mtime` (every caller before B36, and still
+        `cli.py project check-stale` when `--size` is omitted) gets
+        EXACTLY the pre-B36 comparison, mtime alone against the 1e-6
+        tolerance. Given, the current size must ALSO match for the file
+        to count as unchanged: a filesystem with second-granularity
+        timestamps (or a write landing in the same tick as the recorded
+        one) can reuse an mtime while the length moved, and `stat()` has
+        already paid for `st_size` by the time `st_mtime` is read, so
+        checking it costs nothing extra once it is in hand."""
         resolved = resolve_path(raw_path, project, allow_outside_project=allow_outside_project)
         if not resolved.exists():
             return True
-        current = resolved.stat().st_mtime
-        return abs(current - recorded_mtime) > 1e-6
+        stat = resolved.stat()
+        if abs(stat.st_mtime - recorded_mtime) > 1e-6:
+            return True
+        if recorded_size is not None and stat.st_size != recorded_size:
+            return True
+        return False
 
     # -- soft file locks -----------------------------------------------------
     # rel_path is always resolved and made project-relative first, so

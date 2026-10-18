@@ -45,10 +45,21 @@ def check(label, got, want):
 
 EXPECTED_FILE = "D:\\Projects\\Point\\backend\\sample.py"
 
+# B36: dummy stat values -- parse_fill_proposal() never validates these,
+# only carries them, so any fixed pair exercises the plumbing.
+STAT_MTIME = 1_700_000_000.5
+STAT_SIZE = 4096
 
-def parse(payload: dict, *, file=EXPECTED_FILE, shown_start=1, shown_end=100, raw=None):
+
+def parse(
+    payload: dict, *, file=EXPECTED_FILE, shown_start=1, shown_end=100,
+    mtime=STAT_MTIME, size=STAT_SIZE, raw=None,
+):
     text = raw if raw is not None else json.dumps(payload)
-    return parse_fill_proposal(text, file=file, shown_start=shown_start, shown_end=shown_end)
+    return parse_fill_proposal(
+        text, file=file, shown_start=shown_start, shown_end=shown_end,
+        mtime=mtime, size=size,
+    )
 
 
 print("=== validation table")
@@ -113,6 +124,13 @@ result = parse({
 })
 check("an unknown extra key is ignored, not rejected", isinstance(result, FillProposal), True)
 
+result = parse({
+    "file": "sample.py", "start_line": 2, "end_line": 4, "replacement": "x", "note": None,
+})
+check("B36: mtime/size travel through to_dict() unchanged",
+      isinstance(result, FillProposal) and (result.to_dict()["mtime"], result.to_dict()["size"]),
+      (STAT_MTIME, STAT_SIZE))
+
 print("\n=== fences and prose")
 
 fenced = "```json\n" + json.dumps({
@@ -138,11 +156,14 @@ print("\n=== StreamManager: reachable from the echo path, and no leak")
 
 sm = StreamManager()
 ec = EditorContext(file=EXPECTED_FILE, mode=MODE_FILL)
-sm.register_editor_context("task-1", ec, 1, 50)
+sm.register_editor_context("task-1", ec, 1, 50, STAT_MTIME, STAT_SIZE)
 
 check("registered without ever registering a stream (the echo/refusal path)",
       sm.has_stream("task-1"), False)
 check("editor_context_for reachable regardless", sm.editor_context_for("task-1") is not None, True)
+check("B36: mtime/size carried on RegisteredEditorContext beside shown_start/shown_end",
+      (sm.editor_context_for("task-1").mtime, sm.editor_context_for("task-1").size),
+      (STAT_MTIME, STAT_SIZE))
 
 sm.close_stream("task-1")
 check("close_stream clears it -- no leak per fill turn", sm.editor_context_for("task-1"), None)

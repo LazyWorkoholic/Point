@@ -1297,10 +1297,16 @@ async def cmd_project_check_stale(runtime: Runtime, args: argparse.Namespace) ->
     project = await _require_project(runtime, args)
     if project is None:
         return EXIT_FAILED
+    extra: dict[str, Any] = {}
+    if args.size is not None:
+        extra["size"] = args.size
+    if args.session:
+        extra["session_id"] = args.session
     envelopes = await call(
         runtime, "CheckFileStale", verbose=args.verbose,
         project_id=project["id"], path=args.file, mtime=args.mtime,
         allow_outside_project=args.allow_outside,
+        **extra,
     )
     _print_errors(envelopes)
     if _failed(envelopes) or not envelopes:
@@ -1883,6 +1889,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_stale.add_argument("--path", default=".")
     p_stale.add_argument("--file", required=True)
     p_stale.add_argument("--mtime", type=float, required=True, help="the mtime read-file reported at open")
+    p_stale.add_argument("--size", type=int, default=None, help="B36: recorded size, compared when given")
+    p_stale.add_argument(
+        "--session", default=None,
+        help="B36: resolve the SESSION's own scope instead of --path's",
+    )
     p_stale.add_argument("--allow-outside", dest="allow_outside", action="store_true")
 
     # B23: plain, uncached directory listing -- no --path here on purpose.

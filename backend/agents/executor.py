@@ -98,34 +98,45 @@ _FILE_TOKEN_RE = re.compile(r"\b\w{2,}[\w.\\/-]*\.[A-Za-z0-9]{1,6}\b")
 # (`managers\context.py`, on the B24 Do-NOT list -- read what it
 # decided, never touch it) showed the Filler. Its `task_state`
 # IncludedItem's `detail` is always `"editor context: {name}
-# mode={mode} lines {start}-{end}"`, built from one unconditional
-# f-string with no singular-line variant, so this one pattern covers
-# every case that detail string can take.
+# mode={mode} lines {start}-{end} mtime={mtime} size={size}"` (B36
+# added the trailing `mtime=`/`size=` to the same unconditional
+# f-string), so these two patterns cover every case that detail string
+# can take.
 _SHOWN_RANGE_RE = re.compile(r"lines (\d+)-(\d+)")
+_REGION_STAT_RE = re.compile(r"mtime=([0-9]+(?:\.[0-9]+)?) size=(\d+)")
 
 
-def _shown_range_from_built(built: context.BuiltContext) -> Optional[tuple[int, int]]:
-    """The `(shown_start, shown_end)` `_render_editor_context` computed
-    for THIS build, recovered from `built.log.included` rather than
-    recomputed -- `resolve_scope()` is deterministic given the same
+def _region_stat_from_built(
+    built: context.BuiltContext,
+) -> Optional[tuple[int, int, float, int]]:
+    """`(shown_start, shown_end, mtime, size)` `_render_editor_context`
+    computed for THIS build, recovered from `built.log.included` rather
+    than recomputed -- `resolve_scope()` is deterministic given the same
     lines, but the file may change on disk before the terminal event
-    this feeds, so the region shown must be captured here, not re-asked
-    for later.
+    this feeds, so the region shown (and the stat taken alongside it,
+    B36) must be captured here, not re-asked for later.
 
     `build()`'s assembly runs its six sections exactly once with no
     loop that could append `SECTION_TASK_STATE` to `log.included` more
     than once, so there is at most one match -- never a "which one"
     question. None (not a raise) when there isn't one at all: a
     path-guard refusal or an unreadable file leaves `task_state` with
-    no "lines" text, same as task_state being evicted for budget
-    (`EvictedItem.reason` never contains it either). Both are ordinary
-    "nothing to find" outcomes, identical in effect to a Filler reply
-    that did not parse -- no event, no exception, the caller logs once.
-    """
+    neither "lines" nor "mtime=" text, same as task_state being evicted
+    for budget (`EvictedItem.reason` never contains either either). All
+    four values or none -- a `detail` that matched one pattern but not
+    the other would mean the two were edited out of sync, and that is a
+    bug to surface as "nothing to find", not a proposal built from half
+    a fact."""
     for item in built.log.included:
         if item.section == context.SECTION_TASK_STATE:
-            match = _SHOWN_RANGE_RE.search(item.detail)
-            return (int(match.group(1)), int(match.group(2))) if match else None
+            range_match = _SHOWN_RANGE_RE.search(item.detail)
+            stat_match = _REGION_STAT_RE.search(item.detail)
+            if range_match is None or stat_match is None:
+                return None
+            return (
+                int(range_match.group(1)), int(range_match.group(2)),
+                float(stat_match.group(1)), int(stat_match.group(2)),
+            )
     return None
 
 
@@ -523,16 +534,17 @@ class AgentExecutor:
         # or plain chat turn must never be parsed at all, whatever its
         # reply looks like.
         if editor_context is not None and editor_context.mode == MODE_FILL:
-            shown_range = _shown_range_from_built(built)
-            if shown_range is not None:
+            region_stat = _region_stat_from_built(built)
+            if region_stat is not None:
+                shown_start, shown_end, mtime, size = region_stat
                 self._streams.register_editor_context(
-                    task_id, editor_context, shown_range[0], shown_range[1],
+                    task_id, editor_context, shown_start, shown_end, mtime, size,
                 )
             else:
                 _log.warning(
-                    "Task %s: fill turn's shown line range could not be "
-                    "recovered from the context build; no FillProposal "
-                    "will be parsed for this turn",
+                    "Task %s: fill turn's shown line range (or its stat) "
+                    "could not be recovered from the context build; no "
+                    "FillProposal will be parsed for this turn",
                     task_id,
                 )
 

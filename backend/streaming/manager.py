@@ -26,11 +26,17 @@ class RegisteredEditorContext:
     have changed on disk by the time the sink runs). `EditorContext`
     itself gains no fields for this: it mirrors F11/F15's Go struct by
     name and by field, and `shown_start`/`shown_end` are a backend-only
-    fact about one build, not part of that wire shape."""
+    fact about one build, not part of that wire shape.
+
+    B36: `mtime`/`size` are the same kind of fact, captured at the same
+    build -- the stat `_render_editor_context` took from the exact file
+    descriptor it read the region from, never re-stat'd here or later."""
 
     context: EditorContext
     shown_start: int
     shown_end: int
+    mtime: float
+    size: int
 
 
 class StreamManager:
@@ -64,8 +70,11 @@ class StreamManager:
 
     def register_editor_context(
         self, task_id: str, context: EditorContext, shown_start: int, shown_end: int,
+        mtime: float, size: int,
     ) -> None:
-        self._editor_contexts[task_id] = RegisteredEditorContext(context, shown_start, shown_end)
+        self._editor_contexts[task_id] = RegisteredEditorContext(
+            context, shown_start, shown_end, mtime, size,
+        )
 
     def editor_context_for(self, task_id: str) -> Optional[RegisteredEditorContext]:
         return self._editor_contexts.get(task_id)

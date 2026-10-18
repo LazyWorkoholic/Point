@@ -858,13 +858,41 @@ class Runtime:
         ))
 
     async def _handle_check_file_stale(self, event: IncomingEvent) -> None:
+        """B36 added `session_id` and `size` as real comparison fields,
+        additively:
+
+        - No `session_id` -> EXACTLY the pre-B36 behaviour below
+          (`_resolve_optional_project` + the payload's own
+          `allow_outside_project`). This is `cli.py project check-stale`
+          today, and it must not silently start answering a different
+          question.
+        - `session_id` given -> the SESSION's own scope, via
+          `_attachment_scope` -- never `_resolve_optional_project`, which
+          walks up from `path` to auto-discover a project and answers a
+          different question (B12's bug #2; 374baa2 fixed the same drift
+          for AttachContext/ResolveAttachment). `allow_outside_project`
+          is then config-driven through `_attachment_scope`, same as
+          those two callers, not the payload flag -- a caller that knows
+          which session produced the recorded stat should be checked
+          against that session's actual scope, not a per-request
+          override of it.
+        - `size` is optional throughout: omitted, `check_stale` compares
+          mtime alone, unchanged from before B36.
+        """
         p = event.payload
         if "path" not in p or "mtime" not in p:
             raise InvalidEventError("CheckFileStale requires 'path' and 'mtime'")
-        project = await self._resolve_optional_project(p)
+        session_id = p.get("session_id")
+        if session_id:
+            project, allow_outside = await self._attachment_scope(session_id)
+        else:
+            project = await self._resolve_optional_project(p)
+            allow_outside = bool(p.get("allow_outside_project", False))
+        raw_size = p.get("size")
         changed = await self.projects.check_stale(
             project, p["path"], float(p["mtime"]),
-            allow_outside_project=bool(p.get("allow_outside_project", False)),
+            recorded_size=int(raw_size) if raw_size is not None else None,
+            allow_outside_project=allow_outside,
         )
         await self._emit(OutgoingEvent(
             type=OutgoingEventType.FILE_STALE_RESULT,
@@ -1714,6 +1742,8 @@ class Runtime:
             file=ec_record.context.file,
             shown_start=ec_record.shown_start,
             shown_end=ec_record.shown_end,
+            mtime=ec_record.mtime,
+            size=ec_record.size,
         )
         if isinstance(result, FillParseFailure):
             _log.warning(

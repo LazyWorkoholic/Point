@@ -37,6 +37,7 @@ What this file must never do:
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional, Protocol
@@ -650,15 +651,32 @@ def _render_editor_context(
     open in a real buffer, set by the invocation site (F11/F15), never
     typed by the model. It is not an arbitrary `@file` a model or a
     stranger's link pointed at, so it does not sit behind the same gate.
+
+    B36: `mtime`/`size` are read from the SAME open file descriptor the
+    content comes from (`os.fstat`, not a separate `path.stat()` call
+    before or after `read()`), and folded into `detail` alongside
+    `lines {start}-{end}` -- the only channel this function has ever had
+    to report what it read (`agents\\executor.py` regexes both out of
+    the same string). Stat-then-read or read-then-stat both leave a
+    window for an external write to land between the two syscalls, which
+    would silently pair this region with a stat describing different
+    bytes than the ones the model was actually shown -- the exact
+    "cache a stat and trust it" failure B12's `set_mode` clears its own
+    recorded pair to avoid, one layer further upstream.
     """
     try:
         path = resolve_path(editor_context.file, project, allow_outside_project=True)
     except PathDeniedError as exc:
         return "", f"editor context refused by path guard: {exc}"
     try:
-        text = path.read_text(encoding="utf-8", errors="replace")
+        with path.open("rb") as f:
+            raw_bytes = f.read()
+            fstat = os.fstat(f.fileno())
     except OSError as exc:
         return "", f"editor context unreadable: {exc.strerror or exc}"
+    text = raw_bytes.decode("utf-8", errors="replace")
+    mtime = fstat.st_mtime
+    size = fstat.st_size
     # A BOM survives utf-8 decoding as a literal U+FEFF -- Python's codec
     # does not strip it (same fact appconfig._strip_bom exists for).
     # Left in place it sits inside line 0's leading whitespace and
@@ -701,7 +719,14 @@ def _render_editor_context(
         )
 
     rendered = f"{header}\n{snippet}{instructions}"
-    detail = f"editor context: {name} mode={editor_context.mode} lines {start}-{end}"
+    # B36: mtime/size appended to the same unconditional f-string the
+    # "lines {start}-{end}" fragment already lives in -- one success
+    # path, still no singular-line variant, still the one place this
+    # function reports what it read.
+    detail = (
+        f"editor context: {name} mode={editor_context.mode} lines {start}-{end} "
+        f"mtime={mtime} size={size}"
+    )
     return rendered, detail
 
 
