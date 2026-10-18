@@ -1,5 +1,7 @@
 package app
 
+import tea "github.com/charmbracelet/bubbletea"
+
 // F13's two additions to what Root asks of the ACTIVE workspace.
 //
 // Both follow the pattern FocusAware, OverlayProvider, DirtyBuffers and
@@ -143,4 +145,78 @@ type OpenWorkspaceOverlayMsg struct{ Overlay Overlay }
 // processed rather than racing the exit.
 type LockHolder interface {
 	ReleaseLocks()
+}
+
+// BackgroundReplies is implemented by a workspace whose backend replies
+// must still reach it while it is LOADED BUT NOT ACTIVE.
+//
+// Root routes protocol.EnvelopeMsg to r.current() and nowhere else, which
+// is right for every workspace whose queries are driven by what is on
+// screen: a reply nobody is looking at can wait for the next visit,
+// because the query that produced it will be re-issued on the way back in
+// (the Editor re-resolves and re-lists its tree from the ConnectedMsg
+// switchWorkspace replays).
+//
+// A WRITE is the exception, and it is the one that bites. The Editor sets
+// doc.saving when a CmdWriteProjectFile goes out and clears it ONLY from
+// the EvProjectFileWritten reply. Autosave can start that write a moment
+// before the user switches away -- a one-second debounce against a
+// workspace switch is not a rare race, it is the ordinary one -- and the
+// reply then lands while Chat is active and is dropped on the floor. The
+// document is left saving forever: the status bar reads "saving…", the
+// dirty marker never clears because nothing cleared it, and saveDoc's
+// "a write is already in flight" guard refuses every later save, autosave
+// and manual alike. The file becomes permanently un-saveable, and the
+// only thing that put it in that state was changing workspace at the
+// wrong instant.
+//
+// Recovering on the way back in is not an option that exists: once the
+// reply is gone this side cannot tell whether the write landed, and both
+// answers are wrong to assume. Re-sending with the old expected_mtime
+// gets a `stale` refusal if it DID land; clearing the flag and trusting
+// the buffer silently keeps a mtime that no longer matches the file. The
+// reply is the only thing that knows, so the fix is to not throw it away.
+//
+// Declared as an interface rather than special-casing the Editor in Root
+// for the reason every narrow interface in this file exists: the root asks
+// "do you need this", never "are you the editor".
+type BackgroundReplies interface {
+	// WantsBackgroundReplies reports whether this workspace has work in
+	// flight whose reply it cannot afford to miss. Asked per envelope, so
+	// a workspace that answers false while idle costs nothing.
+	WantsBackgroundReplies() bool
+}
+
+// AutosavePauser is implemented by a workspace that runs a timer which
+// must not fire while a modal question about those same buffers is on
+// screen.
+//
+// The Editor's dirty-close confirm (F13b's C3) already pauses its own
+// autosave, and had to: gate_f13b step 5 found that a tick armed by the
+// keystroke that made the file dirty lands while the user is still
+// reading the dialog, writes the edits, and makes both buttons
+// meaningless -- Close would discard a buffer already on disk.
+//
+// UI-13's unload confirm asks the SAME question about the SAME buffers
+// and did not pause anything, because it is opened by Root rather than by
+// the workspace and had no way to ask. This is that way.
+//
+// Pause/Resume are a pair and Root owns the pairing: every path that
+// opens the dialog pauses, and every path that closes it WITHOUT
+// unloading resumes. An unload needs no resume -- the workspace and its
+// documents are gone.
+type AutosavePauser interface {
+	// PauseAutosave stops scheduled saves and retires any tick already in
+	// flight. Idempotent.
+	PauseAutosave()
+	// ResumeAutosave restores the normal schedule and re-arms anything
+	// still dirty. Idempotent, and never un-blocks a document stopped for
+	// a reason of its own (read-only, held by another holder).
+	//
+	// Returns the re-armed timers. They are tea.Cmds and have to be run,
+	// not discarded: a dirty document whose tick was retired by the pause
+	// has no other edit coming, so dropping this is the difference
+	// between "autosave resumes" and "autosave resumes after you type one
+	// more character".
+	ResumeAutosave() tea.Cmd
 }

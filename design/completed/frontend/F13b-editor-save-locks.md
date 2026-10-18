@@ -268,3 +268,222 @@ successful save and a refused one are hash-indistinguishable.
   nothing to disk, so F13b is a scheduling prerequisite only.
 - **F16 (Polish)** now carries this episode's deferred items — see
   "Carried forward from F13b" there.
+
+---
+
+## Patched post-close
+
+**Two regressions in this episode's own save/autosave behaviour, found by
+manual re-testing after B33 and F16 landed, and fixed without reopening
+the episode. Both are races against something the user does with the
+hands — a workspace switch, and a dialog — which is exactly why
+`gate_f13b.ps1` caught neither: the gate drives one thing at a time and
+waits.**
+
+> Not a new episode, and deliberately so. Neither changes a Done-when,
+> neither adds surface, and both are defects in what this doc already
+> claims. The record belongs where the claim is.
+
+### Regression 1 — a save wedged across the idle-unload skip
+
+**Root cause, and it is one layer up from the editor.** Root routes
+`protocol.EnvelopeMsg` to `r.current()` and nowhere else (`root.go`'s
+`EnvelopeMsg` case). So:
+
+1. autosave starts a write and sets `doc.saving` (`save.go`);
+2. the user switches to Chat inside the one-second debounce;
+3. `EvProjectFileWritten` arrives, is delivered to Chat, which has no
+   matching `corr_id`, and is dropped;
+4. `doc.saving` is cleared ONLY from `onWritten`/`onError`, so it stays
+   true for ever.
+
+Every symptom follows from that one stuck flag: the status bar pinned on
+`saving…` (`status.go`), the dirty marker never clearing because nothing
+cleared it, and — the part that makes it more than cosmetic —
+`saveDoc`'s "a write is already in flight" guard then refusing **every**
+later write, autosave and `ctrl+s` alike. **The file became permanently
+un-saveable, and the only thing that put it there was changing workspace
+at the wrong instant.**
+
+The idle-unload skip is in the repro but is **not** the bug and is
+correct behaviour: F13a taught the sweep to leave a dirty workspace
+loaded rather than discard an unsaved buffer, and the
+`Editor stays loaded — N file(s) have unsaved changes` notice is how
+that becomes visible. The skip is what keeps the Editor backgrounded for
+long enough that the reply certainly arrives while something else is
+active.
+
+**Recovering on the way back in was considered and rejected**, which is
+worth recording because it is the obvious fix: once the reply is gone
+this side cannot tell whether the write landed, and both assumptions are
+wrong. Re-sending with the old `expected_mtime` draws a `stale` refusal
+if it DID land; clearing the flag and trusting the buffer keeps an mtime
+that no longer matches the file, which is autosave rule 2 broken in the
+quietest possible way. The reply is the only thing that knows, so the
+fix is to stop throwing it away.
+
+**The fix.** A narrow `app.BackgroundReplies` interface
+(`contribute.go`), following the `DirtyBuffers`/`LockHolder` pattern this
+episode already established — Root asks "do you need this", never "are
+you the editor". `Root.deliverBackgroundReply` (`root.go`) runs AFTER
+`r.current().Update` so the active workspace keeps first claim, skips
+`r.active` so nothing is delivered twice, and hands the envelope to every
+loaded workspace that answers yes. The Editor's `WantsBackgroundReplies`
+(`autosave.go`) is true exactly while a write is outstanding, derived by
+scanning the open documents rather than kept as a counter — a counter has
+two paths that must agree for ever, including `protocol.go`'s Error path,
+which is the one that would be forgotten.
+
+**The returned `tea.Cmd` is dropped on purpose.** What a write reply
+produces is `say()`, which becomes a `WorkspaceStatusMsg` — and that
+message carries no workspace id, so Root would print `saved main.go` over
+the status bar of whatever the user is actually looking at. A background
+workspace may reconcile its own state; it may not take the status line.
+
+### Regression 2 — autosave racing UI-13's unload confirm
+
+**Root cause.** `requestUnload` (`lifecycle.go`) opened its Confirm with
+no pause and no `OnCancel`. The dialog asks whether these buffers
+survive, and it is open far longer than the one-second debounce, so a
+tick armed by the keystroke that made the file dirty landed while the
+user was still reading it and wrote the edits — making **Unload discard a
+buffer that was already on disk, and Cancel indistinguishable from it.**
+
+This is round 2's finding one dialog over. `confirmCloseDirty`
+(`tabs.go`) already fixed exactly this for the editor's OWN close
+confirm; UI-13's dialog is opened by Root and so had no way to ask for
+the same pause.
+
+**The fix.** An `app.AutosavePauser` interface (`contribute.go`).
+`requestUnload` pauses before opening and attaches
+`OnCancel` → `unloadCancelledMsg` → `ResumeAutosave`; `OnCancel` covers
+all three decline paths (button, esc, click outside), which is the signal
+`Confirm` gained in round 2 for precisely this shape of bug.
+
+Editor side (`autosave.go`, `editor.go`): a workspace-level
+`autosavePaused` flag plus a per-document **generation bump**. Both halves
+are required, and the reason is round 2's restated — the flag stops a NEW
+tick being scheduled, and the bump retires the one already in flight,
+because `armAutosave` is consulted when a timer is SET and the dangerous
+tick was set a moment ago by the keystroke that made the file dirty.
+`ResumeAutosave` re-arms every still-dirty document rather than waiting
+for the next keystroke, or a cancelled dialog would leave autosave
+looking dead until one more character was typed.
+
+**`autosavePaused` is deliberately NOT `doc.autosaveBlocked`.** That flag
+is a document's own refusal — read-only, held by another holder — and must
+survive a resume untouched; folding the two together is the obvious
+simplification and would silently re-arm autosave on a file the backend
+has already refused, once per cancelled dialog. There is a test pinning
+that. It is workspace-level rather than per-document, which is **not** the
+C5 trap: C5 is about TIMERS and per-entity deadlines, and this sets no
+deadline for any file — the dialog counts every dirty buffer in the
+workspace, so the pause is workspace-wide too.
+
+**Unload supersedes the pending save.** That was the open half of the
+decision and it is the same call C3 makes one dialog over: a confirm that
+discards must not quietly write first, or the button does not mean what it
+says. No resume on the confirmed path — the workspace is gone, and
+`docByPath` then finds nothing for any tick still outstanding.
+
+### How it was verified
+
+`backend\tests\gate_f13b_hotfix.ps1` (NEW) — two scenarios only, Step A
+and Step B, in a scratch `APPDATA`/`LOCALAPPDATA` profile with
+`idle_unload_minutes = 1`, per CLAUDE.md's env-var-override rule. It is
+**not** a replacement for `gate_f13b.ps1` and re-verifies none of F13's
+Done-whens; it exists because both bugs need two things happening at once.
+0 parse errors, UTF-8-with-BOM, ASCII-only, LF — and both existing gates
+still parse at 0 afterwards.
+
+**11 new unit tests**, in `editor\hotfix_test.go` and `app\hotfix_test.go`.
+The suite went **1,236 → 1,247, 0 failed**; `go build ./...`, `gofmt -l .`
+and `go vet ./frontend/...` clean.
+
+**Every fix was shown to fail against its own reverted code**, this
+episode's own standing rule:
+
+```
+drop r.deliverBackgroundReply      -> "received 0 envelopes, want 1 -- the
+                                      document is wedged"
+drop requestUnload's PauseAutosave -> "PauseAutosave called 0 times, want 1
+                                      -- autosave is racing the dialog"
+drop armAutosave's paused check    -> "an edit scheduled a new autosave while
+                                      the dialog was open"
+```
+
+**Confirmed on the real application by manual spot-check**, four scenarios
+beyond the two the gate drives:
+
+| scenario | result |
+|---|---|
+| normal-path autosave, no race at all | saves and clears exactly as before — the fix is inert when nothing is backgrounded |
+| the race, watching Chat's status bar | no leak: the background Editor reconciles silently and Chat's status line is untouched |
+| two documents with writes in flight at once | no cross-talk — each reply lands on its own document, so C5's per-document isolation holds through the background path too |
+| repeated idle cycles | the `stays loaded` notice fires once per period, not once per tick — the `dirtyNoticed` latch still behaves |
+
+### Done-when 8 — confirmed intact, not re-investigated
+
+Retested independently on the real application: edit the file externally in
+another editor, then `ctrl+s` on a buffer that is **locally clean but now
+stale on disk**. The `[reload] [overwrite] [diff]` dialog fired correctly.
+
+Recorded as **confirmed intact**. Nothing about it was changed or
+re-derived by either fix; this is a spot-check that it still holds, not a
+reopening of the Done-when.
+
+> Worth naming what that check also makes visible, because it is now its
+> own episode: the stale check runs ONLY when something tries to write, so
+> a file changed externally while Point's copy is locally clean shows no
+> signal at all until a save is attempted. That gap is **F20** — see
+> `../../tasks/frontend/F20-live-stale-detection.md`. It is a new TRIGGER
+> into this episode's refusal machinery, not a second mechanism, and it
+> does not reopen Done-when 8.
+
+### Still open, and deliberately untouched by this patch
+
+Both were found while fixing the above and both are outside its scope.
+
+**This project tracks open frontend follow-ups in
+`../../tasks/frontend/F16-polish.md`**, which already carries this
+episode's earlier deferred items under "Carried forward from F13b" — so
+that is where these two now live. **No new tracking file was created.**
+(The `Parking lot` in `../../tasks/frontend/INDEX.md` is the wrong home:
+CLAUDE.md is explicit that a parked item is deferred *by design* and is
+not work, and both of these are defects.)
+
+- **Lock heartbeats stop while the Editor is backgrounded.**
+  `heartbeatTickMsg` goes through the same active-workspace-only routing
+  that caused regression 1, so sitting in Chat for more than B7's 60
+  seconds lets this process's own locks go stale and become
+  take-over-able by anything — including Point's own next acquire. Not
+  fixed here because the write reply is the case that WEDGES a document
+  while an expired heartbeat merely expires, and because extending
+  `BackgroundReplies` to cover heartbeats means first deciding whether a
+  backgrounded workspace should hold locks at all. That is a question
+  about the lock lifecycle, not about this bug.
+- **`tabs.go:264`'s `if d.autosaveBlocked` is always true.** Line 258 of
+  the same function sets it two lines earlier, so the dirty-close dialog
+  unconditionally appends "Autosave is stopped for this file — see the
+  status bar", including when it is not. Cosmetic, pre-dates this patch,
+  and a one-line fix that belongs with the other polish items rather than
+  inside an unrelated hotfix.
+
+### Documentation changed alongside the code
+
+Three files moved in the same working tree and were not accounted for in
+this patch's first report. Recorded here rather than left for
+`git diff --stat` to raise:
+
+- **`design/tasks/backend/INDEX.md`** — a row for **B35**, a new backend
+  episode found by a repo-wide verification pass (`CLAUDE.md` has been
+  mojibake'd since `790e0c2`, plus two stray UTF-16LE files committed in
+  that same commit). B34's row also gained a "run after B35" note.
+- **`design/WORKFLOW.md`** — a `SESSION 18g` block for B35, placed above
+  18f per this file's own rule that position, not letter, is the order,
+  with that reasoning written into both blocks.
+- **`design/model_usage.md`** — an 18g row, Sonnet high.
+
+None of the three touches frontend code or any claim this episode makes.
+They are listed because they were in the same diff, not because they are
+related.

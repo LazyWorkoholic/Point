@@ -5,6 +5,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
+	"github.com/lazyworkoholic/point/frontend/internal/app"
 	"github.com/lazyworkoholic/point/frontend/internal/config"
 )
 
@@ -122,6 +123,15 @@ func (w *Workspace) armAutosave(d *doc) tea.Cmd {
 	if w.autosaveMode != config.AutosaveAfterDelay {
 		return nil
 	}
+	if w.autosavePaused {
+		// A modal question about these buffers is open. The generation
+		// bump above has already retired whatever was in flight; this
+		// just declines to schedule a replacement. Not autosaveBlocked:
+		// nothing is wrong with the document and nothing should be said
+		// about it in the status bar -- the dialog on screen is the
+		// explanation.
+		return nil
+	}
 	if !d.canSave() {
 		// Rule 1, applied before the timer rather than at its end:
 		// scheduling a tick that is certain to refuse is how "does not
@@ -155,6 +165,16 @@ func (w *Workspace) armAutosave(d *doc) tea.Cmd {
 
 // onAutosaveTick fires one document's save, if nothing superseded it.
 func (w *Workspace) onAutosaveTick(m autosaveTickMsg) tea.Cmd {
+	if w.autosavePaused {
+		// Belt to the generation bump's braces. PauseAutosave retires
+		// every outstanding tick by bumping each document's counter, so
+		// a tick arriving here while paused should already be
+		// superseded -- but "should already be" is how the close
+		// confirm's first fix got it wrong (the flag alone missed the
+		// tick that was already in flight), and the cost of checking
+		// both is one comparison.
+		return nil
+	}
 	d := w.docByPath(m.path)
 	if d == nil || d.autosaveGen != m.gen {
 		// Superseded: another edit landed inside the window and armed a
@@ -190,3 +210,91 @@ func (w *Workspace) autosaveOnFocusChange(prev *doc) tea.Cmd {
 	}
 	return w.saveDoc(prev, saveAuto, false)
 }
+
+// PauseAutosave and ResumeAutosave are app.AutosavePauser: UI-13's unload
+// confirm, which Root opens, asking the Editor to hold still while it is
+// up.
+//
+// confirmCloseDirty (tabs.go) does the same thing for its own dialog and
+// its doc carries the full reasoning. The short version is that BOTH
+// halves are required: the flag stops a NEW tick being scheduled, and the
+// generation bump retires the one that is already in flight -- armAutosave
+// is consulted when a timer is set, and the dangerous tick here was set a
+// moment ago by the keystroke that made the file dirty.
+//
+// Every document is bumped, not just the active one. The dialog counts
+// every dirty buffer in the workspace and the unload would take all of
+// them, so a pause that covered only the visible file would leave the
+// other two racing the same dialog.
+func (w *Workspace) PauseAutosave() {
+	w.autosavePaused = true
+	for _, d := range w.docs {
+		d.autosaveGen++
+	}
+}
+
+// ResumeAutosave puts the normal schedule back after a cancelled unload.
+//
+// It re-arms every document that is still dirty rather than waiting for
+// the next keystroke. Without that, cancelling the dialog would leave a
+// dirty file with no pending tick and no edit coming -- autosave would
+// look broken until the user typed one more character, which is the
+// quietest possible way to lose the next crash's worth of work.
+//
+// armAutosave is the only scheduler, so each document goes back through
+// the same five rules it would have on an ordinary edit: a read-only or
+// other-holder-locked file stays blocked and stays silent, and a clean
+// document is skipped here rather than relying on saveDoc's own
+// not-dirty guard.
+func (w *Workspace) ResumeAutosave() tea.Cmd {
+	w.autosavePaused = false
+	var cmds []tea.Cmd
+	for _, d := range w.docs {
+		if !d.dirty {
+			continue
+		}
+		if cmd := w.armAutosave(d); cmd != nil {
+			cmds = append(cmds, cmd)
+		}
+	}
+	return tea.Batch(cmds...)
+}
+
+// WantsBackgroundReplies is app.BackgroundReplies.
+//
+// True exactly while a write is outstanding, which is the only reply this
+// workspace cannot afford to have dropped -- see app\contribute.go's
+// BackgroundReplies for the failure it prevents. A lock heartbeat or a
+// tree listing that misses its reply while the user is in Chat costs
+// nothing: switchWorkspace replays ConnectedMsg on the way back in and
+// both are re-issued.
+//
+// Scanning the open documents rather than keeping a counter is the same
+// call effectiveFocus and refreshContextIfShown already make here: a
+// derivation at the moment of asking cannot drift, and a counter
+// incremented in saveDoc and decremented in onWritten has two paths that
+// must agree forever -- including the Error path in protocol.go, which is
+// exactly the one that would be forgotten.
+func (w *Workspace) WantsBackgroundReplies() bool {
+	for _, d := range w.docs {
+		if d.saving {
+			return true
+		}
+	}
+	return false
+}
+
+// Compile-time proof that Root will actually find these.
+//
+// Both interfaces are consulted through a type assertion that fails
+// SILENTLY by design -- "a workspace that does not implement one is
+// unaffected", as contribute.go puts it -- which is right for an optional
+// capability and wrong for one this package depends on. A renamed method
+// or a changed signature would not break the build, it would quietly turn
+// the fix off: writes would stop being delivered in the background again,
+// and the unload dialog would stop pausing anything. Neither has a test
+// that fails obviously at the unit level, so the assertion is the guard.
+var (
+	_ app.AutosavePauser    = (*Workspace)(nil)
+	_ app.BackgroundReplies = (*Workspace)(nil)
+)

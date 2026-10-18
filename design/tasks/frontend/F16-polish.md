@@ -193,6 +193,60 @@ that item moves `doc.left` rather than `doc.top`, so the two are
 independent, but whoever does one should do the other and share the
 helper.
 
+### Lock heartbeats stop while the Editor is backgrounded — carried forward from F13b's post-close patch
+
+**NOT done. Found while fixing the two save/autosave regressions after
+F13b closed, and deliberately left out of that patch.**
+
+`heartbeatTickMsg` reaches the Editor through `Update`, and Root routes
+every message to `r.current()` only — the same active-workspace-only
+routing that caused the wedged-save regression. So the 20s heartbeat
+simply stops while the user is in Chat, and after B7's
+`LOCK_STALE_AFTER_S = 60` this process's own locks are stale and
+take-over-able by anything, including Point's own next acquire.
+
+The write-reply case was fixed in that patch (`app.BackgroundReplies`,
+`Root.deliverBackgroundReply`) and the heartbeat was not, for a reason
+worth keeping: a dropped write reply **wedges** a document permanently,
+while an expired heartbeat merely expires — the lock is re-acquired on
+the next save attempt and the backend is the only judge of staleness
+either way. Nothing is lost, and nothing is silently wrong.
+
+**What makes this more than extending the existing interface.**
+`BackgroundReplies` is about receiving a reply already in flight.
+Heartbeating is about continuing to *assert* a claim, and that raises a
+question the patch had no business answering alone: **should a
+backgrounded workspace hold locks at all?** A reasonable answer is no —
+release on background, re-acquire on foreground, which is roughly what
+`ReleaseLocks` already does on unload. Another is yes, keep beating,
+which makes the Editor hold locks for as long as Point runs. That is a
+lock-lifecycle decision, not a bug fix, which is why it is here.
+
+Interacts with the `BackgroundReplies` interface added by that patch —
+whoever does this should read `app\contribute.go`'s doc on it first,
+because the cheap-looking fix (answer `true` whenever any lock is held)
+quietly turns the Editor into a workspace that receives every envelope
+in the app for the entire session.
+
+### `tabs.go:264`'s `autosaveBlocked` check is always true — carried forward from F13b's post-close patch
+
+One line, cosmetic, pre-dates the patch that found it.
+
+`confirmCloseDirty` sets `d.autosaveBlocked = true` at line 258 and then
+tests `if d.autosaveBlocked` at line 264 to decide whether to append
+"Autosave is stopped for this file — see the status bar" to the dialog
+body. It is the same function, six lines apart, so the test can never be
+false and the sentence is always shown — including on a perfectly
+healthy file whose autosave was stopped one instant earlier *by this
+dialog itself*.
+
+The intent was clearly to report a PRE-EXISTING block (read-only, held by
+another holder), so the fix is to read the flag **before** the pause sets
+it. That is the whole change.
+
+Not folded into the hotfix that found it: an unrelated cosmetic line in a
+patch about two races is how a focused fix stops being reviewable.
+
 ### Responsive audit
 Test every screen at:
 ```

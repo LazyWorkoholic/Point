@@ -2527,6 +2527,65 @@ a BACKEND episode in a frontend-numbered slot for that reason alone.
 
 ---
 
+# SESSION 18g — B35 Two Artefacts B20 Committed and Nobody Read  (not started)
+
+**Goal:** `CLAUDE.md` — the file every session is told to read first — has
+been mojibake'd since `790e0c2` (B20, 2026-09-24). Twenty-four lines carry
+`â€”` where an em-dash belongs, plus a UTF-8 BOM that is not deliberate.
+The same commit also added `backend\direct.json` and `backend\wire.json`:
+two byte-identical UTF-16LE dumps of a `context.report` payload that git
+stores as BINARY and that nothing in the repo reads. Two unrelated root
+causes, one commit.
+
+**Numbered 18g because it was written after 18f, but it RUNS FIRST** —
+the letters are labels, not an order; position in this file is the order,
+which is why this block sits above 18f. B35 deletes the two UTF-16LE
+files, and those are exactly the binary blobs B34's draft `.gitattributes`
+comment says do not exist. Running B35 first makes that comment true
+instead of making B34 fix someone else's mess. See "Splitting an episode"
+on session labels being positions rather than an ordering claim.
+
+> **This does not reopen B33.** Its fix is correct and was re-verified
+> green (14/14) against HEAD `fdc6cf7` during the pass that found this.
+> What B33 got wrong is the SCOPE of one claim in its completed doc:
+> "verified afterwards that no mojibake remains anywhere in the tree"
+> compared the WORKING TREE against HEAD, which is blind by construction
+> to a file corrupted in a commit thirteen episodes earlier. The bug class
+> was live from B6, so its victims were in history, not only in the
+> working tree. **That is the transferable finding, and it is not about
+> encodings** — any episode fixing a long-lived corruption bug has to ask
+> where the victims would be and whether that is where it is looking.
+
+**Paste:**
+```
+Read CLAUDE.md and design/tasks/backend/B35-claude-md-corruption.md.
+
+Two separate commits, one per root cause. Do not combine them, and do
+not run `git add --renormalize` -- that is B34's operation and would mix
+46 files of line-ending churn into a 24-character fix.
+
+Repair CLAUDE.md at the BYTE level: replace the 24 occurrences of
+C3 A2 E2 82 AC E2 80 9D with E2 80 94, assert the count before and
+after, and expect the file to shrink by exactly 120 bytes. Do not decode
+to text and write back with a default encoding -- that is the shape of
+the bug being fixed. Decide the BOM explicitly and record the reasoning;
+the three .ps1 gates keep theirs and nothing here touches them.
+
+Do NOT "fix" the deliberate mojibake in backend\main.py and the B33 and
+B35 docs. They are prose about the bug and a scan that flags them is
+working correctly.
+
+Confirm nothing reads direct.json / wire.json before deleting them, and
+record in the completed doc that B20's verification redirected into the
+repo root -- that is the reusable lesson, not the two files.
+
+Stop at the verification gate with PowerShell checks.
+```
+
+**Then:** commit · `/clear`
+
+---
+
 # SESSION 18f — B34 A Declared Line-Ending Policy  (not started)
 
 **Goal:** this repo has no `.gitattributes` and `core.autocrlf` is `true`
@@ -2535,6 +2594,17 @@ CRLF in the working tree and one (`backend\runtime\errors.py`) is MIXED
 — the one case B32 says cannot round-trip byte-exact. Commits stay
 correct only by accident of that setting, and `gofmt -l` cannot be used
 as a gate on a fresh Windows checkout.
+
+> **Run 18g (B35) before this one.** B34's draft `.gitattributes` carries
+> the comment "No binary entries yet: `git ls-files` currently lists no
+> binary file." That is wrong as written — `backend\direct.json` and
+> `backend\wire.json` are UTF-16LE and git already classifies both as
+> binary. They also skew B34's own headline measurement: UTF-16LE encodes
+> CRLF as `0d 00 0a 00`, so the two bytes are never adjacent and a
+> byte-pair scan does not count them, which is part of why B34 reads
+> "zero tracked blobs contain CRLF". B35 deletes both files; if it has
+> run, B34's comment becomes true and nothing else changes. If for any
+> reason B34 goes first, it must add an explicit binary entry for them.
 
 **Paste:**
 ```
@@ -2755,6 +2825,84 @@ design/completed/frontend/INDEX.md's status table.
 Also record how the terminal's size mode is persisted in Suspend(). F17's
 web preview shares this pane in spirit and should follow the same
 persistence pattern if it ever grows one.
+```
+
+**Then:** commit · `/clear`
+
+---
+
+# SESSION 22b — F20 Live Stale Detection  (not started)
+
+**Goal:** an open document notices its file changed on disk without
+waiting for a save attempt. F13's Done-when 8 only runs the stale check
+on the WRITE path, so a file edited externally while Point's copy is
+locally clean shows no signal at all — clean tab, silent status bar,
+quietly out-of-date buffer — until somebody presses `ctrl+s`.
+
+**Numbered 22b, after F14**, because it is `[P2]` and CLAUDE.md's phase
+rule puts P2 after every P1 item is done and verified. It depends on
+**F13b only** (18b, done) and not on F14 at all, so it could run any
+time after 18b on dependencies alone — the position here is about phase,
+not about prerequisites. Grouped with 22 because both are Editor P2
+work. An interleaved session, the same way `16b`–`16h`, `17b`, `17c`,
+`18d` and `23b` are, and not a sub-episode of F14.
+
+**The episode is F20, not F19.** F19 was written up during F13b's
+verification and retired in `4a2a41b` — two of its items moved into
+`F16-polish.md` and the third was reverted and deferred there. The
+number is burned: it is named as retired in seven places across
+`design/`, so reusing it would make every one of those ambiguous.
+
+> **Zero backend work.** `CmdCheckFileStale` / `EvFileStaleResult` were
+> built by B32 and deliberately left with no caller — F13b's own note
+> says "`CmdCheckFileStale` exists and may stay unused", because the
+> write reply carries the new mtime and a save needs no follow-up check.
+> This episode is the caller it was built for.
+
+**Paste:**
+```
+Read CLAUDE.md and design/tasks/frontend/F20-live-stale-detection.md.
+
+This is a new TRIGGER into F13b's existing refusal machinery, not a
+second staleness mechanism. B32's expected_mtime precondition stays the
+only thing that decides whether a write is safe, and stale.go's
+[reload][overwrite][diff] dialog stays the only place a user resolves
+one. Detection changes what is SHOWN, nothing else.
+
+Poll, do not add a filesystem watcher. The reason is measured, not
+preferential: F13b round 3 established that _atomic_write ends in
+os.replace, which on Windows fires Deleted + Renamed and no Changed at
+all, so a watcher configured the obvious way cannot see a save.
+
+Do NOT open the dialog from a poll result. F13b already settled that a
+modal appearing for someone else's change, a second after you stop
+typing, is how people turn autosave off -- and a poll makes it worse,
+because it can now fire while you are in a different file or in Chat.
+
+The one race that can produce a FALSE "someone changed your file" is a
+poll in flight across one of Point's own writes. Done-when 7 is that
+case; get it right before anything else.
+
+Stop at the verification gate with PowerShell checks.
+
+If anything in this episode's Build section is ambiguous or seems to
+assume something not true of this repo, stop and tell me before writing
+code.
+```
+
+**Record:**
+```
+Write design/completed/frontend/F20-live-stale-detection.md following the
+format in design/completed/backend/INDEX.md. Include the bugs we hit and
+how they were fixed, and what the next episode inherits. Add a row to
+design/completed/frontend/INDEX.md's status table.
+
+Record the polling interval and WHY it was chosen, measured against the
+idle-CPU check rather than assumed; whether the marker got its own key
+(f5 re-index, f6 take over, f7 close, f8 is F14's terminal -- the next
+one after that); and state explicitly that B32 and Done-when 8 were not
+changed, because "live stale detection" and "the stale refusal" are two
+different things a later reader will conflate.
 ```
 
 **Then:** commit · `/clear`

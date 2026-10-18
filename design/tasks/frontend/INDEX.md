@@ -48,6 +48,15 @@ All printed commands must be **PowerShell**.
 | F16 | Polish | P2 | no | all | — | <!-- also owns F9a's deferred result-card code-block rendering: syntax colour + box frame, blocked on markdown-renderer packaging, see F16-polish.md -->
 | F17 | Web Preview | P2 | no | F14 | — |
 | F18 | windowed history | P1 | no | F5+B18 | B18 |
+| F20 | Live Stale Detection | P2 | no | F13b (done) | none — B32 ✅, B7 ✅ | <!-- F20-live-stale-detection.md; a new TRIGGER into F13b's existing refusal machinery, not a second mechanism. CmdCheckFileStale/EvFileStaleResult already exist end to end and have no caller -->
+
+**There is no F19.** It was written up during F13b's verification, then
+retired in `4a2a41b`: its two shipped items (the tree's vim motions
+documented, `f7` closing a tab) moved into `F16-polish.md` and its third
+was reverted and deferred there. **The number is burned, not free** — it
+is named as retired in seven places across `design/`, so reusing it
+would make every one of those ambiguous. The next frontend episode after
+F18 is therefore **F20**.
 
 **F1–F5 can start today** — they need only B1–B5, which are built.
 

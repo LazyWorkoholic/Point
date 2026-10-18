@@ -83,6 +83,24 @@ type Workspace struct {
 	autosaveMode  string
 	autosaveDelay time.Duration
 
+	// autosavePaused suspends the whole workspace's autosave while a
+	// modal question about these buffers is on screen -- UI-13's unload
+	// confirm, which Root opens and so could not reuse the per-document
+	// pause confirmCloseDirty takes for itself.
+	//
+	// Workspace-level rather than per-document ON PURPOSE, and it is not
+	// the C5 trap: that rule is about TIMERS and per-entity deadlines,
+	// and this sets no deadline for any file. The dialog is about the
+	// workspace ("3 file(s) have unsaved changes"), so the pause is too,
+	// and a per-document flag here would have to be set for every
+	// document and cleared for exactly the ones it was set for.
+	//
+	// Deliberately NOT doc.autosaveBlocked, which is a document's own
+	// refusal (read-only, held by another holder) and must survive a
+	// resume untouched -- clearing that on Cancel would quietly re-arm
+	// autosave on a file the backend has already refused.
+	autosavePaused bool
+
 	// heartbeatOn guards the single 20s lock heartbeat tick against being
 	// armed twice. One ticker beats EVERY held lock, which is not the
 	// per-entity-timer trap C5 names: it does not reset any file's

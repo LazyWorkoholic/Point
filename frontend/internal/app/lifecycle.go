@@ -901,12 +901,50 @@ func (r *Root) requestUnload() tea.Cmd {
 	if n := len(r.runningTasks()); n > 0 {
 		body += fmt.Sprintf("\n%d background task(s) will keep running.", n)
 	}
+
+	// Autosave is paused for exactly as long as this dialog is up.
+	//
+	// The dialog's question is whether these buffers survive, and the
+	// autosave debounce is a second -- so without this a tick armed by
+	// the keystroke that made the file dirty lands while the user is
+	// still reading, writes the edits, and makes the answer irrelevant:
+	// Unload would discard a buffer already on disk and Cancel would be
+	// indistinguishable from it. That is gate_f13b step 5's finding,
+	// which the Editor's OWN dirty-close confirm already fixed for
+	// itself (editor\tabs.go's confirmCloseDirty); this dialog asks the
+	// same question about the same buffers and is opened from HERE, so
+	// it could not reuse that pause and did not have one.
+	//
+	// Cancel resumes. Unload does not, and needs no resume: the
+	// workspace is unloaded, its documents are gone, and
+	// editor\protocol.go's docByPath then finds nothing for any tick
+	// still outstanding. That is the "unload supersedes the pending
+	// save" half of the decision, and it is the same call C3 already
+	// makes one dialog over -- a confirm that discards must not quietly
+	// write first, or the button does not mean what it says.
+	if ap, ok := ws.(AutosavePauser); ok {
+		ap.PauseAutosave()
+	}
+
 	r.OpenOverlay(NewConfirm(
 		"Unload "+name+"?", body, "Unload", "Cancel",
 		func() tea.Msg { return unloadConfirmedMsg{id: id, name: name} },
-	))
+	).OnCancel(func() tea.Msg { return unloadCancelledMsg{id: id} }))
 	return nil
 }
+
+// unloadCancelledMsg is the user keeping the workspace.
+//
+// It exists only to undo requestUnload's autosave pause, and it is a
+// message rather than a closure for the reason unloadConfirmedMsg's own
+// doc gives: Confirm's callbacks run as a tea.Cmd, off the update loop,
+// and anything touching r.workspaces has to arrive through Update.
+//
+// Confirm.OnCancel covers all three decline paths -- the Cancel button,
+// esc, and a click outside -- because F13b added it for precisely this
+// shape of bug (the editor's own close confirm had no signal to resume
+// on, and all three paths returned (nil, nil)).
+type unloadCancelledMsg struct{ id WorkspaceID }
 
 // unloadConfirmedMsg is UI-13's answer. A tea.Msg rather than a closure
 // calling unloadWorkspace directly: Confirm's OnConfirm runs as a tea.Cmd,

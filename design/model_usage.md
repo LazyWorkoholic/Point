@@ -411,6 +411,30 @@ SESSION  EPISODE                          MODEL         WHY
                                                         escalate" -- the symptom was
                                                         baffling and the method was
                                                         not.
+18g      B35 CLAUDE.md corruption +      Sonnet high   RUNS BEFORE 18f. No product
+         two stray UTF-16LE files                       code at all: a 24-run byte
+                                                        substitution, two files
+                                                        deleted, one sentence in a
+                                                        completed doc corrected.
+                                                        Sonnet because the hard part
+                                                        -- working out WHAT was
+                                                        wrong and when -- is already
+                                                        done and written into the
+                                                        task doc; what remains is
+                                                        execution with a strict
+                                                        assert-the-count discipline.
+                                                        The same call as 18e, and
+                                                        for the same reason: the
+                                                        diagnosis was mechanical
+                                                        (a character census, a
+                                                        per-revision blob scan),
+                                                        not a judgement call.
+                                                        ONE judgement does remain --
+                                                        whether to strip the BOM --
+                                                        and the task doc states the
+                                                        recommendation and the
+                                                        reasoning rather than
+                                                        leaving it open.
 18f      B34 line-ending policy          Sonnet high   one new file, one renormalise
                                                         pass, and a decision about
                                                         what to declare. The
@@ -433,6 +457,44 @@ SESSION  EPISODE                          MODEL         WHY
 20       B15 lifecycle + crash recovery   Opus high     demo-critical, easy to fake
 21       B14 usage + limits               Sonnet medium SQL and arithmetic
 22       F14 editor terminal              Sonnet high   ExecProcess is a known pattern
+22b      F20 live stale detection         Opus medium   RUNS AFTER 22 but needs only
+                                                        18b. Opus MEDIUM, and the
+                                                        middle rating is the point:
+                                                        every design decision is
+                                                        already written into the task
+                                                        doc -- poll not watch (from
+                                                        F13b round 3's os.replace
+                                                        measurement), never open the
+                                                        modal from a poll, use
+                                                        autosaveBlocked not F13b's
+                                                        autosavePaused -- so it is not
+                                                        Opus high like 18d. But it is
+                                                        not 18f-style execution
+                                                        either: Done-when 7 is a poll
+                                                        in flight ACROSS one of
+                                                        Point's own writes, which is
+                                                        the exact area that just
+                                                        produced the wedged-save
+                                                        regression, and getting it
+                                                        wrong reports a false
+                                                        "someone changed your file" --
+                                                        the one defect that makes
+                                                        people stop believing the
+                                                        feature. A race in a shared
+                                                        contract is F6's lesson, not
+                                                        a Build-section item.
+                                                        EARNED its number rather than
+                                                        the polish bucket, by the F19
+                                                        rule below: three things came
+                                                        out of F13b's post-close
+                                                        patch and only this one is
+                                                        structural -- a poll loop, a
+                                                        new marker and a new trigger.
+                                                        The other two (backgrounded
+                                                        heartbeats, tabs.go:264) went
+                                                        to F16-polish.md, which is
+                                                        that rule applied rather than
+                                                        quoted.
 23       B13 memory system                Opus high     the design you deferred on
                                                         purpose — decide well
 23b      F9c result card attach + save   Sonnet high   two axes over B13's and the

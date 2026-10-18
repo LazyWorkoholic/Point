@@ -721,6 +721,18 @@ func (r *Root) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case unloadConfirmedMsg:
 		return r, r.unloadAndReport(m.id, m.name)
 
+	case unloadCancelledMsg:
+		// The workspace is staying, so the pause requestUnload took has
+		// to come off -- and only for the workspace that was asked
+		// about, which is why the id is carried rather than assuming
+		// r.active (nothing stops the question outliving a switch).
+		if ws, loaded := r.workspaces[m.id]; loaded {
+			if ap, ok := ws.(AutosavePauser); ok {
+				return r, ap.ResumeAutosave()
+			}
+		}
+		return r, nil
+
 	case suspendSaveMsg:
 		r.saveWorkspaceStateIfDue(m.gen)
 		return r, nil
@@ -889,6 +901,7 @@ func (r *Root) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		settingsCmd := r.handleSettingsEnvelope(m.Envelope)
 		ws, wsCmd := r.current().Update(m)
 		r.storeCurrent(ws)
+		r.deliverBackgroundReply(m)
 		return r, tea.Batch(r.afterBackend(), wsCmd, pickerCmd, settingsCmd)
 
 	case openOverlayMsg:
@@ -1761,4 +1774,48 @@ func (r *Root) retryHint() string {
 		return fmt.Sprintf("%s %s to retry", actions.Leader, a.Leader)
 	}
 	return "retry from the palette"
+}
+
+// deliverBackgroundReply hands one envelope to every LOADED, INACTIVE
+// workspace that says it is waiting on a reply.
+//
+// See app.BackgroundReplies for why this exists at all: an autosave write
+// started a moment before a workspace switch has its reply land while
+// something else is active, and the Editor cannot recover from losing it.
+//
+// Three things about the shape, each deliberate:
+//
+//   - It runs AFTER r.current().Update, so the active workspace keeps
+//     first claim on an envelope and ordering between the two is fixed
+//     rather than map-iteration order.
+//
+//   - A workspace matches replies by its own corr_id (editor\protocol.go's
+//     w.pending), so an envelope that is not its own is a map miss and
+//     costs one lookup. Nothing here has to know which envelopes belong to
+//     whom, which is the same division F2 already draws.
+//
+//   - The returned tea.Cmd is DROPPED, and that is the point rather than
+//     an oversight. The one thing a write reply produces is say(), which
+//     becomes a WorkspaceStatusMsg -- and that message carries no
+//     workspace id, so Root would print "saved main.go" over the status
+//     bar of whatever the user is actually looking at. A background
+//     workspace may reconcile its own state; it may not take the status
+//     line. The reconciliation is the whole value: doc.saving is cleared,
+//     the new mtime is recorded, and the file is saveable again when the
+//     user comes back.
+//
+// Nothing is delivered to the active workspace twice: r.active is skipped
+// explicitly.
+func (r *Root) deliverBackgroundReply(m protocol.EnvelopeMsg) {
+	for id, ws := range r.workspaces {
+		if id == r.active {
+			continue
+		}
+		br, ok := ws.(BackgroundReplies)
+		if !ok || !br.WantsBackgroundReplies() {
+			continue
+		}
+		updated, _ := ws.Update(m)
+		r.workspaces[id] = updated
+	}
 }
