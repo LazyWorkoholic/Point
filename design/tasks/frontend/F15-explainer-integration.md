@@ -1,6 +1,14 @@
 # F15 — Filler-Explainer Integration
 
-**Phase:** P1 · **Batchable:** no · **Depends on:** F13, F9 · **Backend:** B11
+**Phase:** P1 · **Batchable:** no · **Depends on:** F13a, F9b · **Backend:** B11, B24, B36
+
+> **Depends-on updated 2026-10-19.** It read `F13, F9 · Backend: B11`, which
+> predates three splits and one new episode. F9 is split and the dependency
+> is **F9b** specifically (the diff card and its diff function), not "F9" —
+> F9c is unrelated to this episode. **B24** parses and validates the fill
+> reply, which this episode must not re-do. **B36** carries the
+> `(mtime, size)` pair captured at region generation, which Done-when 7b
+> below cannot be verified without. See WORKFLOW.md Session 19.
 
 **The last P1 episode.** After it, v1 is feature-complete.
 
@@ -74,6 +82,16 @@ Cancelling (`esc` or `ctrl+c`) discards the ghost entirely and cancels the task.
   be **one** undo operation (F13's grouping requirement).
 - If the buffer changed since the region was generated, refuse and offer
   re-generate — the same staleness rule as save.
+- **And separately, if the FILE changed ON DISK since the region was
+  generated, refuse too.** These are two different checks over two different
+  things, and reading them as one is what left the second unbuilt: F9b
+  shipped the buffer check (`baseVersion`, an in-memory version compare that
+  needs no stat) and **deferred the disk check as its Hazard 2**, because no
+  `(mtime, size)` pair captured at region-generation time existed to compare
+  against. B36 adds it. Populate `DiffCardOptions.RecordedMtime` /
+  `RecordedSize` from B36's real fields — never from `doc.mtime` /
+  `doc.size`, which describe the open/last-save moment and fail in both
+  directions. Done-when 7 and 7b below are these two checks respectively.
 - A request needing a second file, a new file, or a command is **refused by the
   agent** with a message. The UI must show that as a **normal response, not an
   error state** — the refusal is a feature, and it is the boundary against the
@@ -116,6 +134,16 @@ same config — the **invocation site decides presentation**.
 6. A two-file request is refused with a readable message, not an error state.
 7. Edit the buffer after generating, then apply → refused, with re-generate
    offered.
+7b. **Modify the file ON DISK after generating, then apply → refused, with a
+   reason.** This is **F9's own Done-when #7**, which **F9b deferred as its
+   Hazard 2** — see `design/completed/frontend/F09b-diff-card.md`. It is NOT
+   a duplicate of 7: 7 is the buffer changing (F9b's `baseVersion` guard,
+   built and tested), 7b is the file on disk changing, which needs B36's
+   `(mtime, size)` pair captured at the region-generation read. **F9's #7
+   closes here or not at all** — no later episode is positioned to do it, so
+   a green F15 that skipped this leaves F9 permanently short of one
+   criterion. Verify the refusal is shown ON THE CARD, not only in a log,
+   and that the card does not read "applied".
 8. The same agent invoked from Chat produces a result card instead of an inline
    diff.
 
@@ -145,6 +173,21 @@ Then: leader → `f` → "add a docstring" → `e` → tweak → `⏎` apply →
 Then: leader → `f` → "refactor this across task.py and state.py".
 **Expect:** a plain refusal naming the one-file limit, rendered as a normal
 response.
+
+```powershell
+# 7b. staleness on DISK (F9's Done-when #7, deferred by F9b as Hazard 2).
+# Generate a fill, leave the card OPEN, then change the file from outside
+# Point -- a second Windows Terminal tab, not from inside the editor:
+Add-Content D:\Projects\Point\backend\runtime\task.py "# external"
+```
+Then press `⏎` on the still-open card.
+**Expect:** refused, with a reason **on the card**, a re-generate offer, and
+the card still reading "Proposed change" rather than "Applied".
+**Fails if:** it applies, or the refusal appears only in the log, or the card
+flips to applied — and also fails if it refuses for the wrong reason: check
+the message names the file changing on disk, not the buffer (that is
+Done-when 7, and F9b's `baseVersion` guard would catch it either way, which
+is exactly how a disk check that never ran could look like it passed).
 
 ## Handoff
 

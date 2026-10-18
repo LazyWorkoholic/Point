@@ -91,10 +91,21 @@ does not have to be inferred:**
 18d  F9b   diff card             needs 18a only — specifically
                                  doc.ApplyRegion, which 18a shipped with
                                  no caller for exactly this. Plus B24 (17b).
+                                 RAN: built #5/#6, DEFERRED #7 + the
+                                 packaging decision. See 18d's own note.
+19a  B36   generation-time       needs B24 (17b) only. Carries (mtime,
+           staleness             size) from the region-generation read and
+                                 gives CheckFileStale session_id + size —
+                                 what 18d found missing. RUNS BEFORE 19 so
+                                 F15's EvFillProposal decoder is written
+                                 once against the final payload shape.
 19   F15   filler-explainer      CALLS F13a's buffer and F9b's diff
                                  function; writes nothing to disk. 18b is
                                  a SCHEDULING prerequisite only — v1 is
                                  not feature-complete while F13 is open.
+                                 Also adds the FIRST caller of
+                                 NewDiffCard, and owes 18d's "You do:"
+                                 steps 1 and 3, which 18d could not run.
 ```
 
 `18b` and `18d` are mutually independent — neither reads the other's code
@@ -2333,12 +2344,65 @@ the next reader of it is not misled the same way.
 
 ---
 
-# SESSION 18d — F9b Diff Card (F9 resumed)
+# SESSION 18d — F9b Diff Card (F9 resumed)  🟡 BUILT, #7 DEFERRED
 
 > **This session was `18b` until F13 split.** It moved to `18d` so F13's
 > two halves could be `18a`/`18b` and match their doc letters. Nothing
 > about its dependencies changed — see "Splitting an episode" above.
 > Older docs may still say "Session 18b" for this; they mean this block.
+
+> 🟡 **RAN, and F9b itself split.** Read
+> `design/completed/frontend/F09b-diff-card.md` before any session that
+> touches the diff card, F15, or the editor's apply path.
+>
+> **Built: Done-when #5 and #6.** The card, the real line diff (new package
+> `frontend\internal\diff`, which F15 calls rather than re-implementing),
+> `e` into a scratch buffer with the diff re-rendering live, and `⏎`
+> applying through `doc.ApplyRegion` as one undoable splice.
+>
+> **NOT built: Done-when #7** (refuse an apply when the file changed on disk
+> since the region was generated). **Absent, not approximated** — the
+> session stopped on its own prerequisite check and reported before writing
+> code, as the paste below instructs. Nothing in the backend captures
+> `(mtime, size)` at region-generation time
+> (`_render_editor_context` reads the file and never stats it;
+> `RegisteredEditorContext` carries only `shown_start`/`shown_end`;
+> `FillProposal.to_dict()` is seven fields with no stat), and
+> `CheckFileStale` accepts neither `session_id` nor `size`. The available
+> pair — `doc.mtime`/`doc.size` — is the open/last-save moment, and
+> substituting it fails in BOTH directions, so it was refused rather than
+> approximated.
+>
+> **Point 1 of the paste below (apply-time guard ORDER) is blocked by the
+> same gap**, and nothing fell back to `_resolve_optional_project` to make
+> it work: the apply makes no backend call and no disk write at all, the
+> Editor has no session to resolve a scope from (`protocol.go:20`), and the
+> proposal's `session_id` never reaches Go. It becomes load-bearing when an
+> applied buffer is SAVED, which F15 makes reachable.
+>
+> **Both deferrals are now tracked as `B36`** — see **SESSION 19a** below,
+> which runs before 19.
+>
+> **The three "You do:" steps below were NOT performed, and could not be.**
+> `NewDiffCard` has no production caller anywhere in the Go tree —
+> deliberately, because F15 is *downstream* of F9b and there is no
+> `EvFillProposal` decoder yet, exactly as `doc.ApplyRegion` shipped with no
+> caller at 18a. So no diff card can be made to appear in the running app,
+> and **the Go test suite is this episode's actual verification surface**
+> (26 new tests; `internal\diff` 9/9, `internal\editor` 305/305, gofmt and
+> vet clean, full frontend suite green under a scratch profile). Step 2 is
+> #7 and is deferred; **steps 1 and 3 are owed by Session 19**, the first
+> time a card can actually be opened.
+>
+> **F09's "same card, same keys, in both workspaces" was also NOT built**,
+> and is left open as a decision rather than settled: `doc.ApplyRegion` is
+> on the unexported `doc`, `Workspace` exposes no apply wrapper, and `app`
+> imports neither `chat` nor `editor` (both import `app`), so a card beside
+> F9a's `ResultCard` cannot reach the apply at all. Two options are recorded
+> in the completed doc.
+>
+> **F9 now stands at 4 of 8 Done-whens** (#1, #8 from F9a; #5, #6 here) and
+> stays 🟡. It closes when F9b's deferred half and F9c (Session 23b) land.
 
 **Goal:** the second third of F9. Every agent-proposed change is reviewed,
 editable, and reversible before it touches a buffer.
@@ -2418,7 +2482,11 @@ assume something not true of this repo, stop and tell me before writing
 code.
 ```
 
-**You do:** three things, in this order.
+**You do:** three things, in this order. **⚠ NONE OF THESE WERE RUN — see the
+note at the top of this block. There is no way to open a diff card in this
+build; steps 1 and 3 are owed by Session 19, and step 2 is Done-when #7,
+deferred to B36.** Kept as written because they are what Session 19 must
+perform.
 1. `e`, change a line, `⏎` — confirm the **edited** text landed, not the
    original. Then `ctrl+z` once and confirm it fully undid.
 2. With a card open, modify the file on disk from a second tab, then `⏎` —
@@ -2551,7 +2619,7 @@ a BACKEND episode in a frontend-numbered slot for that reason alone.
 
 ---
 
-# SESSION 18g — B35 Two Artefacts B20 Committed and Nobody Read  (not started)
+# SESSION 18g — B35 Two Artefacts B20 Committed and Nobody Read  ✅ DONE
 
 **Goal:** `CLAUDE.md` — the file every session is told to read first — has
 been mojibake'd since `790e0c2` (B20, 2026-09-24). Twenty-four lines carry
@@ -2610,7 +2678,7 @@ Stop at the verification gate with PowerShell checks.
 
 ---
 
-# SESSION 18f — B34 A Declared Line-Ending Policy  (not started)
+# SESSION 18f — B34 A Declared Line-Ending Policy  ✅ DONE
 
 **Goal:** this repo has no `.gitattributes` and `core.autocrlf` is `true`
 from the SYSTEM config, so every blob is LF while 45 tracked files are
@@ -2649,14 +2717,203 @@ Stop at the verification gate with PowerShell checks.
 
 ---
 
+# SESSION 19a — B36 Generation-Time Staleness for the Filler's Proposal  (not started)
+
+> **RUNS BEFORE Session 19.** Numbered `19a` rather than taking a plain
+> number because it is an interleaved backend episode in the same shape as
+> `15c` (B25, split out ahead of 16) and `18g` (B35, which runs before
+> `18f`) — see "Splitting an episode" above.
+
+**Why it runs before 19 rather than after:** F15 adds the Go
+`EvFillProposal` decoder, which does not exist yet. If B36 lands first, that
+decoder is written **once** against the final payload shape. If it lands
+after, F15 ships a decoder that B36 then has to extend, and F9b's deferred
+half has to wait for a second frontend pass to carry two fields it could
+have had from the start.
+
+**Why this episode exists.** F9b (Session 18d) built the diff card's apply
+and **declined to build Done-when #7** — refuse the apply when the file
+changed on disk since the region was generated — because it cannot be built
+honestly against this backend. The prerequisite check is recorded in
+`design/completed/frontend/F09b-diff-card.md`; the short version, all three
+verified in code:
+
+1. **Nothing captures `(mtime, size)` at region-generation time.**
+   `_render_editor_context` (`managers\context.py`) reads the file with
+   `path.read_text(...)` and **never stats it**. `RegisteredEditorContext`
+   (`streaming\manager.py`) carries `context`, `shown_start`, `shown_end`
+   and nothing else. `FillProposal.to_dict()`
+   (`managers\fill_proposal.py`) is seven fields with no stat among them,
+   and its own docstring says all seven travel together, no subset. So the
+   moment the model saw the file is unrecoverable downstream.
+2. **`CheckFileStale` cannot express the comparison.**
+   `_handle_check_file_stale` (`runtime\runtime.py:860`) requires `path` and
+   `mtime` only — no `size`, no `session_id` — and `check_stale`
+   (`managers\project_manager.py:590`) compares `st_mtime` against the
+   supplied value with a 1e-6 tolerance. Size is not a parameter.
+3. **The pair that IS available is the wrong moment.** `doc.mtime` /
+   `doc.size` are from the read that opened the file, replaced from every
+   successful write's reply (autosave rule 2). F9b refused to substitute it:
+   it fails in BOTH directions — a false refusal when the region was
+   generated from content newer than the open, and a missed refusal when a
+   save refreshed the pair after generation. That is B12's `set_mode`
+   lesson and F8's chip staleness, which is exactly why F9b's own paste
+   forbade it.
+
+**It also unblocks F9a's hazard-1 guard ORDER**, which F9b could not
+complete for the same reason: `session_id` is half of it. Nothing in F9b
+fell back to `_resolve_optional_project` to fake it — the apply makes no
+backend call at all — but the guard becomes load-bearing the moment an
+applied buffer is **saved**, because F13b's `WriteProjectFile`
+`_require_project`s the EDITOR's path-resolved `project_id` rather than the
+session that produced the proposal. That is B12's bug #2 on a destructive
+path, and F15 is what makes it reachable.
+
+**Prerequisites:** **B24** (Session 17b, done) — this extends its event.
+**B7** (done) for `check_stale` and the path guard.
+
+**Paste:**
+```
+Read CLAUDE.md, design/completed/backend/B24-filler-proposal-event.md,
+design/completed/frontend/F09b-diff-card.md's "#7 is absent, not
+approximated" and "The guard order (F9a hazard 1) is also incomplete"
+sections, and design/completed/backend/B07-project-system.md for
+check_stale.
+
+Build two additions and nothing else.
+
+1. FillProposal must carry (mtime, size) CAPTURED AT THE
+   REGION-GENERATION DISK READ. That is the `path.read_text()` in
+   `_render_editor_context` (managers\context.py) -- stat the file at
+   the moment it is read, not before and not after, and carry the pair
+   forward on RegisteredEditorContext beside shown_start/shown_end,
+   then into FillProposal.to_dict(). Respect that dataclass's own rule:
+   all fields travel together, no subset, so this is a wire-shape
+   change and every consumer sees both fields or neither.
+
+   The pair is a fact about ONE MOMENT. Do not re-stat it later in the
+   turn to "refresh" it, and do not derive it from a second read --
+   that is the same error B24 avoided by carrying shown_start/shown_end
+   from the context build rather than recomputing them at the terminal
+   event, and the error F9b refused to make on the frontend side.
+
+2. CheckFileStale must accept session_id AND size as real comparison
+   fields. Today `_handle_check_file_stale` (runtime\runtime.py) takes
+   (path, mtime) and `check_stale` (managers\project_manager.py)
+   compares mtime alone with a 1e-6 tolerance.
+
+   - `size` must be compared, not merely accepted and ignored.
+   - `session_id`, when supplied, must resolve the SESSION's scope --
+     the `_attachment_scope` shape, from session.project_id -- and NOT
+     `_resolve_optional_project`, which walks up from the path to
+     auto-discover a project and answers a different question. That
+     drift is B12's bug #2; 374baa2 established the corrected order for
+     AttachContext. Follow that one.
+   - Decide deliberately, and write down which: whether `mtime` and
+     `size` are both required, and what a caller that supplies only
+     mtime gets. An existing caller must not silently change meaning.
+
+Both are ADDITIVE to a built, verified episode's event. Do not change
+what B24 already emits beyond adding fields, and do not touch the
+parse/validation rules -- B24's five reason slugs are what F9b's
+frontend is written against.
+
+Never a direct disk write from an agent path. No WriteProjectFile is
+added or changed here.
+
+Stop at the verification gate with PowerShell checks.
+
+If anything here assumes something not true of this repo, stop and tell
+me before writing code.
+```
+
+**You do:**
+1. Run a fill-mode turn and confirm the emitted `FillProposal` carries
+   `mtime` and `size`, and that they match the file **as it was when the
+   context was built** — change the file on disk *after* the build but
+   before the terminal event, and confirm the pair still describes the
+   pre-change file.
+2. `CheckFileStale` with a matching `(mtime, size)` → not stale. With the
+   same mtime but a different size → **stale**. That is the check mtime
+   alone cannot make, and the reason `size` is in this episode.
+3. `CheckFileStale` with a `session_id` whose session has no project, over a
+   path that has a `.point\` above it → confirm it is guarded against the
+   SESSION's (empty) scope, not the path-resolved one. This is B12 bug #2's
+   shape and the one check that proves the guard order.
+
+**Record:**
+```
+Write design/completed/backend/B36-generation-time-staleness.md following
+the format in design/completed/backend/INDEX.md, and add its row.
+
+Record the exact wire shape of the extended FillProposal and the exact
+CheckFileStale signature, including what a caller that supplies only
+mtime now gets -- F9b's deferred half and F20 both call these and need
+a contract, not a description.
+
+Then say plainly in that doc which of F9's Done-when #7 and F9a's
+hazard-1 guard order are now UNBLOCKED but still NOT BUILT: both are
+frontend work. Update design/completed/frontend/INDEX.md's F9b row to
+point at this episode as the unblocker, and add a session to
+WORKFLOW.md for F9b's deferred half.
+```
+
+**Then:** commit · `/clear`
+
+---
+
 # SESSION 19 — F15 Filler-Explainer Integration
 
 **Goal:** v1 feature-complete.
 
+> **F9b's packaging collision does NOT block this episode — confirmed, so
+> nobody re-raises it here as a blocker.** F9b left open where a diff card
+> *shared by Chat and the Editor* should live: `doc.ApplyRegion` is a method
+> on the unexported `doc`, `Workspace` exposes no apply wrapper, and `app`
+> imports neither `chat` nor `editor` (both import `app`), so a card in
+> `app` cannot reach the apply at all. **F15 never needs that**, because
+> F15's own spec gives the two workspaces *different* presentations: the
+> diff card is specified only at the Editor cursor (F15's Build → "Fill
+> (write path)", Done-when 3 and 4), while the Chat path is specified as a
+> **result card** — F9a's, which already lives in `app` — and explicitly
+> not a diff card ("`@filler-explainer` … uses the normal background-task
+> plus result-card presentation"; Done-when 8: "The same agent invoked from
+> Chat produces a result card instead of an inline diff"). That is the
+> spec's own "the invocation site decides presentation". The collision is
+> F9's to settle, on F9's own schedule.
+>
+> ⚠ **One correction worth carrying, because the easy version of this is
+> wrong:** the reason is *not* that the Filler is Editor-only. **It is
+> not** — F15 has a real Chat path (Done-when 8, and Build → "From Chat").
+> The paste block's "Explanations render in an overlay panel inside the
+> Editor" describes the **explain** path, not fill, and does not make the
+> episode Editor-only. The reason the collision does not bite is the
+> result-card/diff-card split above, which holds whether or not Chat is in
+> scope — so it survives a reader noticing the Chat path, which the
+> Editor-only reading would not.
+
 **Prerequisites:** **F13a** (Session 18a, done) for the buffer, ghost
 text, apply-into-buffer and undo; **F9b** (Session 18d) for the diff
 function this episode calls rather than re-implements; **B11** and
-**B24** (Session 17b) for the agent and its parsed, validated proposal.
+**B24** (Session 17b) for the agent and its parsed, validated proposal;
+and **B36** (Session 19a) for the `(mtime, size)` pair the diff card's
+staleness refusal needs.
+
+**Why B36 is a prerequisite and not an optional extra — this episode is
+where F9b's deferred fields get filled in.** F9b shipped
+`DiffCardOptions.RecordedMtime` / `RecordedSize` and left them **zero by
+design**: `design/completed/frontend/F09b-diff-card.md` records that it
+refused to populate them from anything available at the time, because
+nothing described the right moment (`doc.mtime` is the open/last-save
+moment, and substituting it fails in both directions). B36 is where
+`FillProposal` starts carrying a **real** pair, captured at the
+region-generation disk read. **F15 is the episode that fills them in**,
+because F15 writes the `EvFillProposal` decoder and constructs the first
+`DiffCard` — there is no other episode between the two that touches
+either end. Running 19 before 19a would leave F9's Done-when #7 open with
+the backend half already landed and the two unpopulated fields sitting in
+a decoder that has to be revisited, which is the worst of the three
+available states.
 
 **F13b (Session 18b) is a scheduling prerequisite, not a technical one.**
 F15 writes nothing to disk in any phase — its own Do-NOT says so, apply
@@ -2684,6 +2941,31 @@ F9b computes the diff from that. Do not parse the model's JSON here,
 and do not write a second diff implementation -- F9b's completed doc
 records the function signature precisely so this episode has something
 to call.
+
+POPULATE DiffCardOptions' RecordedMtime and RecordedSize from the REAL
+fields B36 (Session 19a) adds to FillProposal -- the (mtime, size) pair
+captured at the region-generation disk read, carried through the
+EvFillProposal decoder you are writing. F9b shipped those two fields
+UNPOPULATED on purpose and wrote down why; this episode is where they
+get filled, and it is the only episode positioned to do it.
+
+Do NOT leave them zero, and do NOT substitute doc.mtime / doc.size.
+Those are the open/last-save moment, not the generation moment, and
+design/completed/frontend/F09b-diff-card.md records that substituting
+them fails in BOTH directions: a FALSE refusal when the region was
+generated from content newer than the open, and a MISSED refusal when a
+successful save refreshed the pair after generation. A staleness check
+that permits the dangerous apply is worse than no check at all, because
+it is believed. F9b's TestTheStalenessPairIsCarriedAndUnpopulated is the
+tripwire that currently asserts the pair stays zero -- changing that
+test is part of this episode's work, deliberately, not a test to route
+around.
+
+Done-when 7b is this episode's proof that F9's Done-when #7 -- deferred
+by F9b as its Hazard 2 -- is finally closed. It is a DIFFERENT check
+from Done-when 7, and both must pass: 7 is the BUFFER changing since
+generation (F9b's baseVersion guard, already built and tested), 7b is
+the FILE changing ON DISK, which is what needs B36's pair.
 
 Stop at the verification gate with PowerShell checks.
 
