@@ -24,8 +24,8 @@ it passed.
 | S13d | Wire the Context Card (Status row 1 + UI-09) | ✅ built + manually verified | `S13d-wire-context-card.md` |
 | S13e | Backend Verbose Passthrough (`POINT_BACKEND_VERBOSE`) | ✅ built + manually verified | `S13e-backend-verbose-passthrough.md` |
 | F8 | @ Picker + Attachments | ✅ built + manually verified | `F08-at-picker.md` |
-| **F9a** | **Task Tray + Result Cards (F9, SPLIT)** | 🟡 **built + manually verified — F9 NOT complete; F9b + F9c are the remainder** | `F09a-task-tray-cards.md` |
-| F9b | Diff Card | not started — blocked on F13 + B24 | — |
+| **F9a** | **Task Tray + Result Cards (F9, SPLIT)** | 🟡 **built + manually verified — F9 NOT complete; F9b's deferred half + F9c are the remainder** | `F09a-task-tray-cards.md` |
+| **F9b** | **Diff Card (F9, SPLIT)** | 🟡 **built + gate green (26/26 new, 305/305 editor, 9/9 diff) — F9 is NOT complete; Done-when #7 and the packaging decision remain** | `F09b-diff-card.md` |
 | F9c | Result Card Attach + Save | not started — blocked on B13 + an unspecced B12 attachment-source extension | — |
 | F10 | Settings, Providers, First Run (F10, narrowed) | ✅ built + manually verified | `F10-settings-first-run.md` |
 | F10b | Settings — Behaviour Overrides + `doctor` in About | ✅ built + manually verified | `F10b-settings-behaviour-doctor.md` |
@@ -105,8 +105,32 @@ is `file`-only so a task result cannot be attached, and nothing writes
 `memory_records` (B13). **All four are recorded with file:line evidence in
 `F09a-task-tray-cards.md`** so Sessions 18d and 23b do not re-derive them.
 
-F9 closes only when **F9b** (Session 18d — the diff card) and **F9c**
-(Session 23b — attach and save) land. Until then this row stays 🟡.
+**F9b then closed two more and deferred a third, so F9 stands at 4 of 8.**
+Session 18d shipped the diff card: Done-when #5 (the apply lands the edited
+text) and #6 (one `ctrl+z`). **Done-when #7 — refuse when the file changed on
+disk since the region was generated — was NOT built, and is absent rather than
+approximated.** No `(mtime, size)` pair is captured anywhere in the backend at
+region-generation time, and `CheckFileStale` accepts neither `session_id` nor
+`size`. That gap is now **B36**. F9a's hazard-1 guard order is blocked by the
+same addition and is folded into it.
+
+**Two things about F9b a later reader must not assume.** First, **nothing
+constructs a `DiffCard` outside the test suite** — `NewDiffCard` has no
+production caller anywhere in the Go tree, deliberately, because F15 is
+*downstream* of F9b and there is no `EvFillProposal` decoder yet. So **no
+interactive app walkthrough of the diff card was performed, because none is
+possible**; the Go test suite is that episode's actual verification surface,
+and WORKFLOW.md Session 18d's three "You do:" steps were not run. F15 owes
+steps 1 and 3 by hand the first time a card can be opened. Second, F09's
+**"same card, same keys, in both workspaces" is not buildable as things
+stand** — `doc.ApplyRegion` is on the unexported `doc`, `Workspace` exposes no
+apply wrapper, and `app` imports neither `chat` nor `editor` (both import
+`app`), so a card in `app` cannot reach the apply at all. Left open with two
+identified options. Both are recorded in full in `F09b-diff-card.md`.
+
+F9 closes only when **F9b's deferred half** (#7 and the packaging decision —
+#7 needs **B36**) and **F9c** (Session 23b — attach and save) land. Until
+then both rows stay 🟡.
 
 **F10 is SPLIT, the same shape as F9, stopped before any code was
 written — see `design/tasks/frontend/INDEX.md`'s F10 split note for the

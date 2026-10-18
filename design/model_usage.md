@@ -441,7 +441,62 @@ SESSION  EPISODE                          MODEL         WHY
                                                         decision is written down in
                                                         the task doc already, so the
                                                         session is execution.
-18d      F9b diff card                   Opus high     was Opus MEDIUM as part of
+18d      F9b diff card                   Opus high     SPENT. One round: build plus
+                                                       its own gate, no repair
+                                                       rounds. Opus was right, and
+                                                       for a reason the round count
+                                                       cannot show -- most of it was
+                                                       spent REFUSING work rather
+                                                       than debugging it. The
+                                                       prerequisite check found
+                                                       Done-when #7 unbuildable: no
+                                                       (mtime, size) is captured
+                                                       anywhere in the backend at
+                                                       region-generation time, and
+                                                       CheckFileStale takes neither
+                                                       session_id nor size. The pair
+                                                       that IS to hand, doc.mtime,
+                                                       is the open/last-save moment
+                                                       and fails in BOTH directions,
+                                                       so the session stopped and
+                                                       reported instead of
+                                                       approximating it. Hazard 1's
+                                                       guard order turned out
+                                                       blocked by the same gap, and
+                                                       got the same answer. Both are
+                                                       now B36 (session 19a). Built
+                                                       #5 and #6 only. Two real
+                                                       defects, both caught by this
+                                                       episode's own tests before
+                                                       any gate run: a panic on an
+                                                       empty original, and a View
+                                                       emitting five rows into a
+                                                       two-row budget -- F13b's
+                                                       stale-dialog defect exactly,
+                                                       one episode later.
+                                                       THE ESTIMATE WAS RIGHT FOR
+                                                       THE WRONG REASON. It was
+                                                       raised for the three hazards'
+                                                       DEBUGGING difficulty; what it
+                                                       actually bought was the
+                                                       judgement to leave two of
+                                                       them unbuilt. A Sonnet pass
+                                                       would plausibly have wired
+                                                       the staleness check to
+                                                       doc.mtime and passed its own
+                                                       gate green -- a card that
+                                                       refuses the wrong applies and
+                                                       permits the dangerous one.
+                                                       That is the failure this row
+                                                       paid to avoid, and it is the
+                                                       F6 lesson in a new place:
+                                                       the risk was not in the Build
+                                                       section, it was in what the
+                                                       Build section assumed already
+                                                       existed.
+                                                       ORIGINAL ESTIMATE AND NOTE
+                                                       FOLLOW, unchanged:
+18d      (F9b, as first planned)         Opus high     was Opus MEDIUM as part of
                                                        F9; raised. The apply path is
                                                        destructive, and its three
                                                        real hazards are each ones
@@ -453,6 +508,34 @@ SESSION  EPISODE                          MODEL         WHY
                                                        buffer edit (F8 chips again).
                                                        Debugging those is reasoning,
                                                        not typing.
+19a      B36 generation-time staleness   Sonnet high   RUNS BEFORE 19. Two additive
+                                                       changes to a built, verified
+                                                       event: stat the file at the
+                                                       region-generation read and
+                                                       carry (mtime, size) on
+                                                       FillProposal, and give
+                                                       CheckFileStale session_id +
+                                                       size. Sonnet, not Opus,
+                                                       because 18d already did the
+                                                       hard part -- it established
+                                                       WHICH moment the pair must
+                                                       describe and why every
+                                                       cheaper source is wrong, and
+                                                       wrote it down. This session
+                                                       is execution against a
+                                                       decided contract.
+                                                       The one real decision is
+                                                       scoped and named in the
+                                                       paste: whether mtime and size
+                                                       are both required, and what a
+                                                       caller supplying only mtime
+                                                       gets. If that question turns
+                                                       into a second round, the
+                                                       fix-up rule applies and it
+                                                       goes to Opus -- an existing
+                                                       caller silently changing
+                                                       meaning is exactly the shape
+                                                       B12 bug 2 had.
 19       F15 explainer integration        Opus medium   ghost text + apply semantics
 20       B15 lifecycle + crash recovery   Opus high     demo-critical, easy to fake
 21       B14 usage + limits               Sonnet medium SQL and arithmetic

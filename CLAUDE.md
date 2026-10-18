@@ -176,11 +176,16 @@ sqlite3 "$env:LOCALAPPDATA\Point\runtime.db" ".schema"
 
 ## Actual repo layout
 
-Verified against the tree on 2026-10-02. The previous version of this section
-described the frontend as `cmd\point\` plus `internal\array\` — it had been
-true through F1 and was eight episodes out of date — and claimed
-`managers\memory.py` was empty after B11 had filled it. If this section and
-the tree disagree again, **the tree is right**; fix this file.
+Verified against the tree on 2026-10-19. The 2026-10-02 version of this
+section described the frontend as 8 internal packages and "~110 files",
+which had been true through F8 and missed two: `internal\editor\`, the whole
+Editor workspace F13a/F13b built, and `internal\diff\`, which F9b added. The
+version before that described the frontend as `cmd\point\` plus
+`internal\array\` — true through F1 and eight episodes out of date — and
+claimed `managers\memory.py` was empty after B11 had filled it. **That is
+three times this one section has drifted**, which is why the rule below is
+stated rather than assumed: if this section and the tree disagree again,
+**the tree is right**; fix this file.
 
 ```
 D:\Projects\Point\
@@ -268,7 +273,7 @@ D:\Projects\Point\
 │                               + the seven B10 tool-loop scripts,
 │                                 replayed by `send --script <name>`  [B10 ✅]
 │
-├── frontend\                   Go — ~110 files across 8 internal packages
+├── frontend\                   Go — ~187 files across 10 internal packages
 │   ├── cmd\point\              main.go, diagnostics.go              [F1 ✅]
 │   └── internal\
 │       ├── app\                the root model: root.go, render.go, focus.go,
@@ -282,6 +287,22 @@ D:\Projects\Point\
 │       │                       attachments, context_overlay,
 │       │                       context_report, picker, providers,
 │       │                       protocol, connection, copy, cache     [F3→F8]
+│       ├── editor\             the Editor workspace — buffer, doc, edit,
+│       │                       motion, undo, render, keys, mouse, tabs,
+│       │                       tree, highlight, status, box, textutil,
+│       │                       protocol                              [F13a ✅]
+│       │                       save, lock, reload, stale, autosave,
+│       │                       diff (B10's coarse buffer-vs-disk
+│       │                         unifiedDiff, NOT F9b's)             [F13b ✅]
+│       │                       diffcard.go — `DiffCard` (UI-07) and
+│       │                         Workspace.onDiffApply. Nothing
+│       │                         constructs one yet: F15 is the first
+│       │                         caller, by design                   [F9b 🟡]
+│       ├── diff\               Region() — the real LCS line diff, computed
+│       │                       from B24's validated proposal. Depends on
+│       │                       NOTHING (not editor, app, chat, tea or
+│       │                       theme) so F9b's packaging decision stays
+│       │                       open and F15 can call it             [F9b ✅]
 │       ├── protocol\           client, transport, envelope, spawn*, types,
 │       │                       id — the backend client                [F2 ✅]
 │       ├── layout\             Compute, breakpoints, rects, CardSlot  [F1 ✅]
