@@ -556,7 +556,7 @@ accepts nothing.
 Neither `LAYOUT.md` nor `THEME.md` changed. Everything below uses roles and
 shapes they already define.
 
-- **The header animation** (`appender.go`'s `animFrames`) — LAYOUT.md
+- **The header animation** (`app\render.go`'s `animFrames`) — LAYOUT.md
   specifies "animation left, POINT centre, trademark right" and draws it as
   `(animation)` without naming a form. F5 makes it one bright diamond
   travelling across three dim ones, every frame exactly five display cells
