@@ -41,6 +41,7 @@ it passed.
 | B31 | Validate `project_id` in `CreateSession`/`SetSessionProvider` | ✅ built + manually verified | `B31-validate-project-id.md` |
 | B32 | `WriteProjectFile` — the Editor's Save Path | ✅ built + manually verified | `B32-write-project-file.md` |
 | B33 | The protocol channel is UTF-8 | ✅ built + gate green (14/14) | `B33-transport-utf8.md` |
+| B34 | A declared line-ending policy for this repo | ✅ built + gate green (0 CRLF/MIXED, gofmt/build/vet/test clean) | `B34-line-ending-policy.md` |
 | B35 | Two artefacts B20 committed and nobody read | ✅ repaired + gate green | `B35-claude-md-corruption.md` |
 
 ## Verified file structure — end of Episode 11
