@@ -106,6 +106,14 @@ does not have to be inferred:**
                                  Also adds the FIRST caller of
                                  NewDiffCard, and owes 18d's "You do:"
                                  steps 1 and 3, which 18d could not run.
+19b  F9d   apply-time guard      needs 19 (F15) — the guard F9a hazard-1
+           order                 names is "not reachable" until F15 adds
+                                 the first caller of WriteProjectFile from
+                                 an agent-applied diff. RUNS AFTER 19, the
+                                 only interleaved session in this chain
+                                 that does. Uses B36's session-scoped
+                                 CheckFileStale (19a), which fixed the
+                                 PRIMITIVE, not the call site.
 ```
 
 `18b` and `18d` are mutually independent — neither reads the other's code
@@ -2717,7 +2725,7 @@ Stop at the verification gate with PowerShell checks.
 
 ---
 
-# SESSION 19a — B36 Generation-Time Staleness for the Filler's Proposal  (not started)
+# SESSION 19a — B36 Generation-Time Staleness for the Filler's Proposal  🟡 BUILT + SELF-TESTED, AWAITING INDEPENDENT RE-RUN
 
 > **RUNS BEFORE Session 19.** Numbered `19a` rather than taking a plain
 > number because it is an interleaved backend episode in the same shape as
@@ -2985,6 +2993,97 @@ that v1 is now feature-complete on the frontend.
 Also record how ghost text is represented in the buffer model, distinct
 from real content — this is the pattern to reuse if F17 or anything
 later ever needs to show something transient in the editor.
+```
+
+**Then:** commit · `/clear`
+
+---
+
+# SESSION 19b — F9d Apply-Time Guard Order (F9a Hazard 1)  (not started)
+
+> **RUNS AFTER Session 19.** Numbered `19b` rather than `19c`/a plain
+> number because, like `19a`, it is an interleaved episode slotted
+> against 19 rather than a sub-episode of it — see "Splitting an episode"
+> above. Unlike `19a` it runs AFTER its anchor, not before: the guard
+> order this session fixes is, by F9b's own words, "not reachable" until
+> something actually calls `WriteProjectFile` from an agent-applied
+> diff — and F15 (Session 19) is the first and only episode that adds
+> that caller. Running this before 19 would mean fixing a call site that
+> does not exist yet.
+
+**Why this episode exists.** `F09b-diff-card.md`'s "The guard order (F9a
+hazard 1) is also incomplete" section, read in full before starting:
+F9a's own hazard list requires "resolve the SESSION's scope first, guard
+against that, and commit nothing until the guard passes" for any backend
+call an applied diff makes. F9b built the apply itself (into an in-memory
+buffer only, no backend call), so the hazard was dormant there. It becomes
+live the moment the applied buffer is **saved** — `frontend\internal\editor
+\save.go`'s write goes to `WriteProjectFile`, whose handler
+(`runtime.py`'s `_handle_write_project_file`) resolves its project via
+`_require_project` → `_resolve_optional_project` — the EDITOR's own
+path-walked project (whatever `.point\` sits above the open file), never
+the SESSION that produced the Filler's proposal. That is B12 bug #2 on a
+destructive path: a file could be saved under the wrong project's guard,
+silently, the exact drift `AttachContext`/`ResolveAttachment` were fixed
+against in `374baa2`.
+
+**What B36 (Session 19a) changed, and what it did NOT.** `CheckFileStale`
+now accepts `session_id` and resolves the SESSION's own scope
+(`_attachment_scope`) instead of the path-walk — exactly the primitive
+this guard needs. **B36 did not touch `_handle_write_project_file` itself**,
+and did not wire anything to call the new session-scoped `CheckFileStale`
+from the apply/save path — see `completed/backend/B36-generation-time-
+staleness.md`'s "What the next episode inherits" for the exact two things
+left open. This session is where they get picked up.
+
+**Paste:**
+```
+Read CLAUDE.md, design/completed/frontend/F09b-diff-card.md's "The guard
+order (F9a hazard 1) is also incomplete" section in full, design/completed
+/backend/B36-generation-time-staleness.md (the session_id contract this
+episode uses), and design/completed/frontend/F15-explainer-integration.md
+(read it fresh — this session runs after F15, so read what F15 actually
+built, not what its task doc planned).
+
+Fix the guard order for an agent-applied diff's save: resolve the SESSION
+that produced the diff (the session F15's EvFillProposal arrived on, or
+whatever the Editor's own save path now carries for this), and guard the
+write against THAT session's scope -- not whatever project
+`_handle_write_project_file`'s own `_require_project` would path-walk to
+from the file's location. Decide, by reading F15's actual save-path code
+(not by guessing ahead of it), whether the right shape is:
+
+  (a) a pre-write guard call: resolve the session's scope, call the now
+      session-scoped CheckFileStale (or an equivalent session-scoped
+      existence/containment check) BEFORE WriteProjectFile is sent, and
+      refuse the save entirely if the guard fails; or
+  (b) a direct fix to `_handle_write_project_file`'s own project
+      resolution, so EVERY write from an editor buffer that has a known
+      originating session resolves against that session, not the path.
+
+Whichever shape, the end state is the one F9a's hazard-1 already states:
+commit nothing until the guard, resolved against the right scope, passes.
+
+Do not restate or re-litigate F9's packaging decision (same card, same
+keys, in both workspaces) -- that stays open on its own schedule and is
+not this session's concern.
+
+Stop at the verification gate with PowerShell checks (plus `go test
+./frontend/...` for whatever changed on the Go side).
+
+If anything in this episode's Build section is ambiguous or seems to
+assume something not true of this repo, stop and tell me before writing
+code.
+```
+
+**Record:**
+```
+Write up what was fixed and where (backend handler, frontend save path,
+or both) in whichever completed doc it belongs to -- F15's own, or a new
+F9d doc if the fix is substantial enough to warrant one. Add a row to
+the relevant INDEX.md. State plainly whether F9a's hazard-1 is now fully
+closed, and update design/completed/frontend/INDEX.md's F9b row
+accordingly -- it currently says this is scheduled here.
 ```
 
 **Then:** commit · `/clear`
