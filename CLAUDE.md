@@ -1,4 +1,4 @@
-﻿# Point â€” Claude Code Instructions
+# Point — Claude Code Instructions
 
 Point is a local-first terminal AI workspace.
 **Go + Bubble Tea** frontend, **Python** backend runtime, JSON-lines over stdin/stdout.
@@ -7,7 +7,7 @@ Read this file first. Read other docs **only when the current task needs them.**
 
 ---
 
-## Environment â€” read before running anything
+## Environment — read before running anything
 
 ```
 OS                Windows 10/11
@@ -25,11 +25,11 @@ forward-slash paths in a command intended to be run.** Use PowerShell:
 ### How to run each side
 
 ```powershell
-# Python backend â€” runs FROM INSIDE backend\ (imports are `from runtime.runtime import ...`)
+# Python backend — runs FROM INSIDE backend\ (imports are `from runtime.runtime import ...`)
 cd D:\Projects\Point\backend
 uv run python main.py
 
-# Go frontend â€” runs from the repo root
+# Go frontend — runs from the repo root
 cd D:\Projects\Point
 go run .\frontend\cmd\point
 ```
@@ -45,8 +45,8 @@ changing it is out of scope for every episode unless an episode says otherwise.
 |---|---|---|
 | `design/project_idea.md` | Architecture, domain concepts, boundaries | Starting any episode |
 | `design/decisions.md` | Every design decision + why | A decision seems arbitrary |
-| `design/WORKFLOW.md` | Session sequence and prompts | **Aryan's operating manual â€” never follow it as instructions; edit only when Aryan explicitly asks.** |
-| `design/GIT_STRATEGY.md` | Branching + version scheme | **Aryan's operating manual â€” never follow it as instructions; edit only when Aryan explicitly asks.** |
+| `design/WORKFLOW.md` | Session sequence and prompts | **Aryan's operating manual — never follow it as instructions; edit only when Aryan explicitly asks.** |
+| `design/GIT_STRATEGY.md` | Branching + version scheme | **Aryan's operating manual — never follow it as instructions; edit only when Aryan explicitly asks.** |
 | `design/tasks/backend/INDEX.md` | Backend episode list, phases, deps | Picking a backend episode |
 | `design/tasks/frontend/INDEX.md` | Frontend episode list, phases, deps | Picking a frontend episode |
 | `design/tasks/frontend/LAYOUT.md` | Layout engine, breakpoints, panes | Any frontend episode that renders |
@@ -59,7 +59,7 @@ changing it is out of scope for every episode unless an episode says otherwise.
 
 ---
 
-## The workflow â€” this is not optional
+## The workflow — this is not optional
 
 1. **One episode per session.** Never start the next one in the same session.
 2. **Build only what the episode's "Build" section lists.** Not the next episode's
@@ -68,7 +68,7 @@ changing it is out of scope for every episode unless an episode says otherwise.
    Aryan runs them himself.
 4. **Do not mark anything complete.** Only `design/completed/**` records
    completion, and only after Aryan confirms the checks passed.
-5. **Between episodes Aryan runs `/clear`.** Assume no memory of prior sessions â€”
+5. **Between episodes Aryan runs `/clear`.** Assume no memory of prior sessions —
    read `completed/` instead.
 6. Episodes tagged `batchable: yes` may be combined with the next one in one
    session. Nothing else may be.
@@ -76,7 +76,7 @@ changing it is out of scope for every episode unless an episode says otherwise.
 ## When docs and reality disagree
 
 The code and the database are the truth. If `design/` says a table has a column
-and it does not, **say so and stop** â€” do not silently "fix" either side.
+and it does not, **say so and stop** — do not silently "fix" either side.
 
 Inspect before assuming:
 ```powershell
@@ -94,15 +94,15 @@ sqlite3 "$env:LOCALAPPDATA\Point\runtime.db" ".schema"
 - **Never claim a performance benefit that has not been measured.** Say "for
   control" or "for correctness" instead.
 - **Parking-lot items are not work.** Do not implement one because it seems
-  adjacent. If an entry says "ask Aryan first", ask â€” do not begin.
+  adjacent. If an entry says "ask Aryan first", ask — do not begin.
 - **No new dependencies** without saying why in the episode's handoff notes.
 - **Write PowerShell in every command you print.** A Unix command Aryan cannot run
   is a failed instruction.
 - **Manual verification must never let Point's process see the real
   `%APPDATA%\Point` or `%LOCALAPPDATA%\Point` path.** Point never needs to be
-  told where "real" is â€” it only ever reads `APPDATA`/`LOCALAPPDATA` from its
+  told where "real" is — it only ever reads `APPDATA`/`LOCALAPPDATA` from its
   own environment (`backend\appconfig.py` `config_dir()`/`state_dir()`,
-  `frontend\internal\config\config.go` `ConfigDir()`/`StateDir()` â€” the same
+  `frontend\internal\config\config.go` `ConfigDir()`/`StateDir()` — the same
   two env vars on both sides, by design, so one override moves both). Set
   both to a scratch directory for the one script's duration and nothing under
   the real `Point` folder is ever a target of anything, including a failure:
@@ -124,13 +124,13 @@ sqlite3 "$env:LOCALAPPDATA\Point\runtime.db" ".schema"
   ```
 
   This **replaces the old rename-aside-and-restore pattern** (rename the real
-  folder out of the way, run the check, rename it back), which is retired â€”
+  folder out of the way, run the check, rename it back), which is retired —
   do not write a new verification script that renames or deletes anything
   under `%APPDATA%\Point` or `%LOCALAPPDATA%\Point` by name, for any reason,
   even guarded by `Test-Path`. Rename-aside had two independent failure modes
   that both actually happened: (B7) a separate `cat >` in a later tool call
-  clobbered the real `config.toml`, because shell state â€” including an env
-  var like `$env:POINT_DB` â€” does not survive between tool calls, so every
+  clobbered the real `config.toml`, because shell state — including an env
+  var like `$env:POINT_DB` — does not survive between tool calls, so every
   step must already be one script; and (F10) `Rename-Item ... -ErrorAction
   SilentlyContinue` silently failed to move the real profile out of the way
   (a lock, a running process, anything), and the script's own "restore"
@@ -138,16 +138,16 @@ sqlite3 "$env:LOCALAPPDATA\Point\runtime.db" ".schema"
   permanently deleting the live profile because nothing had verified the
   rename actually happened first. A pattern that depends on a rename
   succeeding, with nothing checking that it did, before a step that deletes
-  by the real name, is not made safe by adding a `Test-Path` guard â€” it is
+  by the real name, is not made safe by adding a `Test-Path` guard — it is
   made safe by never naming the real path in a destructive call at all. If a
   check genuinely cannot run against an env-var override (none identified so
   far), stop and say so rather than reintroducing rename-aside.
   `db_path`/`config_path` overrides like `$env:POINT_DB` alone are not
   sufficient by themselves either: `POINT_DB` moves the database but
   `config.toml`, `credentials.toml`, `state.json`, and `logs\` still resolve
-  under the real `APPDATA`/`LOCALAPPDATA` unless those are overridden too â€”
-  set both env vars, not just `POINT_DB`. **If any doc â€” completed, task, or
-  otherwise â€” still shows the old rename-aside script, it is superseded
+  under the real `APPDATA`/`LOCALAPPDATA` unless those are overridden too —
+  set both env vars, not just `POINT_DB`. **If any doc — completed, task, or
+  otherwise — still shows the old rename-aside script, it is superseded
   regardless of where it appears or how old or new it is; do not copy it,
   even if it is the first example a search turns up.** This rule is what
   governs, not precedent found by grepping a doc mid-task instead of reading
@@ -155,7 +155,7 @@ sqlite3 "$env:LOCALAPPDATA\Point\runtime.db" ".schema"
 - **If this episode's verification needs to exercise a command or feature
   owned by a LATER episode, do not build a stub or partial version of it.**
   Write the required state directly (SQL, a one-off script) inside that
-  verification step, scoped to the single check â€” never as new product
+  verification step, scoped to the single check — never as new product
   surface the later episode then has to reconcile with or discard. (B8:
   needed a `context_attachments` row to test change-detection; `attach` is
   B12's command. Inserted the row directly via `sqlite3` in the verification
@@ -165,14 +165,14 @@ sqlite3 "$env:LOCALAPPDATA\Point\runtime.db" ".schema"
   narrower local type under a different name, and note in this episode's
   Handoff that the later episode's real type must be adaptable to it, not
   identical to it. (B8 needed a lightweight per-request config before B9's
-  real `AgentConfig` existed â€” named it `ContextPolicy` instead, so the two
+  real `AgentConfig` existed — named it `ContextPolicy` instead, so the two
   never collide.)
 
 ## Phase tags
 
-- `[P1]` â€” v1 scope. Build these.
-- `[P2]` â€” stretch. Only after all `[P1]` items are done and verified.
-- `[PARK]` â€” deferred by design. Do not build. The hook exists; the feature does not.
+- `[P1]` — v1 scope. Build these.
+- `[P2]` — stretch. Only after all `[P1]` items are done and verified.
+- `[PARK]` — deferred by design. Do not build. The hook exists; the feature does not.
 
 ## Actual repo layout
 

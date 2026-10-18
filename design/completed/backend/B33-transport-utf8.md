@@ -259,6 +259,18 @@ U+240F (e2 90 8f; 0x90 and 0x8f undefined in cp1252)
   comment — its corrupted line was `if content.startswith("ï»¿")`, a
   BOM-stripping check in the `project write-file` path that no longer
   matched a real BOM.
+
+  > **Correction (B35):** "no mojibake remains anywhere in the tree" was true
+  > of what this check measured — the working tree against HEAD — and false
+  > as a claim about the repo. `CLAUDE.md` had been mojibake'd since `790e0c2`
+  > (B20, thirteen episodes before this one) and was identical in the working
+  > tree and at HEAD, so a working-tree check could not see it by
+  > construction; only a scan of committed history across revisions found it.
+  > This sentence is left as written — it records what was true of this
+  > check's own scope at the time — see
+  > `design/completed/backend/B35-claude-md-corruption.md` for the fix and
+  > for why "no mojibake in the tree" and "no mojibake in the repo" are
+  > different claims.
 - **No `.gitattributes` exists and `core.autocrlf` is `true` from the SYSTEM
   config**, so 49 tracked files round-trip CRLF↔LF only by accident of that
   setting, and `gofmt -l` can never be a reliable gate on a fresh Windows
