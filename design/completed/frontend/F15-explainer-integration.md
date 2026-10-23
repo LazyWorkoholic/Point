@@ -422,7 +422,14 @@ backwards.
 
 ## Handoff
 
-### Session 19b — F9d (apply-time guard order)
+### Session 19b — F9d (apply-time guard order) — ✅ DONE, see `F09d-apply-time-guard-order.md`
+
+> **Closed.** F9d ran after this episode and took shape (b): the save
+> carries `session_id` and `_handle_write_project_file` resolves that
+> session's own scope, ignoring `project_id` beside it. **F9a's hazard 1
+> is fully closed.** What follows is this episode's own handoff note as
+> written, kept because it is what F9d was told to read and it is still
+> the accurate description of the save path it found.
 
 F15 adds the **first caller of `WriteProjectFile` from an agent-applied
 diff**, which is what makes F9a's hazard-1 guard order reachable at all. Read

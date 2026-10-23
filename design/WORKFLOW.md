@@ -2725,7 +2725,7 @@ Stop at the verification gate with PowerShell checks.
 
 ---
 
-# SESSION 19a — B36 Generation-Time Staleness for the Filler's Proposal  🟡 BUILT + SELF-TESTED, AWAITING INDEPENDENT RE-RUN
+# SESSION 19a — B36 Generation-Time Staleness for the Filler's Proposal  ✅ DONE (independently re-run 2026-10-23, 13/13)
 
 > **RUNS BEFORE Session 19.** Numbered `19a` rather than taking a plain
 > number because it is an interleaved backend episode in the same shape as
@@ -3006,7 +3006,7 @@ later ever needs to show something transient in the editor.
 
 ---
 
-# SESSION 19b — F9d Apply-Time Guard Order (F9a Hazard 1)  (not started)
+# SESSION 19b — F9d Apply-Time Guard Order (F9a Hazard 1)  ✅ DONE (gate green all four steps, 2026-10-24)
 
 > **RUNS AFTER Session 19.** Numbered `19b` rather than `19c`/a plain
 > number because, like `19a`, it is an interleaved episode slotted

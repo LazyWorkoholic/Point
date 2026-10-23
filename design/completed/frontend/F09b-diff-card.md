@@ -503,6 +503,20 @@ reachable as soon as F15 adds one.
 Folded into **B36** with #7, because both need the same backend addition and
 `session_id` is half of it.
 
+> **✅ CLOSED SINCE, by F9d (Session 19b) — `F09d-apply-time-guard-order.md`.**
+> The section above is kept verbatim because it is the record of a guard
+> left ABSENT rather than approximated, and of why each cheap substitute
+> was refused. What has changed: B36 gave `CheckFileStale` `session_id`
+> (the primitive), F15 gave Go the `FillProposal` decoder and the
+> Editor its own session (so points 2 and 3 above stopped being true),
+> and **F9d fixed the call site** — `_handle_write_project_file` now
+> accepts `session_id` and resolves that session's own scope via
+> `_attachment_scope`, ignoring the payload's `project_id` outright and
+> refusing a session with no project rather than falling back to the
+> path walk-up. `doc.agentSession` carries the proposing session from a
+> proven apply to the save. **F9's packaging decision below is
+> untouched by that episode and remains open.**
+
 ---
 
 ## The packaging collision — recorded, left OPEN

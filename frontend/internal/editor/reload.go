@@ -155,6 +155,12 @@ func (w *Workspace) applyReload(d *doc, f wireFile) tea.Cmd {
 	d.dirty = false
 	d.setDiskBaseline()
 	d.autosaveBlocked = false
+	// F9d: the buffer is the file again, so whatever agent-applied region
+	// it used to hold is gone -- and with it the session a later save
+	// would have been scoped by. Left set, the next save of a reloaded
+	// buffer would be scoped by a session whose proposal is no longer in
+	// it, which is a claim about content that is not there.
+	d.agentSession = ""
 	d.cursor = d.buf.Clamp(d.cursor)
 	d.anchor = d.cursor
 	d.selecting = false

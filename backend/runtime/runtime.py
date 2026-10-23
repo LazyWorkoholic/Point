@@ -781,6 +781,40 @@ class Runtime:
         that is the creation signal, not a missing value. The
         precondition is never defaulted to "write anyway"; `overwrite`
         has to be asked for.
+
+        F9d adds `session_id`, additively and by exactly the rule B36
+        established one event over on CheckFileStale:
+
+        - No `session_id` -> EXACTLY the pre-F9d behaviour
+          (`_require_project`: explicit `project_id`, else a walk-up
+          from `path`, else refused). Every caller that has ever sent
+          this event keeps its own answer, byte for byte.
+        - `session_id` given -> the project is the SESSION's own, via
+          `_attachment_scope`, and `project_id` in the payload is
+          IGNORED OUTRIGHT -- not merged, not a fallback. This is F9a's
+          hazard 1 on the one destructive path in this backend: a buffer
+          that received an agent-applied region from a session scoped to
+          project A must not be written under whatever `.point\` happens
+          to sit above the file. Resolving the scope here, before
+          `write_file`, is what makes "commit nothing until the guard
+          passes" structural -- the guard is not a separate call that
+          could be skipped, it is which project the write is performed
+          against.
+        - A `session_id` whose session has NO project is refused, not
+          downgraded to the path walk-up. Falling back would hand the
+          caller precisely the resolution it asked to avoid, which is
+          the drift, not a lenient version of it. It is also already
+          this event's own rule for a bare path ("no project means
+          read-only", above), now stated for a session too.
+
+        `_attachment_scope`'s second return value (`allow_outside_
+        project`) is deliberately DISCARDED: `write_file` has no such
+        parameter and must not gain one -- "an out-of-project path
+        cannot take a lock at all... accepting one here would
+        manufacture exactly the writable-but-unlockable case F13's `no
+        .point\ means read-only` decision rules out" (its own
+        docstring). An outside path raises PathDeniedError, which is the
+        refusal this episode wants, not a case to permit.
         """
         p = event.payload
         if "path" not in p:
@@ -789,7 +823,17 @@ class Runtime:
             raise InvalidEventError("WriteProjectFile requires 'content'")
         if not p.get("holder"):
             raise InvalidEventError("WriteProjectFile requires 'holder'")
-        project = await self._require_project(p)
+        session_id = p.get("session_id")
+        if session_id:
+            project, _allow_outside = await self._attachment_scope(session_id)
+            if project is None:
+                raise ProjectNotFoundError(
+                    f"Session {session_id} has no project: a write scoped to a "
+                    "session cannot fall back to resolving a project from the "
+                    "file's own path"
+                )
+        else:
+            project = await self._require_project(p)
 
         raw_mtime = p.get("expected_mtime")
         result = await self.projects.write_file(

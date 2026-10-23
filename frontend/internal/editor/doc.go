@@ -245,6 +245,32 @@ type doc struct {
 	// how a later reply redraws a dialog the user already closed.
 	dialog *staleDialog
 
+	// ---- F9d: the session an agent-applied region came from ---------
+
+	// agentSession is the session that produced the proposal whose
+	// region was last applied into this buffer, and it is what the save
+	// path sends as `session_id` so the write resolves THAT session's
+	// scope (F9a's hazard 1; B36's `_attachment_scope` branch).
+	//
+	// Empty for every ordinary buffer, and that is the point: a document
+	// nobody applied an agent region into has no originating session, so
+	// its save resolves exactly as it always has (the Editor's own
+	// project when the file is inside the tree, otherwise the backend's
+	// walk-up from the file's path). F9d narrows the hazard it is for
+	// rather than re-scoping every save in the workspace -- the Editor's
+	// own `w.sessionID` exists for a file this workspace merely has
+	// open, and sending it for all writes would refuse ordinary saves of
+	// files outside the session's project that work today.
+	//
+	// It is NOT cleared by `ctrl+z`. An undo is a Splice like any other
+	// and leaves the content matching disk, where autosave declines
+	// (`matchesDisk`) and a manual save writes the same bytes under the
+	// same session's scope, which is the correct scope either way. What
+	// DOES clear it is a reload: `applyReload` replaces the whole buffer
+	// with the bytes on disk, so there is no longer an applied region in
+	// it to be scoped by whoever proposed one.
+	agentSession string
+
 	// autosaveBlocked stops the timer re-arming for this document until
 	// the user does something about it. Set by a refusal autosave cannot
 	// resolve on its own -- locked, read-only, stale, too_large, an

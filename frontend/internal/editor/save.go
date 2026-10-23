@@ -21,6 +21,17 @@ import (
 // editor-write permission as backend-enforced policy so a B16 guest can
 // be refused. config\state.go stays the only file this process writes.
 //
+// # Which scope a write is resolved against (F9d)
+//
+// Three states, decided in saveDoc and nowhere else:
+//
+//	session_id   the buffer holds an agent-applied region -- the session
+//	             that proposed it, and `project_id` is not sent at all
+//	project_id   the file is inside this workspace's own project
+//	neither      the backend walks up from the file's own path
+//
+// The first is F9a's hazard 1. The other two are F13b's, unchanged.
+//
 // # Nothing is re-derived
 //
 // line_ending, bom and trailing_newline all come from doc, which took
@@ -176,11 +187,42 @@ func (w *Workspace) saveDoc(d *doc, reason saveReason, overwrite bool) tea.Cmd {
 		"bom":              d.bom,
 		"trailing_newline": d.trailingNewline,
 	}
+	// F9d: a buffer that holds an agent-applied region is scoped by the
+	// SESSION that proposed it, and by nothing else.
+	//
+	// This is F9a's hazard 1 on the one destructive path in this app, and
+	// it is the reason the write carries a session at all. Without it,
+	// `_handle_write_project_file` resolves the project the way every
+	// other save does -- the explicit `project_id` below, or a walk-up
+	// from the file's own path -- so an agent's region, proposed in a
+	// session bound to project A, could be written under whatever
+	// `.point\` happens to sit above the file. That is B12's bug #2 (a
+	// request answered under a different scope from the one that produced
+	// it) on a write rather than a token estimate.
+	//
+	// `project_id` is deliberately NOT sent alongside it. The handler
+	// ignores it outright when `session_id` is present -- B36's own rule
+	// for CheckFileStale, extended here -- and sending a key the
+	// receiver drops is how a reader comes to believe the two are
+	// merged, or worse, that the path-resolved project is a fallback.
+	// There is no fallback: a session with no project is REFUSED, which
+	// arrives here as an Error envelope and is already handled (onError
+	// stops autosave for this document and says why).
+	//
+	// The guard order is therefore structural rather than sequential.
+	// Nothing here asks "may I write?" and then writes -- the scope the
+	// write is performed against IS the session's, resolved before
+	// `write_file` touches anything, and an out-of-scope path raises
+	// PathDeniedError before any bytes are encoded.
+	switch {
+	case d.agentSession != "":
+		payload["session_id"] = d.agentSession
+
 	// Same rule openPath uses: name the project explicitly when the file
 	// is inside the tree's own, and otherwise let _require_project walk
 	// up from the file's own path. A file in a different project saves
 	// correctly scoped either way.
-	if w.projectID != "" && relativeTo(w.projectRoot, d.path) != "" {
+	case w.projectID != "" && relativeTo(w.projectRoot, d.path) != "":
 		payload["project_id"] = w.projectID
 	}
 
@@ -201,11 +243,30 @@ func (w *Workspace) saveDoc(d *doc, reason saveReason, overwrite bool) tea.Cmd {
 	// The reason and the byte count are included because the question
 	// this line has to answer is never "was there a write" alone -- it is
 	// "which action wrote, and was it the user asking".
+	// F9d adds the scope to this line. "Which action wrote" was not the
+	// whole question after all: an agent-applied region's write is
+	// scoped by a session rather than by a project, and a log that does
+	// not say which cannot answer whether the guard order held.
 	w.log.Info("editor: WriteProjectFile sent",
 		"file", d.name(), "reason", reasonName(reason),
-		"bytes", len(payload["content"].(string)), "overwrite", overwrite)
+		"bytes", len(payload["content"].(string)), "overwrite", overwrite,
+		"scope", scopeLabel(payload))
 	w.send(protocol.CmdWriteProjectFile, queryWriteFile, payload)
 	return nil
+}
+
+// scopeLabel names what the write just sent will be resolved against, in
+// the three states the payload can be in. Read from the payload rather
+// than from the document, so the line cannot describe a scope the request
+// does not actually carry.
+func scopeLabel(payload map[string]any) string {
+	if s, ok := payload["session_id"].(string); ok && s != "" {
+		return "session " + s + " (agent-applied region)"
+	}
+	if p, ok := payload["project_id"].(string); ok && p != "" {
+		return "project " + p
+	}
+	return "path walk-up"
 }
 
 // reasonName is saveReason as a word, for the log line above.

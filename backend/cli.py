@@ -1189,9 +1189,18 @@ async def cmd_project_write_file(runtime: Runtime, args: argparse.Namespace) -> 
     `--line-ending` flag decides what lands on disk, not the incidental
     endings of whatever scratch file carried the text.
     """
-    project = await _require_project(runtime, args)
-    if project is None:
-        return EXIT_FAILED
+    # F9d: `--session` names the scope, so no project is resolved from
+    # `--path` at all. Requiring one anyway would make this command
+    # stricter than the event it sends -- the handler IGNORES
+    # `project_id` outright when `session_id` is present, so insisting on
+    # a value it will not read would refuse a request the backend
+    # accepts, over a directory that may legitimately have no `.point\`
+    # above it.
+    project = None
+    if not args.session:
+        project = await _require_project(runtime, args)
+        if project is None:
+            return EXIT_FAILED
     try:
         raw = Path(args.content_from).read_bytes()
     except OSError as exc:
@@ -1202,7 +1211,6 @@ async def cmd_project_write_file(runtime: Runtime, args: argparse.Namespace) -> 
         content = content[1:]
 
     payload: dict[str, Any] = {
-        "project_id": project["id"],
         "path": args.file,
         "content": content,
         "holder": args.holder,
@@ -1215,6 +1223,13 @@ async def cmd_project_write_file(runtime: Runtime, args: argparse.Namespace) -> 
     # null, which MEANS "I expect no file here". Sent explicitly rather
     # than omitted so the request says what it intends.
     payload["expected_mtime"] = None if args.create else args.expect_mtime
+    # Exactly one of the two, never both: sending a `project_id` beside a
+    # `session_id` would print a request whose second key is dead, which
+    # is how a reader comes to believe the pair is merged.
+    if args.session:
+        payload["session_id"] = args.session
+    else:
+        payload["project_id"] = project["id"]
 
     envelopes = await call(runtime, "WriteProjectFile", verbose=args.verbose, **payload)
     _print_errors(envelopes)
@@ -1849,6 +1864,11 @@ def build_parser() -> argparse.ArgumentParser:
              "cannot be passed through argv)",
     )
     p_write.add_argument("--holder", required=True, help="the lock holder key")
+    p_write.add_argument(
+        "--session", default=None,
+        help="F9d: resolve the SESSION's own scope instead of --path's "
+             "(--project/--path is then ignored, as the handler does)",
+    )
     # Exactly one precondition, and one is REQUIRED. There is no default:
     # defaulting to --overwrite is how you ship a clobber.
     precondition = p_write.add_mutually_exclusive_group(required=True)

@@ -301,11 +301,33 @@ func (w *Workspace) handleEnvelope(env protocol.Envelope) tea.Cmd {
 // have offered the open. They are shown and dropped; nothing retries.
 func (w *Workspace) onError(req pendingReq, env protocol.Envelope) tea.Cmd {
 	var p struct {
+		// `error` is the key the backend actually sends (runtime.py's
+		// own `_emit` for a RuntimeException: `{"error", "code",
+		// "offer"}`), and `chat\protocol.go` has always decoded that
+		// one.
+		//
+		// F9d: this struct read `message` ALONE, so every Error envelope
+		// reaching this workspace rendered as the generic fallback below
+		// instead of as what the backend said. A pre-existing F13b
+		// defect, found here rather than introduced here -- and fixed
+		// here rather than filed, because this episode's own refusals
+		// are Error envelopes: a session with no project, and a path
+		// outside the session's scope. F9b's rule is that a refusal the
+		// user cannot read is a surface that looks inert, and "the
+		// backend refused the request" over a wrong-scope save is
+		// exactly that.
+		//
+		// `message` is kept as a second source rather than replaced, so
+		// a sender that uses it is still read.
+		Error   string `json:"error"`
 		Message string `json:"message"`
 		Code    string `json:"code"`
 	}
 	_ = env.UnmarshalPayload(&p)
-	msg := p.Message
+	msg := p.Error
+	if msg == "" {
+		msg = p.Message
+	}
 	if msg == "" {
 		msg = "the backend refused the request"
 	}

@@ -18,9 +18,14 @@ when it supplies only what it always supplied.**
 > (unit-level, 16/16 PASS) and a new `tests\manual_b36_check.py` (end to
 > end, through one long-lived `Runtime` — real `SendMessage` → fill-mode
 > task → real `FillProposal` event, and six `CheckFileStale` scenarios).
-> Full logs in "Manual Test Log" below. **Aryan has not yet re-run this
-> independently** — this doc records the build-and-self-test half of the
-> usual closure bar, same as every episode's first pass.
+> Full logs in "Manual Test Log" below. **Independently re-run and
+> confirmed by Aryan on 2026-10-23** — both scripts, in his own fresh
+> scratch `%APPDATA%`/`%LOCALAPPDATA%` profile: `manual_fill_proposal_
+> test.py` 16/16 PASS, and all thirteen `manual_b36_check.py` assertions
+> matching (Part 1's proposal `mtime`/`size` equal to the file's real
+> `os.stat()` on both sides, Part 2a/2b/2c as tabulated). Thirteen for
+> thirteen. The usual closure bar is met: built, self-tested, and
+> re-run independently.
 
 ---
 
@@ -283,6 +288,18 @@ finally {
 All thirteen B36-specific checks PASS. Full raw envelope dumps are in this
 session's own transcript, not reproduced here — the table above is the
 complete set of assertions, not a summary of a larger log.
+
+**Independent re-run, 2026-10-23 (Aryan, fresh scratch profile).** All
+thirteen matched: `manual_fill_proposal_test.py` 16/16 PASS; Part 1's
+proposal pair equal to the file's real stat on both sides
+(`mtime=1792757504.0186036`, `size=30` — a different fixture run than the
+`1792360523.4474747` above, which is the self-test's own run, as expected
+for a file created fresh in a fresh profile); Part 2a unchanged file →
+`changed=False`, wrong `mtime` → `changed=True`; Part 2b real `mtime` +
+wrong `size` → `changed=True`, real `mtime` + real `size` →
+`changed=False`; Part 2c wrong `project_id` with no `session_id` →
+`changed=True`, same request with `session_id` → `changed=False`, session
+scope winning outright.
 
 ---
 

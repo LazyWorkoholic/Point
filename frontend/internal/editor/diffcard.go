@@ -90,6 +90,30 @@ import (
 // # The staleness guard is not built (Done-when #7), and the guard ORDER
 // is incomplete with it
 //
+// ---- HISTORY. BOTH HALVES ARE BUILT NOW (F15 and F9d) ----------------
+//
+// Kept verbatim because it is the record of two guards that were left
+// ABSENT rather than approximated, and of why each cheap substitute was
+// refused. What has changed since:
+//
+//   - Done-when #7 (the file ON DISK) was closed by F15 as its 7b. B36
+//     made `_render_editor_context` stat the descriptor it reads the
+//     region from and put the pair on `FillProposal`; `RecordedMtime`/
+//     `RecordedSize`/`HasRecordedPair` are populated from THAT event, and
+//     `onDiffApply`'s guard 6 asks `CheckFileStale` before any splice.
+//   - The guard ORDER (F9a hazard 1) was closed by F9d. `SessionID` is
+//     carried off the `FillProposal` envelope, the staleness check sends
+//     it so the right scope answers, and `applyNow` records it on the
+//     target document (`doc.agentSession`) so the SAVE is resolved
+//     against that session too -- `_handle_write_project_file` takes
+//     `session_id` and ignores `project_id` outright when it is present.
+//     The third bullet below ("there is no session scope available") is
+//     what stopped being true: F15 gave the Editor its own session, and
+//     Go does receive `FillProposal` now.
+//
+// The paragraphs below describe the state at F9b and are not the current
+// behaviour of this file.
+//
 // `RecordedMtime`/`RecordedSize` are carried and stay ZERO this session.
 // They are not wired to anything, deliberately: the (mtime, size) pair as
 // of REGION GENERATION is captured nowhere in the backend --
@@ -1111,6 +1135,21 @@ func (w *Workspace) applyNow(c *DiffCard) tea.Cmd {
 	// exactly where they were.
 	w.active = i
 	w.focus = focusBuffer
+
+	// F9d: the buffer now holds an agent-proposed region, so the session
+	// that proposed it is what the next save has to be scoped by --
+	// recorded here, where the splice is PROVEN, and not in `onDiffApply`
+	// where it was only intended. A refused apply leaves the document
+	// with whatever origin it already had.
+	//
+	// F9a's hazard 1 is "resolve the SESSION's scope first, guard against
+	// that, and commit nothing until the guard passes". The guard that
+	// matters for the write is not a second round trip from here: it is
+	// WHICH PROJECT the write is performed against, which is decided in
+	// `_handle_write_project_file` from this value. See save.go.
+	if c.SessionID != "" {
+		d.agentSession = c.SessionID
+	}
 
 	c.markApplied()
 
