@@ -24,9 +24,9 @@ func caretRun(ws *Workspace, d *doc) (prefix string, cell int) {
 	if rows <= 0 {
 		rows = 1
 	}
-	out := ws.renderCode(d, gutter, ws.textArea.W, rows)
+	out := renderRows(ws, d, gutter, ws.textArea.W, rows)
 
-	i := d.cursor.Line - d.top
+	i := ws.viewIndexAt(d, ws.textArea.W).rowOf(d.cursor.Line) - d.top
 	if i < 0 || i >= len(out) {
 		return "", -1
 	}

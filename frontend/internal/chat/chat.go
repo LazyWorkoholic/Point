@@ -111,6 +111,12 @@ type Workspace struct {
 	sessionModel    string
 	bootstrapped    bool
 
+	// pendingPrefill is text `send to chat` (F15) handed over before this
+	// workspace had a session to restore a draft for. Applied again by
+	// setSession, after restoreDraft, which would otherwise setText over
+	// the top of it -- see prefill.go's applyPendingPrefill.
+	pendingPrefill string
+
 	// projectID is the session's bound project, or "" when unbound. F8's @
 	// picker reads it (PickerSession, picker.go) to decide fuzzy-over-the-
 	// project-tree vs filesystem-browse-rooted-at-cwd, and to scope

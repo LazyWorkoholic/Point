@@ -102,17 +102,26 @@ func TestIDIsTheEditorWorkspace(t *testing.T) {
 func TestCapturesKeyClaimsExactlyTabAndShiftTab(t *testing.T) {
 	ws := New(Options{Theme: testTheme()})
 
-	for _, key := range []string{"tab", "shift+tab"} {
+	// tab/shift+tab unconditionally (F13a), and ctrl+c unconditionally as
+	// of F15 -- it is COPY in this workspace, with no second meaning, and
+	// the chord table would otherwise swallow it as chat.cancel's and
+	// answer "Cancel Stream is not available right now". See copy.go for
+	// why a scoped ctrl+c was rejected.
+	for _, key := range []string{"tab", "shift+tab", "ctrl+c"} {
 		if !ws.CapturesKey(key) {
-			t.Errorf("%q is not claimed; Tab would not indent", key)
+			t.Errorf("%q is not claimed", key)
 		}
 	}
 	// Everything else keeps its global meaning here -- the palette, quit,
-	// the leader, redraw, the tray, and the four Chat-only chords.
+	// the leader, redraw, the tray, and the Chat-only chords.
+	//
+	// esc is in this list and belongs there: it is claimed ONLY while a
+	// modal surface or a live invocation is on screen (capturesModalKey),
+	// and this workspace is idle.
 	for _, key := range []string{
-		"esc", "enter", "ctrl+a", "ctrl+b", "ctrl+c", "ctrl+e", "ctrl+l",
+		"esc", "enter", "ctrl+a", "ctrl+b", "ctrl+e", "ctrl+l",
 		"ctrl+n", "ctrl+o", "ctrl+p", "ctrl+q", "ctrl+r", "ctrl+s", "ctrl+w",
-		"ctrl+z", "f1", "up", "down", "left", "right", "a", "x",
+		"ctrl+z", "f1", "f2", "f3", "up", "down", "left", "right", "a", "x",
 	} {
 		if ws.CapturesKey(key) {
 			t.Errorf("%q is claimed; its global binding would stop working here", key)

@@ -44,11 +44,14 @@ All printed commands must be **PowerShell**.
 | **F13a** | **Editor Core — the editing half (F13, SPLIT)** | P1 | no | F12 | B7, B32 | <!-- F13a-editor-core-editing.md; DONE, recorded in completed/frontend/F13a-editor-core-editing.md -->
 | F13b | Editor — Save, Locks, Autosave (F13, SPLIT) | P1 | no | **F13a (done)** | B7, B32 |  <!-- DONE: completed/frontend/F13b-editor-save-locks.md, commits 65cb6dc (build) + 6e28f6b (verification repairs) -->
 | F14 | Editor Terminal | P2 | no | F13a | — |
-| F15 | Filler-Explainer Integration | P1 | no | F13a, F9b | B11, B24 |
+| **F15** | **Filler-Explainer Integration** | P1 | no | F13a, F9b | B11, B24, B36 | <!-- DONE, recorded in completed/frontend/F15-explainer-integration.md. v1 is feature-complete on the frontend. Also closed F9's Done-when #7 as its own 7b, from B36's generation-time (mtime, size) -->
 | F16 | Polish | P2 | no | all | — | <!-- also owns F9a's deferred result-card code-block rendering: syntax colour + box frame, blocked on markdown-renderer packaging, see F16-polish.md -->
 | F17 | Web Preview | P2 | no | F14 | — |
 | F18 | windowed history | P1 | no | F5+B18 | B18 |
 | F20 | Live Stale Detection | P2 | no | F13b (done) | none — B32 ✅, B7 ✅ | <!-- F20-live-stale-detection.md; a new TRIGGER into F13b's existing refusal machinery, not a second mechanism. CmdCheckFileStale/EvFileStaleResult already exist end to end and have no caller -->
+| F21 | Multi-line Fill-Prompt Input | P2 | no | F15 (done) | **B37** (new, required) | <!-- F21-multiline-fill-prompt.md; Part 2 of the Filler. SPEC ONLY. Scheduled after v1 ships, time permitting -- otherwise deferred to a later session -->
+| F22 | Explain as an Ongoing Conversation | P2 | no | F15 (done) | **B38** (new, required) | <!-- F22-explain-as-conversation.md; Part 2 of the Explainer. SPEC ONLY. Scheduled after v1 ships, time permitting -- otherwise deferred to a later session -->
+| F23 | Fill on a Blank Line (generation, not rewriting) | P2 | no | F15 (done), F9b (done) | **B39** (new, required -- the larger half) | <!-- F23-fill-on-a-blank-line.md; Part 2 of the Filler. SPEC ONLY. Scheduled after v1 ships, time permitting -- otherwise deferred to a later session -->
 
 **There is no F19.** It was written up during F13b's verification, then
 retired in `4a2a41b`: its two shipped items (the tree's vim motions

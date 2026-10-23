@@ -153,6 +153,7 @@ func (w *Workspace) applyReload(d *doc, f wireFile) tea.Cmd {
 	// what the undo history still holds. That history is the user's way
 	// back, not a claim about what is on disk.
 	d.dirty = false
+	d.setDiskBaseline()
 	d.autosaveBlocked = false
 	d.cursor = d.buf.Clamp(d.cursor)
 	d.anchor = d.cursor

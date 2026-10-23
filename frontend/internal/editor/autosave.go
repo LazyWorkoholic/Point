@@ -87,6 +87,10 @@ type autosaveTickMsg struct {
 type editProbe struct {
 	path string
 	ver  uint64
+	// wasDirty is whether the document was ALREADY diverged from disk
+	// when the probe was taken, so autosaveAfter can log the transition
+	// from clean to dirty once rather than every keystroke after it.
+	wasDirty bool
 }
 
 func (w *Workspace) probeActive() editProbe {
@@ -94,7 +98,7 @@ func (w *Workspace) probeActive() editProbe {
 		return editProbe{}
 	}
 	d := w.docs[w.active]
-	return editProbe{path: d.path, ver: d.buf.Version()}
+	return editProbe{path: d.path, ver: d.buf.Version(), wasDirty: d.dirty}
 }
 
 // autosaveAfter arms this document's debounce if the buffer moved.
@@ -102,13 +106,28 @@ func (w *Workspace) probeActive() editProbe {
 // Matched on PATH, not on the active index: a tab switch inside the same
 // Update would otherwise compare one document's version against
 // another's and read as an edit.
-func (w *Workspace) autosaveAfter(p editProbe) tea.Cmd {
+//
+// `cause` names the input that moved it, and is LOGGED the first time a
+// clean buffer becomes dirty. That one line is the answer to a question
+// this episode's gate has now asked three times -- "what wrote app.py?" --
+// and could not answer, because the editor is a text editor: any key no
+// surface claimed is a character typed into the file, and autosave then
+// persists it entirely correctly. A write with no visible cause looks like
+// the agent path misbehaving when it is usually a stray keystroke, and the
+// two need telling apart from the log alone.
+func (w *Workspace) autosaveAfter(p editProbe, cause string) tea.Cmd {
 	if p.path == "" {
 		return nil
 	}
 	d := w.docByPath(p.path)
 	if d == nil || d.buf.Version() == p.ver {
 		return nil
+	}
+	if !p.wasDirty {
+		// The transition that matters: a file that was in step with the
+		// disk no longer is, and this says what did it.
+		w.log.Info("editor: buffer became dirty",
+			"file", d.name(), "cause", cause, "version", d.buf.Version())
 	}
 	return w.armAutosave(d)
 }
@@ -275,7 +294,37 @@ func (w *Workspace) ResumeAutosave() tea.Cmd {
 // incremented in saveDoc and decremented in onWritten has two paths that
 // must agree forever -- including the Error path in protocol.go, which is
 // exactly the one that would be forgotten.
+// F15 adds the second such reply: a live explain OR fill invocation.
+//
+// Both, not fill alone. F15's Done-when 3b is written about the ghost
+// ("switch to Chat mid-stream and back -> the ghost shows everything that
+// arrived while away, not a frozen snapshot"), but the explanation streams
+// into this workspace through the identical path, and a panel that stopped
+// accumulating while the user was in Chat would be the same bug one surface
+// over -- a frozen snapshot, arrived at by a different route. There is no
+// version of "survives a workspace switch" that is true for one and false
+// for the other.
+//
+// This is what makes 3b hold WITHOUT a second rehydrate mechanism: the
+// workspace stays loaded, keeps receiving its own events while inactive,
+// and the ghost is rebuilt from the whole accumulated reply on every token
+// (invoke.go's applyStreamText). Nothing is snapshotted at the moment of
+// leaving, so nothing can be stale on return.
+//
+// KNOWN GAP, recorded rather than papered over: this keeps a BACKGROUNDED
+// workspace receiving, and it does not stop an IDLE one being unloaded.
+// lifecycle.go's idle walk pins a workspace only for unsaved buffers
+// (DirtyBuffers), and a fill in flight dirties nothing by design -- so a
+// long enough idle period mid-stream can still unload the Editor and take
+// the ghost with it. The task itself keeps running (that is F12's whole
+// demo beat) and the reply is still in the session, so nothing is lost
+// except the ghost; a returning user sees no proposal. Not fixed here
+// because the fix is a change to what pins a workspace, which is
+// lifecycle.go's policy and not this episode's Build section.
 func (w *Workspace) WantsBackgroundReplies() bool {
+	if w.liveInvocation() {
+		return true
+	}
 	for _, d := range w.docs {
 		if d.saving {
 			return true
@@ -297,4 +346,14 @@ func (w *Workspace) WantsBackgroundReplies() bool {
 var (
 	_ app.AutosavePauser    = (*Workspace)(nil)
 	_ app.BackgroundReplies = (*Workspace)(nil)
+	// F15's own, for the identical reason: the two leader actions find
+	// this workspace through a type assertion that fails silently, so a
+	// renamed method would turn explain and fill off rather than break
+	// the build.
+	_ app.EditorAgent = (*Workspace)(nil)
+	// F15's background filter, for the same reason again: Root asks for
+	// it through a type assertion, so a renamed method would turn it back
+	// into "drop everything" -- which is the state the two backgrounded
+	// faults were found in.
+	_ app.BackgroundCmdFilter = (*Workspace)(nil)
 )

@@ -117,7 +117,19 @@ type wireSession struct {
 	// Model is F6's: the Status card's "provider · model" line. The wire has
 	// always sent it (runtime.py's _session_to_dict); nothing decoded it
 	// until now.
-	Model     string        `json:"model"`
+	Model string `json:"model"`
+	// Workspace is which workspace OWNS this session, and decoding it is
+	// F15's fix for a real leak rather than completeness for its own
+	// sake. The wire has always sent it (runtime.py's _session_to_dict,
+	// on every SessionList row); nothing read it until the Editor started
+	// creating a session of its own.
+	//
+	// Empty for every session this workspace has ever created -- chat's
+	// CreateSession sends no `workspace` key, so the column is NULL --
+	// which is why the filter in onSessionList is "not someone ELSE's"
+	// rather than "mine". A rule of "only workspace == chat" would make
+	// every pre-F15 session invisible.
+	Workspace string        `json:"workspace"`
 	UpdatedAt float64       `json:"updated_at"`
 	Messages  []wireMessage `json:"messages"`
 

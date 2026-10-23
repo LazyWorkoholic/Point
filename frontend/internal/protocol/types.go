@@ -124,6 +124,29 @@ const (
 	EvFileLockReleased   = "FileLockReleased"
 	EvFileStaleResult    = "FileStaleResult"
 
+	// EvFillProposal is B24's FillProposal, carrying B36's generation-time
+	// (mtime, size): the Filler's fill-mode reply, already PARSED and
+	// VALIDATED by the backend against the region the model was actually
+	// shown. Nine fields, all of which travel together
+	// (managers\fill_proposal.py's own docstring: no subset).
+	//
+	// Three things about it that a consumer must not get wrong, each one
+	// recorded because the wrong version is the plausible one:
+	//
+	//   - It arrives AFTER the terminal TaskDone for its task, never
+	//     instead of it, and only for `kind == "done"`. So a consumer that
+	//     tears down its per-task state on TaskDone has already forgotten
+	//     where to put this. B24: "pushed after the terminal TaskDone".
+	//   - `seq` is null on BOTH envelopes and cannot order them; the
+	//     guarantee is FIFO arrival from one producer on one queue.
+	//   - There is NO event for a reply that did not parse. A plain-text
+	//     refusal, or a model that confused end_line with its replacement's
+	//     length (B24 measured that at 0/5 against the real local model),
+	//     produces one backend WARNING and nothing on the wire. "No
+	//     proposal arrived" is therefore the normal outcome of a fill, not
+	//     an error state -- F15's Done-when 6 depends on that.
+	EvFillProposal = "FillProposal"
+
 	// EvContextReport is B20's ContextReport -- one wire type serving both
 	// the GetContextReport reply (corr_id set) and the push after a turn's
 	// assistant message persists (corr_id null, session_id always set).

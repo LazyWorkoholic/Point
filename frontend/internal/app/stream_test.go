@@ -1,6 +1,7 @@
 package app
 
 import (
+	"strings"
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -55,8 +56,25 @@ func TestQuitIsCtrlQAndCancelIsCtrlC(t *testing.T) {
 	if !ok {
 		t.Fatal("app.quit is gone")
 	}
-	if quit.Chord != "ctrl+q" {
-		t.Fatalf("app.quit is bound to %q, wanted ctrl+q", quit.Chord)
+	// BOTH bindings, asserted through the registry rather than off the
+	// struct field: F15 gave quit a second, equal chord (f3) because
+	// ctrl+q can arrive from the Windows input layer as a bare 'q' and be
+	// typed into a file -- see actions.Leader's doc. Which FIELD each key
+	// sits in is an implementation detail; that both keys quit is the
+	// contract.
+	for _, chord := range []string{"ctrl+q", "f3"} {
+		a, ok := r.actions.ByChord(chord)
+		if !ok {
+			t.Fatalf("%s is bound to nothing; quit must answer to it", chord)
+		}
+		if a.ID != "app.quit" {
+			t.Fatalf("%s is bound to %q, wanted app.quit", chord, a.ID)
+		}
+	}
+	// And the user is TOLD about both, rather than one being a secret.
+	if label := quit.ChordLabel(); !strings.Contains(label, "ctrl+q") ||
+		!strings.Contains(label, "F3") {
+		t.Errorf("quit's label is %q; it must name both keys", label)
 	}
 
 	byChord, ok := r.actions.ByChord("ctrl+c")

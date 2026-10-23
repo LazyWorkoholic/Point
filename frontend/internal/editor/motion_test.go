@@ -176,13 +176,13 @@ func TestEnsureVisibleScrollsVerticallyAndHorizontally(t *testing.T) {
 	d := testDoc(t, string(sb))
 
 	d.moveTo(Pos{150, 0}, false)
-	d.ensureVisible(20, 30)
+	d.ensureVisible(plainIndex(d), 20, 30, 0)
 	if d.cursor.Line < d.top || d.cursor.Line >= d.top+20 {
 		t.Fatalf("line %d not inside [%d,%d)", d.cursor.Line, d.top, d.top+20)
 	}
 
 	d.moveTo(Pos{150, 38}, false)
-	d.ensureVisible(20, 30)
+	d.ensureVisible(plainIndex(d), 20, 30, 0)
 	cell := displayCol(d.buf.Runes(150), 38)
 	if cell < d.left || cell >= d.left+30 {
 		t.Errorf("cell %d not inside [%d,%d)", cell, d.left, d.left+30)
@@ -197,14 +197,14 @@ func TestScrollByDoesNotMoveTheCaret(t *testing.T) {
 	d := testDoc(t, string(sb))
 	d.moveTo(Pos{5, 0}, false)
 	before := d.cursor
-	d.scrollBy(40)
+	d.scrollBy(plainIndex(d), 40)
 	if d.cursor != before {
 		t.Errorf("the wheel moved the caret to %+v", d.cursor)
 	}
 	if d.top != 40 {
 		t.Errorf("top = %d, want 40", d.top)
 	}
-	d.scrollBy(-1000)
+	d.scrollBy(plainIndex(d), -1000)
 	if d.top != 0 {
 		t.Errorf("top = %d, want clamped to 0", d.top)
 	}

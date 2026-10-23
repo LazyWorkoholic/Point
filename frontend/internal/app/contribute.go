@@ -220,3 +220,136 @@ type AutosavePauser interface {
 	// more character".
 	ResumeAutosave() tea.Cmd
 }
+
+// ---------------------------------------------------------------------------
+// F15: what a BACKGROUNDED workspace's commands may do
+// ---------------------------------------------------------------------------
+
+// BackgroundDelivery is one verdict on one message a workspace produced
+// while it was loaded but not active.
+//
+// Three values rather than a bool, because "may this survive" and "who is
+// it for" are different questions and both have to be answered: an overlay
+// to open is Root's business, while a timer tick is the workspace's own and
+// has to find its way back to a workspace that is not the active one -- which
+// Root's ordinary fall-through (`r.current().Update(msg)`) would never do.
+type BackgroundDelivery int
+
+const (
+	// DropWhileBackgrounded is the DEFAULT and the zero value: the
+	// message is discarded exactly as it was before this seam existed.
+	// A workspace that does not implement BackgroundCmdFilter at all gets
+	// this for everything, so nothing changes for anyone who has not
+	// reasoned about it.
+	DropWhileBackgrounded BackgroundDelivery = iota
+	// DeliverToRoot hands the message to Root's own Update, where a type
+	// it handles itself (an overlay to open) is acted on.
+	DeliverToRoot
+	// DeliverToWorkspace routes the message back to the workspace that
+	// produced it, whether or not that workspace is active by the time it
+	// arrives.
+	DeliverToWorkspace
+)
+
+// BackgroundCmdFilter is implemented by a workspace that produces commands
+// while inactive which must not all be thrown away.
+//
+// # Why this exists
+//
+// deliverBackgroundReply DROPPED the returned tea.Cmd outright, and said so
+// deliberately: "A background workspace may reconcile its own state; it may
+// not take the status line." That reasoning is right for say() -- a
+// WorkspaceStatusMsg carries no workspace id, so Root would print "saved
+// main.go" over the status bar of whatever the user is actually looking at.
+//
+// It is wrong for two things F15 added, and the cost was two user-visible
+// faults found by driving a real Root: the overlay command that OPENS a
+// finished fill's diff card, and the timer that decides a fill produced no
+// proposal at all. Both were produced while the Editor was inactive and
+// both went in the bin, so a fill completed in the background left a frozen
+// ghost, no card, and a ctrl+z that did nothing.
+//
+// # Default-DENY, and the allow-list lives with the workspace
+//
+// The verdict is the WORKSPACE's to give, for the reason every narrow
+// interface in this file exists -- Root asks "what is this of yours", never
+// "are you the editor" -- and because only the workspace can name its own
+// unexported message types. Root's own rule is the simple half: no filter
+// implemented, or any verdict other than the two Deliver values, means
+// dropped.
+//
+// A workspace implementing this is making a claim about a SPECIFIC, listed
+// set of its own messages. The obligation that goes with it is that the
+// list is enumerated in one place with its reasons, so what has been
+// reasoned about is visible and everything else is visibly not -- see
+// editor\invoke.go's AllowBackgroundMsg.
+type BackgroundCmdFilter interface {
+	AllowBackgroundMsg(tea.Msg) BackgroundDelivery
+}
+
+// WorkspaceActivatedMsg tells a workspace it is now the one on screen.
+//
+// Sent by switchWorkspace on every switch IN, to an already-loaded
+// workspace as well as a freshly loaded one -- which is what distinguishes
+// it from the ProviderDefaultSetMsg/ConnectedMsg/WindowSizeMsg replays
+// beside it, all three of which exist to catch a workspace up on what it
+// missed by not existing yet.
+//
+// A workspace that does not handle it is unaffected. The ID is carried so a
+// handler can assert it is the one being talked about rather than inferring
+// it.
+type WorkspaceActivatedMsg struct{ ID WorkspaceID }
+
+// CloseWorkspaceOverlayMsg asks Root to close an overlay a workspace
+// opened, IF that exact overlay is still the one on screen.
+//
+// The identity check is the point: between a workspace asking and Root
+// acting, something else may have opened an overlay of its own, and
+// closing whatever happens to be up would be a workspace reaching into a
+// surface it does not own.
+//
+// # Why a workspace needs this at all
+//
+// An open overlay takes every key, esc included (dispatchKey's first
+// branch). So an overlay that has finished its job and stays up does not
+// merely look stale -- it holds the keyboard. F15's diff card finishes its
+// job the instant an apply lands: it then reads "Applied", and the undo it
+// promises in its own status line ("ctrl+z undoes it in one press") CANNOT
+// REACH THE BUFFER while it is still on screen, because review mode binds
+// no ctrl+z and the card swallows the key. F9b's Done-when #6 is only true
+// through the UI if the card gets out of the way, and this is how it does.
+type CloseWorkspaceOverlayMsg struct{ Overlay Overlay }
+
+// WorkspaceDeactivatedMsg tells a workspace it is no longer the one on
+// screen. ID is the workspace LEAVING -- itself.
+//
+// # Why both halves have to exist
+//
+// This one was missing, and its absence was not a gap a workspace could
+// work around: a workspace is told nothing about the others, so without
+// it "am I on screen" could only ever latch TRUE on the first switch in.
+// The Editor gated its deferred diff card on that flag; the flag was
+// never cleared, so the gate never engaged and a card that finished while
+// the user was in Chat opened over Chat -- trapping every key they typed,
+// in a workspace the card had nothing to do with. Worse, the card's own
+// apply message then fell through Root to the ACTIVE workspace and was
+// silently ignored, so pressing Enter on it did nothing at all.
+//
+// The lesson, written here because it is the sort that repeats: a
+// workspace cannot infer a transition it is not told about. An "activated"
+// message alone describes half a transition, and the half it leaves out is
+// the one a workspace needs in order to stop doing things to the screen.
+type WorkspaceDeactivatedMsg struct{ ID WorkspaceID }
+
+// backgroundWorkspaceMsg is a DeliverToWorkspace message on its way back to
+// the workspace that produced it.
+//
+// Addressed, because the alternative does not work: Root's fall-through
+// hands an unrecognised message to `r.current()`, so a timer armed by an
+// inactive workspace would be delivered to whichever workspace happened to
+// be on screen when it fired -- which is how the settle tick was being lost
+// even in the cases where the command itself survived.
+type backgroundWorkspaceMsg struct {
+	id  WorkspaceID
+	msg tea.Msg
+}

@@ -216,6 +216,14 @@ func run() error {
 			// already use.
 			Autosave:      cfg.AutosaveMode(),
 			AutosaveDelay: cfg.AutosaveDelay(),
+			// F15: the stored provider default, so the session the
+			// Editor creates for its own agent invocations resolves the
+			// provider the user actually picked rather than config.toml's
+			// -- which in Demo mode is a different provider entirely. A
+			// VALUE off the same State, read-only; this does not make the
+			// editor a third writer of state.json, and the two fields
+			// Root owns are not involved.
+			Provider: state.Provider,
 		})
 	}
 

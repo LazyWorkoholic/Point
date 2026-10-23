@@ -901,8 +901,8 @@ func (r *Root) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		settingsCmd := r.handleSettingsEnvelope(m.Envelope)
 		ws, wsCmd := r.current().Update(m)
 		r.storeCurrent(ws)
-		r.deliverBackgroundReply(m)
-		return r, tea.Batch(r.afterBackend(), wsCmd, pickerCmd, settingsCmd)
+		bgCmd := r.deliverBackgroundReply(m)
+		return r, tea.Batch(r.afterBackend(), wsCmd, pickerCmd, settingsCmd, bgCmd)
 
 	case openOverlayMsg:
 		// tray.go's OnSelect cannot assign r.overlay itself: it runs inside
@@ -910,6 +910,43 @@ func (r *Root) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// r.overlay is ever assigned". So it asks, here.
 		r.OpenOverlay(m.o)
 		return r, nil
+
+	case CloseWorkspaceOverlayMsg:
+		// Only if it is still the one on screen -- see the message's doc.
+		// setOverlay is the one place r.overlay is ever assigned, so this
+		// goes through it rather than clearing the field.
+		if m.Overlay != nil && r.overlay == m.Overlay {
+			r.setOverlay(nil)
+			r.recompute()
+		}
+		return r, nil
+
+	case backgroundWorkspaceMsg:
+		// A DeliverToWorkspace message, back at the workspace that
+		// produced it -- whether or not that workspace is active now.
+		// Re-resolved from the map rather than from a captured pointer,
+		// so one addressed to a workspace that has since been unloaded is
+		// dropped instead of reviving it.
+		ws, loaded := r.workspaces[m.id]
+		if !loaded {
+			return r, nil
+		}
+		updated, cmd := ws.Update(m.msg)
+		r.workspaces[m.id] = updated
+		if m.id == r.active {
+			// It is on screen again, so its commands are ordinary
+			// commands.
+			return r, cmd
+		}
+		// Still backgrounded: the same rule applies to whatever this
+		// produced, so a chain of allow-listed messages keeps working.
+		return r, r.backgroundCmd(m.id, cmd)
+
+	case SendToChatMsg:
+		// F15's `send to chat`. Root routes it because workspaces never
+		// talk to each other and because Chat may not be loaded — see
+		// editoragent.go.
+		return r, r.sendToChat(m)
 
 	case OpenWorkspaceOverlayMsg:
 		// B9, F13b: the same destination, reached from OUTSIDE this
@@ -1453,7 +1490,9 @@ func (r *Root) dispatchKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return r.handleLeaderKey(key)
 	}
 
-	if key == actions.Leader {
+	// EITHER leader key starts a chord -- see actions.Leader's own doc on
+	// why there are two and why neither is a fallback.
+	if actions.IsLeader(key) {
 		r.leader.pending = true
 		r.leader.sequence = ""
 		r.leader.showHint = false
@@ -1502,7 +1541,7 @@ func (r *Root) forwardKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 func (r *Root) handleLeaderKey(key string) (tea.Model, tea.Cmd) {
-	if key == "esc" || key == actions.Leader {
+	if key == "esc" || actions.IsLeader(key) {
 		r.clearLeader()
 		return r, nil
 	}
@@ -1528,16 +1567,35 @@ func (r *Root) handleLeaderKey(key string) (tea.Model, tea.Cmd) {
 	}
 
 	r.clearLeader()
-	r.status = fmt.Sprintf("no action bound to %s %s", actions.Leader, seq)
+	r.status = fmt.Sprintf("no action bound to %s %s", actions.LeaderLabel, seq)
 	return r, nil
 }
 
 // deliverKey hands one key to the current workspace — used for a key the paste
 // detector held and then decided was an ordinary keystroke.
+// deliverKey replays a key the burst detector held or reassembled.
+//
+// It goes through dispatchKey, NOT straight to the workspace, and that is a
+// correction: it used to call r.current().Update(k) directly, which skipped
+// the whole dispatch chain -- the overlay trap, the leader state, the chord
+// table and KeyCapturer.
+//
+// A replayed key must take the same path as a live one. The detector holds
+// EVERY pasteable key for 6ms (pasteBurstGap) before letting it through, so
+// a key pressed a moment before an overlay opened, or before a leader chord
+// began, was delivered into the buffer afterwards as though neither had
+// happened. That window is small and the conditions are exactly the ones
+// F15's gate hit: a busy Update loop during a ghost stream, and a workspace
+// load.
+//
+// This is NOT the chord leak the gate's cause log recorded (see
+// editor\keys.go's note on modifier-dropped chords -- that one happens
+// inside bubbletea's Windows key reader, before Point sees the event). It
+// is a second, independent way for a keystroke to arrive somewhere it was
+// not aimed, found while looking for the first.
 func (r *Root) deliverKey(k tea.KeyMsg) tea.Cmd {
 	save := r.schedulePositionSave()
-	ws, cmd := r.current().Update(k)
-	r.storeCurrent(ws)
+	_, cmd := r.dispatchKey(k)
 	return tea.Batch(cmd, save)
 }
 
@@ -1771,7 +1829,7 @@ func (r *Root) dispatchMouse(m tea.MouseMsg) (tea.Model, tea.Cmd) {
 
 func (r *Root) retryHint() string {
 	if a, ok := r.actions.ByID("backend.retry"); ok && a.Leader != "" {
-		return fmt.Sprintf("%s %s to retry", actions.Leader, a.Leader)
+		return fmt.Sprintf("%s %s to retry", actions.LeaderLabel, a.Leader)
 	}
 	return "retry from the palette"
 }
@@ -1794,19 +1852,27 @@ func (r *Root) retryHint() string {
 //     costs one lookup. Nothing here has to know which envelopes belong to
 //     whom, which is the same division F2 already draws.
 //
-//   - The returned tea.Cmd is DROPPED, and that is the point rather than
-//     an oversight. The one thing a write reply produces is say(), which
-//     becomes a WorkspaceStatusMsg -- and that message carries no
-//     workspace id, so Root would print "saved main.go" over the status
-//     bar of whatever the user is actually looking at. A background
-//     workspace may reconcile its own state; it may not take the status
-//     line. The reconciliation is the whole value: doc.saving is cleared,
-//     the new mtime is recorded, and the file is saveable again when the
-//     user comes back.
+//   - The returned tea.Cmd is FILTERED, default-deny, through
+//     BackgroundCmdFilter (contribute.go). It used to be dropped outright,
+//     and the reasoning for that is still why the default is deny: the one
+//     thing a write reply produces is say(), which becomes a
+//     WorkspaceStatusMsg -- and that message carries no workspace id, so
+//     Root would print "saved main.go" over the status bar of whatever the
+//     user is actually looking at. A background workspace may reconcile
+//     its own state; it may not take the status line.
+//
+//     What F15 found is that "drop everything" is too wide by exactly two
+//     messages: the command that OPENS a finished fill's diff card, and
+//     the timer that decides a fill produced no proposal. Both were
+//     thrown away, so a fill that completed while the user was in Chat
+//     left a frozen ghost and no card. say() is still dropped -- it is
+//     not on any allow-list -- so nothing about the status-line rule
+//     changed.
 //
 // Nothing is delivered to the active workspace twice: r.active is skipped
 // explicitly.
-func (r *Root) deliverBackgroundReply(m protocol.EnvelopeMsg) {
+func (r *Root) deliverBackgroundReply(m protocol.EnvelopeMsg) tea.Cmd {
+	var cmds []tea.Cmd
 	for id, ws := range r.workspaces {
 		if id == r.active {
 			continue
@@ -1815,7 +1881,59 @@ func (r *Root) deliverBackgroundReply(m protocol.EnvelopeMsg) {
 		if !ok || !br.WantsBackgroundReplies() {
 			continue
 		}
-		updated, _ := ws.Update(m)
+		updated, cmd := ws.Update(m)
 		r.workspaces[id] = updated
+		if c := r.backgroundCmd(id, cmd); c != nil {
+			cmds = append(cmds, c)
+		}
+	}
+	return tea.Batch(cmds...)
+}
+
+// backgroundCmd wraps one command an INACTIVE workspace returned so that
+// whatever it produces is judged on arrival.
+//
+// Judged on arrival rather than before being handed over, because a
+// tea.Cmd is a function and the only way to see its message is to run it --
+// and running a tea.Tick here would block Update for the length of the
+// timer. So the command is passed to the runtime as normal, in its own
+// goroutine, and the verdict is applied to the message it eventually
+// yields. A denied message becomes nil, which is what every tea.Cmd with
+// nothing to say returns.
+//
+// The filter is captured rather than re-looked-up, and that is safe: it is
+// a pure predicate over a message type, so a workspace unloaded between the
+// arming and the firing still answers the same question. WHERE the message
+// is delivered is re-resolved from the map at delivery time instead (see
+// the backgroundWorkspaceMsg case in Update), so a message addressed to a
+// workspace that has since gone away is dropped rather than reviving it.
+//
+// A tea.BatchMsg is denied like anything else not on the list. It cannot be
+// filtered element-wise without running its parts, and nothing on the
+// allow-list is produced inside a batch today -- stated because a future
+// allow-listed message wrapped in a tea.Batch would silently stop arriving,
+// and this is where to look.
+func (r *Root) backgroundCmd(id WorkspaceID, cmd tea.Cmd) tea.Cmd {
+	if cmd == nil {
+		return nil
+	}
+	filter, ok := r.workspaces[id].(BackgroundCmdFilter)
+	if !ok {
+		// Default deny: exactly the behaviour every workspace had before
+		// this seam existed.
+		return nil
+	}
+	return func() tea.Msg {
+		msg := cmd()
+		if msg == nil {
+			return nil
+		}
+		switch filter.AllowBackgroundMsg(msg) {
+		case DeliverToRoot:
+			return msg
+		case DeliverToWorkspace:
+			return backgroundWorkspaceMsg{id: id, msg: msg}
+		}
+		return nil
 	}
 }

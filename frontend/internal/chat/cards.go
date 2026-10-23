@@ -360,6 +360,27 @@ func taskLine(th theme.Theme, t app.TaskRow, width int) string {
 		right = "done"
 	}
 
+	// The label is truncated HERE, with an ellipsis, rather than left to
+	// overlayRight's own unmarked cut.
+	//
+	// F15's gate reported the row as reading "filler-explaine done" and
+	// read it as a mis-spelled or mis-built agent name. It was neither:
+	// the arithmetic was correct and the name was cut by exactly one cell
+	// at a narrow pane width (a 22-cell content width leaves 17 for the
+	// glyph, a space and the label, and "filler-explainer" needs 18). An
+	// unmarked truncation is indistinguishable from a wrong string, which
+	// is why every other truncation in this codebase carries a marker --
+	// paneBox's own title uses runewidth.Truncate(title, max, "…").
+	//
+	// Done in this function rather than in overlayRight because that
+	// helper is shared with three other callers whose right-hand notes are
+	// hints rather than labels; widening its contract would change rows
+	// this episode has no business changing.
+	room := width - visibleWidth(right) - 1 - 2 // the note, its gap, the glyph and its space
+	if room > 0 && visibleWidth(label) > room {
+		label = runewidth.Truncate(label, room, "…")
+	}
+
 	left := th.Style(role).Render(icon+" ") + th.Style(theme.TextPrimary).Render(label)
 	note := th.Style(theme.TextDim).Render(right)
 	return overlayRight(padCells(left, width), note, width)

@@ -107,6 +107,44 @@ func (w *Workspace) saveDoc(d *doc, reason saveReason, overwrite bool) tea.Cmd {
 		return nil
 	}
 
+	// F15: autosave never writes a buffer that already matches the file.
+	//
+	// This is the fix for the regression F15's own gate caught, and it is
+	// a correction to this episode's first attempt at it rather than a new
+	// rule. The first attempt stopped `onDiffApply` arming the timer,
+	// which is necessary and not sufficient: `ctrl+z` is a Splice like any
+	// other, so the UNDO of an agent-applied region armed the timer
+	// instead, and one second later this function wrote the file back with
+	// byte-identical content and a new mtime. Measured at the gate: app.py
+	// moved by 13,685,491,607,487 ticks across an apply-then-undo that was
+	// never supposed to touch it, with its content unchanged -- which is
+	// exactly the signature of a no-op write.
+	//
+	// Stated as a rule rather than as a special case for undo: autosave
+	// exists to persist DIVERGENCE from the file, and there is nothing to
+	// persist when there is none. Done this way, F13b's autosave rule 4
+	// ("Undo, Redo and ApplyRegion all splice, so all three arm the timer
+	// here") is untouched -- the timer still arms and still fires, it
+	// simply has nothing to write.
+	//
+	// The dirty marker is cleared with it, which is the honest reading of
+	// the same fact: a buffer identical to the file has no unsaved work,
+	// so "- modified" was describing the undo history rather than the
+	// file. applyReload already makes exactly that call in words ("The
+	// buffer now matches disk, so it is not dirty -- regardless of what
+	// the undo history still holds").
+	//
+	// Only on the AUTOSAVE path. An explicit ctrl+s is the user asking,
+	// and F13b's Done-when 2 is about what a manual save round-trips;
+	// quietly declining one would be a different change to a shipped,
+	// verified surface. The content check is also not cheap enough to run
+	// per keystroke in markDirty -- here it runs at most once per
+	// autosave tick.
+	if reason == saveAuto && d.matchesDisk() {
+		d.dirty = false
+		return nil
+	}
+
 	if d.saving {
 		// A write is already in flight. Record that the buffer has moved
 		// since it went out, so the reply does not clear the dirty
@@ -149,8 +187,33 @@ func (w *Workspace) saveDoc(d *doc, reason saveReason, overwrite bool) tea.Cmd {
 	d.saving = true
 	d.savedWhileSaving = false
 	d.manualSave = reason == saveManual
+	// EVERY write is logged, at the moment it goes out.
+	//
+	// It was not, and the gap was not harmless: doSend logs only on a
+	// marshal or send FAILURE, so a successful write left no trace in
+	// frontend.log at all -- and gate_f15.ps1's "no write was even
+	// attempted" assertion grepped for "WriteProjectFile", a string that
+	// therefore could never appear. It passed in every run, including the
+	// runs where the file demonstrably WAS written, and so it silently
+	// certified three rounds of claimed fixes. An assertion that cannot
+	// fail is worse than no assertion, because it is read as evidence.
+	//
+	// The reason and the byte count are included because the question
+	// this line has to answer is never "was there a write" alone -- it is
+	// "which action wrote, and was it the user asking".
+	w.log.Info("editor: WriteProjectFile sent",
+		"file", d.name(), "reason", reasonName(reason),
+		"bytes", len(payload["content"].(string)), "overwrite", overwrite)
 	w.send(protocol.CmdWriteProjectFile, queryWriteFile, payload)
 	return nil
+}
+
+// reasonName is saveReason as a word, for the log line above.
+func reasonName(r saveReason) string {
+	if r == saveManual {
+		return "manual (ctrl+s)"
+	}
+	return "autosave"
 }
 
 // writeEnding is C4: which line ending a save actually writes.
@@ -277,6 +340,13 @@ func (w *Workspace) onWriteSucceeded(d *doc, p wireWritten) tea.Cmd {
 		return nil
 	}
 	d.dirty = false
+	// The file and the buffer now agree, and this is one of the only
+	// three moments that is true -- see setDiskBaseline. Inside the
+	// non-savedWhileSaving branch deliberately: that flag means the
+	// buffer moved WHILE the write was in flight, so the current text is
+	// not what was written and recording it as the disk baseline would
+	// claim a match that never existed.
+	d.setDiskBaseline()
 	return w.say("saved " + d.name())
 }
 

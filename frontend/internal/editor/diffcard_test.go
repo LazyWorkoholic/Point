@@ -383,26 +383,49 @@ func TestApplyingAnUnchangedProposalIsRefusedWithAReason(t *testing.T) {
 // When #7 is really built, this test is the one to change -- deliberately,
 // with the backend's generation-time pair arriving through
 // DiffCardOptions.
-func TestTheStalenessPairIsCarriedAndUnpopulated(t *testing.T) {
+func TestACardWithNoRecordedPairSkipsTheDiskGuard(t *testing.T) {
 	ws, c := cardWorkspace(t)
 
+	// F9b's own tripwire, TestTheStalenessPairIsCarriedAndUnpopulated,
+	// asserted that these two fields stay ZERO and that the apply is NOT
+	// gated on them -- because the pair as of region generation existed
+	// nowhere in the backend, and F9b refused to fill them from
+	// `doc.mtime`, which is the open/last-save moment and fails in both
+	// directions.
+	//
+	// B36 added the real pair to FillProposal and F15 fills these from it.
+	// The invariant this file holds is therefore now the OTHER half of it:
+	// a card that nobody gave a pair to (this helper, and any future
+	// caller holding a proposal from somewhere other than B24's event)
+	// still applies, with the disk guard skipped and said so in the log
+	// rather than silently assumed to have passed.
+	//
+	// The real invariant -- populated, non-zero, GATING -- is
+	// TestTheStalenessPairIsPopulatedFromTheProposal and the three
+	// CheckFileStale tests beside it in invoke_test.go.
+	// The FLAG is what the guard reads, so the flag is what this asserts.
+	// It used to assert the float was zero, which was testing the
+	// sentinel rather than the fact -- and the sentinel was the thing
+	// that needed replacing (a real file can be stamped at the epoch, and
+	// an empty file's size really is 0).
+	if c.HasRecordedPair {
+		t.Error("a card built without a proposal claims a generation-time pair")
+	}
 	if c.RecordedMtime != 0 || c.RecordedSize != 0 {
-		t.Errorf("RecordedMtime/Size = %v/%v, want 0/0 this episode",
-			c.RecordedMtime, c.RecordedSize)
+		t.Errorf("RecordedMtime/Size = %v/%v, want 0/0 for a card built "+
+			"without a proposal", c.RecordedMtime, c.RecordedSize)
 	}
 
-	// The target has a real mtime from its read; the card must not have
-	// borrowed it.
+	// The target has a real mtime from its read; the card must still not
+	// have borrowed it.
 	ws.docs[0].mtime, ws.docs[0].size = 1791623519.07509, 4096
 	if c.RecordedMtime == ws.docs[0].mtime {
 		t.Error("the card took the document's open-time mtime")
 	}
 
-	// And an apply is NOT gated on it: #7 is absent, not half-built, so a
-	// proposal applies with the pair at zero.
 	apply(t, ws, c)
 	if !c.Applied() {
-		t.Errorf("the apply was gated on the unpopulated pair: %q", c.refusal)
+		t.Errorf("a card with no recorded pair did not apply: %q", c.refusal)
 	}
 }
 

@@ -26,6 +26,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
+	"github.com/lazyworkoholic/point/frontend/internal/actions"
 	"github.com/lazyworkoholic/point/frontend/internal/app"
 	"github.com/lazyworkoholic/point/frontend/internal/protocol"
 )
@@ -300,7 +301,15 @@ const lockReason = "queue full — esc to discard pending"
 // the query area shows this instead of the input the moment nothing has
 // been chosen yet, naming the exact chord that fixes it (actions.go's
 // settings.open, leader "s").
-const providerMissingReason = "no provider configured — ctrl+w s to set one up"
+//
+// The leader is NAMED from actions rather than typed out. It read
+// "ctrl+w s" until F15's close -- the legacy half of a dual binding, and
+// the half that cannot be relied on (actions.Leader's doc has the
+// mechanism). This is the one surface a first-run user sees before
+// anything works, so advertising the unreliable key here was the worst
+// place for it.
+var providerMissingReason = "no provider configured — " +
+	actions.KeyLabel(actions.Leader) + " s to set one up"
 
 // ---------------------------------------------------------------------------
 // Sending

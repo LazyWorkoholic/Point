@@ -1,6 +1,8 @@
 package app
 
 import (
+	"github.com/mattn/go-runewidth"
+
 	"fmt"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -88,6 +90,20 @@ func newPaletteOverlay(root *Root) *Popup {
 		Title: "Command Palette",
 		Tabs:  []PopupTab{{Items: items}},
 		MinW:  70, MinH: 16, // matches Help's size — see the file doc above
+		// The binding column asks for exactly what its longest label
+		// needs, rather than taking rowWidths' 24-cell default.
+		//
+		// F15 gave the leader and quit a SECOND binding each, and both
+		// are shown ("f3 / ctrl+q · F2 / ctrl+w q" is 27 cells), so the
+		// default cut one mid-key. Widening the POPUP does not fix that
+		// -- the cap is on the column, not the row -- and NoteW is the
+		// lever rowWidths provides for exactly this, clamped there so
+		// the name column keeps its 16 readable cells.
+		//
+		// Measured from the items rather than written down, so an action
+		// with a longer binding widens the column instead of losing a
+		// key on screen.
+		NoteW: longestBinding(items),
 		OnSelect: func(it *array.Item) (tea.Cmd, bool) {
 			a, ok := root.actions.ByID(it.GetID())
 			if !ok {
@@ -119,6 +135,8 @@ func newHelpOverlay(root *Root) *Popup {
 		Title: "Help",
 		Tabs:  []PopupTab{{Items: items}},
 		MinW:  70, MinH: 16,
+		// See the palette's own note on why this is measured.
+		NoteW: longestBinding(items),
 		// No OnSelect: browsing help has nothing to run. Enter on a row
 		// therefore does nothing; esc is how you leave.
 	})
@@ -132,12 +150,27 @@ func newHelpOverlay(root *Root) *Popup {
 func bindingLabel(a actions.Action[*Root]) string {
 	switch {
 	case a.Chord != "" && a.Leader != "":
-		return fmt.Sprintf("%s · %s %s", a.Chord, actions.Leader, a.Leader)
+		return fmt.Sprintf("%s · %s %s", a.ChordLabel(), actions.LeaderLabel, a.Leader)
 	case a.Chord != "":
-		return a.Chord
+		return a.ChordLabel()
 	case a.Leader != "":
-		return fmt.Sprintf("%s %s", actions.Leader, a.Leader)
+		return fmt.Sprintf("%s %s", actions.LeaderLabel, a.Leader)
 	default:
 		return "—"
 	}
+}
+
+// longestBinding is the widest binding label among these items, for a
+// popup's NoteW.
+//
+// Zero when nothing has a binding, which is what rowWidths reads as "use
+// the default" -- so a popup of plain rows is unaffected.
+func longestBinding(items []*array.Item) int {
+	widest := 0
+	for _, it := range items {
+		if w := runewidth.StringWidth(it.GetBinding()); w > widest {
+			widest = w
+		}
+	}
+	return widest
 }

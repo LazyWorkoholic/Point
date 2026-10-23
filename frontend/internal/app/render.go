@@ -399,9 +399,9 @@ func (r *Root) bindingsHint(width int) string {
 		}
 		switch {
 		case a.Chord != "":
-			parts = append(parts, a.Chord+" "+strings.ToLower(a.Name))
+			parts = append(parts, a.ChordLabel()+" "+strings.ToLower(a.Name))
 		case a.Leader != "":
-			parts = append(parts, actions.Leader+" "+a.Leader+" "+strings.ToLower(a.Name))
+			parts = append(parts, actions.LeaderLabel+" "+a.Leader+" "+strings.ToLower(a.Name))
 		}
 	}
 	return fitHints(parts, width)
@@ -421,12 +421,12 @@ func (r *Root) leaderHint(width int) string {
 		parts = append(parts, a.Leader+" "+a.Name)
 	}
 	if len(parts) == 0 {
-		return actions.Leader + r.leader.sequence + " — nothing bound"
+		return actions.LeaderLabel + " " + r.leader.sequence + " — nothing bound"
 	}
 	// The prefix is never dropped: it is what tells the user the leader is
 	// pending at all, and a hint bar with no leader on it reads as the
 	// ordinary bindings line.
-	prefix := actions.Leader + " " + r.leader.sequence + hintGap
+	prefix := actions.LeaderLabel + " " + r.leader.sequence + hintGap
 	return prefix + fitHints(parts, width-runewidth.StringWidth(prefix))
 }
 

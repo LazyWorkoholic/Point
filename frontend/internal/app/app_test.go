@@ -502,6 +502,14 @@ func key(s string) tea.KeyMsg {
 		return tea.KeyMsg{Type: tea.KeyCtrlP}
 	case "ctrl+w":
 		return tea.KeyMsg{Type: tea.KeyCtrlW}
+	case "f1":
+		return tea.KeyMsg{Type: tea.KeyF1}
+	case "f2":
+		return tea.KeyMsg{Type: tea.KeyF2}
+	case "f3":
+		return tea.KeyMsg{Type: tea.KeyF3}
+	case "ctrl+q":
+		return tea.KeyMsg{Type: tea.KeyCtrlQ}
 	default:
 		return tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(s)}
 	}

@@ -536,7 +536,62 @@ SESSION  EPISODE                          MODEL         WHY
                                                        caller silently changing
                                                        meaning is exactly the shape
                                                        B12 bug 2 had.
-19       F15 explainer integration        Opus medium   ghost text + apply semantics
+19       F15 explainer integration        Opus medium   SPENT, and the estimate was
+                                                        right about the BUILD and wrong
+                                                        about the episode. Ghost text and
+                                                        apply semantics went in as planned.
+                                                        The cost was the gate: four defects
+                                                        that were not in the Build section,
+                                                        two of them in code F15 only
+                                                        EXPOSED -- bubbletea's Windows
+                                                        chord leak (upstream of Point,
+                                                        mitigated with F2/F3), the inline
+                                                        prompt's undo coalescing, ctrl+c's
+                                                        double meaning, and the ghost's
+                                                        scroll architecture, which needed a
+                                                        rewrite rather than a patch.
+                                                        The F6 rule below is the one that
+                                                        predicted this and it was not
+                                                        consulted: F15 touches the KEY
+                                                        DISPATCHER, the row/hit-test
+                                                        arithmetic and the autosave trigger
+                                                        -- three shared contracts, each with
+                                                        several episodes already depending
+                                                        on it. The risk was never in ghost
+                                                        text. Stayed at Opus throughout,
+                                                        which the fix-up rule would have
+                                                        required anyway: three of the four
+                                                        had a wrong first hypothesis, and
+                                                        two were only settled by
+                                                        instrumenting instead of theorising.
+19b      F9d apply-time guard order       Opus medium   RUNS AFTER 19 -- the guard
+                                                        F9a hazard-1 names is "not
+                                                        reachable" until F15 adds the
+                                                        first WriteProjectFile caller
+                                                        from an applied diff. B36
+                                                        (19a) fixed the PRIMITIVE
+                                                        (CheckFileStale is now
+                                                        session-scoped, via
+                                                        _attachment_scope); this
+                                                        session has to read F15's
+                                                        REAL save-path code, not the
+                                                        task doc's plan, and pick
+                                                        between a pre-write guard
+                                                        call and a direct fix to
+                                                        _handle_write_project_file's
+                                                        own resolution -- an open
+                                                        decision, not a pre-made one,
+                                                        on the same destructive write
+                                                        path B32 (17c) and F9b (18d)
+                                                        both rated Opus-tier for
+                                                        exactly that reason. Stay at
+                                                        medium if the two-option
+                                                        choice is clean from F15's
+                                                        code; escalate to high if it
+                                                        isn't, and treat a need for a
+                                                        THIRD shape as new design,
+                                                        not execution -- stop and
+                                                        tell Aryan before continuing.
 20       B15 lifecycle + crash recovery   Opus high     demo-critical, easy to fake
 21       B14 usage + limits               Sonnet medium SQL and arithmetic
 22       F14 editor terminal              Sonnet high   ExecProcess is a known pattern
@@ -587,6 +642,59 @@ SESSION  EPISODE                          MODEL         WHY
 25       F16 polish                       Sonnet medium audits and checklists
 26       F17 web preview                  Sonnet high   small, well specced
 27       B17 hardening                    Sonnet high   tests are mechanical
+
+28       F21 multi-line fill prompt       Sonnet high   PART 2. Scheduled after v1 ships,
+                                                        time permitting — otherwise
+                                                        deferred to a later session. Two sessions: B37 first
+                                                        (prompt delimiting), then F21.
+                                                        Sonnet because the spec names the
+                                                        decisions and the row index
+                                                        already handles the hard part --
+                                                        a multi-line prompt is the same
+                                                        viewrows.go block with a bigger
+                                                        row count. The one open question
+                                                        is which newline key arrives
+                                                        distinctly on Windows, and that is
+                                                        a MEASUREMENT, not a judgement.
+                                                        If it turns into a second round,
+                                                        the fix-up rule applies: Windows
+                                                        key-reader questions cost F15
+                                                        three rounds at Opus.
+29       F22 explain as conversation      Opus medium   PART 2. Scheduled after v1 ships,
+                                                        time permitting — otherwise
+                                                        deferred to a later session. Two sessions: B38 first,
+                                                        and B38 is where the Opus goes.
+                                                        Its three decisions are real
+                                                        design -- history replay vs
+                                                        summary, whether the region is
+                                                        re-read per turn, and the token
+                                                        bound -- and the second one is
+                                                        B36's failure class one layer up:
+                                                        an answer paired with a region
+                                                        read at a different moment. B36
+                                                        and B24 both rated this kind of
+                                                        question Opus-tier for exactly
+                                                        that reason. The panel itself is
+                                                        Sonnet work sitting behind it.
+30       F23 fill on a blank line         Opus high     PART 2. Scheduled after v1 ships,
+                                                        time permitting — otherwise
+                                                        deferred to a later session. Two sessions: B39 first.
+                                                        Opus HIGH, and not for the new
+                                                        feature. The risk is the EXISTING
+                                                        rewrite path: a generation mode
+                                                        needs validation as an insertion
+                                                        point rather than a range inside a
+                                                        shown region, and the cheap way to
+                                                        get there is to loosen B24's
+                                                        check -- which would silently
+                                                        weaken every rewrite proposal too.
+                                                        A third mode rather than a flag on
+                                                        fill is the same call for the same
+                                                        reason (B11's AgentConfig retrofit
+                                                        trap). Changing a validated,
+                                                        shipped guard to admit a new case
+                                                        is the shape of work B32 and F9b
+                                                        both rated Opus-tier.
 
 F6 is the cautionary entry. "Mostly wiring events to cards" was a fair reading
 of the spec and wrong about the work: the build was a day, the verification gate

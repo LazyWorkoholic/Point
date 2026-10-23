@@ -36,6 +36,47 @@ import (
 func (w *Workspace) handleKey(k tea.KeyMsg) tea.Cmd {
 	key := k.String()
 
+	// COPY, always, before anything else can claim the key.
+	//
+	// Above the modal surfaces on purpose: ctrl+c means copy in this
+	// workspace whatever is on screen, and a prompt or panel that took it
+	// as a cancel would be the scoped-ctrl+c design copy.go rejects.
+	if key == "ctrl+c" {
+		return w.copySelection()
+	}
+
+	// F15's two modal surfaces come FIRST, before the keys that work in
+	// either pane and before the pane split. Both are things the user just
+	// opened and is looking at, and neither can share the keyboard with a
+	// text buffer: the prompt is being typed into, and the panel scrolls
+	// with the same keys that would otherwise move the caret.
+	//
+	// The prompt is checked before the panel because only one of the two
+	// can be open at a time in practice (fill opens the prompt, explain
+	// opens the panel) and a fixed order is still worth having over
+	// whichever-happens-to-be-non-nil.
+	if w.prompt != nil {
+		switch w.prompt.key(k) {
+		case promptSubmit:
+			return w.submitPrompt()
+		case promptCancel:
+			w.prompt = nil
+			return w.say("fill cancelled — nothing was sent")
+		}
+		return nil
+	}
+	if w.panel != nil {
+		return w.panelKey(k)
+	}
+
+	// esc with a fill STREAMING and no surface open: the ghost is on
+	// screen and the task is running, which is Done-when 3c. Reached
+	// because CapturesKey claims esc while a surface is open -- and the
+	// ghost counts as one, since it is what esc is cancelling.
+	if key == "esc" && w.liveInvocation() {
+		return w.cancelInvocation()
+	}
+
 	// Keys that work in either pane.
 	switch key {
 	case "ctrl+o":

@@ -56,6 +56,9 @@ fix this table.
 | B35 | Two artefacts B20 committed and nobody read | P2 | no | — | not started — `CLAUDE.md` has been mojibake'd since `790e0c2` (B20, 2026-09-24): 24 lines carry `â€”` for an em-dash, plus an undeliberate BOM. Same bug class as B33, but a pre-existing instance B33's after-check could not see because it compared the working tree, never committed history. The same commit also added `backend\direct.json` and `backend\wire.json` — byte-identical UTF-16LE `context.report` dumps that git stores as binary and nothing reads. Two root causes, one commit. Found during a repo-wide verification pass over B33/F13b at `fdc6cf7`. Does not reopen B33 |
 
 | B36 | Generation-time staleness for the Filler's proposal | P1 | no | B24, B7 | ✅ built — see `completed/backend/B36-generation-time-staleness.md`. `FillProposal` now carries `(mtime, size)` stat'd from the exact file descriptor `_render_editor_context` reads the region from; `CheckFileStale` accepts `session_id` (resolves the SESSION's own scope, `_attachment_scope`, over `_resolve_optional_project`'s path walk-up — B12 bug #2) and `size` (a real, additively-optional comparison) as real fields. **Unblocks F9's Done-when #7 and F9a's hazard-1 guard order — neither is built yet; both are frontend work, now scheduled (#7 in Session 19/F15, hazard-1 in the new Session 19b).** Full account, including what each caller shape gets, in the completed doc |
+| B37 | Delimit a multi-line fill request in the rendered prompt | P2 | no | B24, B11 | not started — **spec only, the backend half of F21**. The user's request travels as `text` in `CmdSendMessage` and `_render_editor_context` drops it into a prompt that already contains a newline-separated instruction block (`Respond with exactly one JSON object…`). A single-line request cannot collide with that; a multi-line one can, and not only from an attacker — an ordinary second line reading "ignore the shown region" or "answer in plain text" is enough. **This episode decides how a multi-line request is delimited** so the model can tell the request from Point's own instructions, and what happens to a request containing the delimiter. F21 must NOT work around a missing B37 by flattening newlines before sending — that would ship the bug invisibly. See `../frontend/F21-multiline-fill-prompt.md`. **Scheduled after v1 ships, time permitting — otherwise deferred to a later session.** |
+| B38 | Multi-turn explain: history, region re-read, token bound | P2 | no | B11, B24, B36 | not started — **spec only, the backend half of F22, and the larger half**. Three decisions, none of which exists today: (1) whether a follow-up replays the prior exchange as message history or as a summary; (2) whether `editor_context` is re-sent per turn — the region shown with answer 1 may not be the region on screen at question 3, which is the same pair-a-region-with-a-stale-read failure **B36** exists to prevent, one layer up; (3) the token bound and what happens at it. F15 already created the Editor-owned session these turns would accumulate in (lazily, because `SendMessage` requires one) and `chat\protocol.go` filters it out of Chat's list — so the session exists and nothing decides what goes in it. See `../frontend/F22-explain-as-conversation.md`. **Scheduled after v1 ships, time permitting — otherwise deferred to a later session.** |
+| B39 | A generation mode for the Filler (no region to rewrite) | P2 | no | B24, B11, B36 | not started — **spec only, the backend half of F23, and the larger half of that episode**. Fill assumes a region exists: `resolve_scope` finds an enclosing scope or falls back to ±20 lines, the prompt asks for a `replacement` for `start_line`-`end_line`, and B24 rejects a range outside the shown region. On a blank line with no enclosing scope none of that describes the request. Owns: a THIRD `EditorContext.mode` (not a flag on fill — a flag means auditing every existing branch, which is how B11's `AgentConfig.background` retrofit trap worked); what the model is shown and how it is marked read-only; a generation instruction block that does **not** copy the `"<path>"` placeholder line (its own tracked bug, in the parking lot below and in `../frontend/F16-polish.md`); and **validation as an insertion point plus a length bound rather than a range inside a shown region — which must NOT be done by loosening the existing rewrite check**. The `(mtime, size)` pair is captured the same way B36 does, from the same descriptor as the read. See `../frontend/F23-fill-on-a-blank-line.md`. **Scheduled after v1 ships, time permitting — otherwise deferred to a later session.** |
 
 **B1–B5 are frozen.** Additive changes only — new columns, new optional fields.
 Never refactors.
@@ -124,6 +127,95 @@ never returns on stdin EOF. See `B06-schema-bootstrap.md` §9.
 
 Format: `[ ] item — why parked · hook · anchor · what unparking takes`
 `[✅] items - means it is written as an episode in above table and as a .md file.`
+
+- [ ] **The Filler's fill prompt shows the model a placeholder it copies
+      verbatim** — MEASURED during F15's gate work, against `qwen2.5:3b`
+      through Ollama's own `/api/chat`, five trials per arm with
+      byte-identical messages:
+
+      | arm | accepted | verdicts |
+      |---|---|---|
+      | as today | **2/5** | `file_mismatch` ×3, ACCEPTED ×2 |
+      | `+ format: "json"` | **0/5** | `file_mismatch` ×5 |
+
+      The dominant failure is not malformed JSON. It is that the model
+      returns `"file": "<path>"` -- the literal placeholder out of the
+      instruction's own schema line in `_render_editor_context`
+      (`managers\context.py`):
+
+      ```
+      {"file": "<path>", "start_line": <int>, "end_line": <int>, ...}
+      ```
+
+      It fills in the integers and echoes `<path>` as a string, and B24's
+      parser then correctly rejects it as `file_mismatch`. A raw reply from
+      each arm is in F15's completed doc.
+      · why parked: the fix is a PROMPT change -- name the file, or say
+      "use exactly this file name", instead of showing a placeholder -- and
+      a prompt change has to land alone to be measurable, which is B24's
+      own rule ("a prompt change and a new parser landing together make it
+      impossible to tell which one the numbers describe"). F15 is a
+      frontend episode and does not touch `managers\context.py`.
+      · this supersedes the three options that were assumed before the
+      measurement. **Ollama's `format: "json"` is not the cheap fix it
+      looked like**: it did not help here and made it worse, which is
+      consistent with constraining the decoder to valid JSON while leaving
+      the model free to put the wrong STRING in a valid field. It also
+      applies to the whole turn, so it would constrain explain-mode prose
+      too unless the provider is told which mode it is in -- and the
+      provider deliberately knows nothing about agents or modes
+      (`managers\context.py`'s business). A more tolerant parser remains
+      rejected by B24's own design ("never hunts embedded JSON").
+      · not comparable to B24's own 0/5: that run measured a different
+      failure (`end_line` reported as the replacement's length rather than
+      the shown region's span, giving `range_outside_shown`) from a
+      different cursor position. Both are the model's output format; they
+      are not the same defect, and a fix for one will not show up in the
+      other's number.
+      · hook: `backend\managers\context.py`'s fill-mode `instructions`
+      string.
+      · anchor: whichever episode first needs the fill path to work against
+      a REAL model rather than Demo's fixture. F15 does not -- it ships a
+      deterministic 5-line fixture and a 46-line one
+      (`POINT_DEMO_LONG_FILL=1`).
+      · what unparking takes: the prompt edit, alone, plus a before/after
+      against the same model and the same prompt. The arms above are
+      reproducible; a change claimed to improve compliance without a number
+      is not worth making.
+
+- [ ] **`manual_b28_demo_mode.py` asserts a `FillProposal` event does NOT
+      exist** — the assertion is `"no FillProposal event exists on the wire
+      -- none was emitted, by construction"`, and the event is on the wire
+      now, so step #8 of that script fails. Observed while running the
+      script during F15's work; NOT caused by F15 and not caused by F15's
+      demo-provider changes.
+
+      The dates settle it: the test file is at its committed state from
+      B28 (`fa6e88c`, `git status --porcelain` on it is empty), and
+      `FillProposal` was added later by B24 (`ab1743d`), which never came
+      back to update B28's assertion. So this has been failing since B24.
+      The event is CORRECT -- it is what F15 consumes -- and the assertion
+      is what is stale.
+      · why parked: B28's test is not F15's scope (F15 is a frontend
+      episode), and the fix is a judgement call someone should make
+      deliberately rather than in passing: either the assertion becomes
+      "a FillProposal IS emitted, after TaskDone" (which turns a stale
+      negative into a real check of B24's ordering rule, and is the more
+      useful test), or step #8 drops the clause and says nothing about the
+      event at all. Changing it mid-episode would also mean an episode's
+      diff touching another episode's verification script.
+      · hook: `backend\tests\manual_b28_demo_mode.py`, step #8
+      (`@filler-explainer fill mode -- plain reply, no proposal event, no
+      apply path`), including its heading, which makes the same claim.
+      · anchor: whichever episode next needs `manual_b28_demo_mode.py` to
+      pass end to end, or the next backend episode that touches the
+      proposal path.
+      · what unparking takes: one of the two edits above and a re-run of
+      the whole script -- the other eight steps pass today, so a green run
+      is the evidence. If the assertion is rewritten as a positive, it
+      should check the ORDER (`FillProposal` after `TaskDone`), which is
+      B24's own invariant and the one thing the current wording gets
+      backwards.
 
 - [✅] **RESOLVED — `CreateSession`/`SetSessionProvider` accept a `project_id`
       matching no `projects` row** — built and manually verified as B31; see

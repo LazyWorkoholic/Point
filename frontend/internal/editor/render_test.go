@@ -13,6 +13,14 @@ import (
 
 // testWorkspace is a workspace with one document open and no client, laid
 // out at w×h. Enough to render and to hit-test; nothing reaches the wire.
+// renderRows is renderCode with the frame's row index built for it -- the
+// one thing every caller would otherwise repeat. The index is derived from
+// the SAME width being drawn into, which is the invariant viewrows.go
+// depends on.
+func renderRows(ws *Workspace, d *doc, gutter, cells, rows int) []string {
+	return ws.renderCode(d, ws.viewIndexAt(d, cells), gutter, cells, rows)
+}
+
 func testWorkspace(t *testing.T, content string, w, h int) *Workspace {
 	t.Helper()
 	ws := New(Options{Theme: testTheme()})
@@ -82,7 +90,7 @@ func TestSelectionCoversExactlyTheRightCells(t *testing.T) {
 
 	// And the rendered row still measures the full line: a selection
 	// never changes how many cells its characters occupy.
-	row := ws.renderCode(d, gutterWidth(d.buf.Lines()), ws.textArea.W, 1)[0]
+	row := renderRows(ws, d, gutterWidth(d.buf.Lines()), ws.textArea.W, 1)[0]
 	if got, want := visibleWidth(row), gutterWidth(d.buf.Lines())+ws.textArea.W; got > want {
 		t.Errorf("selected row is %d cells, max %d", got, want)
 	}
@@ -172,7 +180,7 @@ func TestRenderedRowsNeverExceedTheTextArea(t *testing.T) {
 			cells := ws.textArea.W
 			for _, left := range []int{0, 1, 3, 50} {
 				d.left = left
-				for _, row := range ws.renderCode(d, gutter, cells, 5) {
+				for _, row := range renderRows(ws, d, gutter, cells, 5) {
 					if got := visibleWidth(row); got > gutter+cells {
 						t.Fatalf("width %d, left %d: row is %d cells, max %d\n%q",
 							width, left, got, gutter+cells, stripANSI(row))
@@ -191,7 +199,7 @@ func TestTabsDrawWideAndStoreNarrow(t *testing.T) {
 	if d.buf.Line(0) != "\tx" {
 		t.Fatalf("buffer holds %q", d.buf.Line(0))
 	}
-	row := ws.renderCode(d, gutterWidth(1), 40, 1)[0]
+	row := renderRows(ws, d, gutterWidth(1), 40, 1)[0]
 	plain := stripANSI(row)
 	if strings.ContainsRune(plain, '\t') {
 		t.Error("a literal tab reached the rendered row")
@@ -209,7 +217,7 @@ func TestWideRuneStraddlingTheLeftEdgeIsPadded(t *testing.T) {
 	ws := testWorkspace(t, "日本語abc", 120, 30)
 	d := ws.docs[0]
 	d.left = 1 // one cell into 日
-	row := ws.renderCode(d, gutterWidth(1), 20, 1)[0]
+	row := renderRows(ws, d, gutterWidth(1), 20, 1)[0]
 	plain := stripANSI(row)[gutterWidth(1):]
 	if !strings.HasPrefix(plain, " 本") {
 		t.Errorf("row starts %q, want a pad then 本", plain)

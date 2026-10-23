@@ -25,7 +25,7 @@ it passed.
 | S13e | Backend Verbose Passthrough (`POINT_BACKEND_VERBOSE`) | ✅ built + manually verified | `S13e-backend-verbose-passthrough.md` |
 | F8 | @ Picker + Attachments | ✅ built + manually verified | `F08-at-picker.md` |
 | **F9a** | **Task Tray + Result Cards (F9, SPLIT)** | 🟡 **built + manually verified — F9 NOT complete; F9b's deferred half + F9c are the remainder** | `F09a-task-tray-cards.md` |
-| **F9b** | **Diff Card (F9, SPLIT)** | 🟡 **built + gate green (26/26 new, 305/305 editor, 9/9 diff) — F9 is NOT complete; Done-when #7 and the packaging decision remain. #7's backend half (and F9a's hazard-1 guard order) are UNBLOCKED by `B36` (backend, built) but NOT yet built on the frontend — scheduled in Session 19 (F15) and the new Session 19b** | `F09b-diff-card.md` |
+| **F9b** | **Diff Card (F9, SPLIT)** | 🟡 **built + gate green (26/26 new, 305/305 editor, 9/9 diff). Its deferred **Done-when #7 is now CLOSED by F15** (as F15's 7b, populated from B36's generation-time `(mtime, size)`) — F9 is still NOT complete: the **packaging decision remains OPEN**, and F9a's hazard-1 guard order is still unbuilt (Session 19b / F9d, now reachable because F15 added the first `WriteProjectFile` caller from an applied diff)** | `F09b-diff-card.md` |
 | F9c | Result Card Attach + Save | not started — blocked on B13 + an unspecced B12 attachment-source extension | — |
 | F10 | Settings, Providers, First Run (F10, narrowed) | ✅ built + manually verified | `F10-settings-first-run.md` |
 | F10b | Settings — Behaviour Overrides + `doctor` in About | ✅ built + manually verified | `F10b-settings-behaviour-doctor.md` |
@@ -34,7 +34,8 @@ it passed.
 | F12 | Workspace Manager + Lifecycle | ✅ built + manually verified | `F12-workspace-manager.md` |
 | F13a | Editor Core — the editing half (F13, SPLIT) | ✅ built + manually verified | `F13a-editor-core-editing.md` |
 | F13b | Editor — Save, Locks, Autosave (F13, SPLIT) | ✅ built + manually verified — **F13 is complete** | `F13b-editor-save-locks.md` |
-| F14–F17 | — | not started | — |
+| **F15** | **Filler-Explainer Integration** | ✅ built + manually verified — **v1 is feature-complete on the frontend**. Also closes **F9's Done-when #7** as its own 7b, populated from B36's generation-time `(mtime, size)` | `F15-explainer-integration.md` |
+| F14, F16, F17 | — | not started — all `[P2]` | — |
 | F18 | Windowed History (bounded resident window) | ✅ built + manually verified | `F18-windowed-history.md` |
 
 **F1 and F2 were built and verified in one session** (`batchable: yes`).

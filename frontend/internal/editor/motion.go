@@ -222,32 +222,51 @@ func (d *doc) selectAll() {
 // ensureVisible scrolls the viewport so the caret is inside it, but ONLY
 // when something asked for it -- see doc.reveal.
 //
+// # It works in VIEW ROWS
+//
+// `v` is the frame's row sequence (viewrows.go): real lines with any
+// injected rows spliced in. `top` indexes that sequence, so the caret's
+// position in it is `v.rowOf(cursor.Line)` rather than the line number --
+// which is the same number whenever nothing is injected, and that is why
+// every caller written before the ghost existed reads unchanged.
+//
+// It is passed in rather than looked up because the ghost's row count
+// depends on the content width being drawn into, and a reveal computed at
+// one width against a frame drawn at another is the disagreement
+// viewrows.go exists to prevent.
+//
+// `extra` is rows BELOW the caret that must also stay on screen -- one, for
+// the inline fill prompt, which the user is typing into. It is deliberately
+// not "all of the caret line's injected rows": a ghost taller than the pane
+// would then make every arrow key scroll to the region's end. The live edge
+// is followGhost's job.
+//
 // rows and cells are the Code File box's CONTENT area -- the gutter and the
 // tab strip are already subtracted by the caller, because the viewport this
 // scrolls is the text area and not the box.
 //
-// The clamp of `top` against the line count is outside the reveal gate: a
+// The clamp of `top` against the sequence is outside the reveal gate: a
 // buffer that shrank under a scrolled-away viewport has to be pulled back
 // into range whether or not the caret moved, or the window renders blank.
-func (d *doc) ensureVisible(rows, cells int) {
+func (d *doc) ensureVisible(v viewIndex, rows, cells, extra int) {
 	if rows <= 0 || cells <= 0 {
 		return
 	}
-	if d.top > d.buf.Lines()-1 {
-		d.top = d.buf.Lines() - 1
-	}
-	if d.top < 0 {
-		d.top = 0
-	}
+	d.top = v.clampTop(d.top)
 	if !d.reveal {
 		return
 	}
 	d.reveal = false
-	if d.cursor.Line < d.top {
-		d.top = d.cursor.Line
+
+	caret := v.rowOf(d.cursor.Line)
+	if caret < d.top {
+		d.top = caret
 	}
-	if d.cursor.Line >= d.top+rows {
-		d.top = d.cursor.Line - rows + 1
+	if extra < 0 {
+		extra = 0
+	}
+	if caret+extra >= d.top+rows {
+		d.top = caret + extra - rows + 1
 	}
 	if d.top < 0 {
 		d.top = 0
@@ -272,12 +291,10 @@ func (d *doc) ensureVisible(rows, cells int) {
 // nothing else. The caret is deliberately left where it is: a wheel scroll
 // that dragged the caret along would lose the user's place the moment they
 // looked somewhere else in the file.
-func (d *doc) scrollBy(lines int) {
-	d.top += lines
-	if max := d.buf.Lines() - 1; d.top > max {
-		d.top = max
-	}
-	if d.top < 0 {
-		d.top = 0
-	}
+//
+// In VIEW ROWS, so one notch of the wheel crosses injected rows and real
+// lines alike and a long proposed region is scrolled through rather than
+// scrolled inside.
+func (d *doc) scrollBy(v viewIndex, rows int) {
+	d.top = v.clampTop(d.top + rows)
 }

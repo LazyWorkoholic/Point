@@ -51,6 +51,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
+import os
 from pathlib import Path
 from typing import Any, AsyncIterator, Optional
 
@@ -88,6 +90,111 @@ _DEMO_SESSION_TITLE = "Point Demo Walkthrough"
 _FILL_MARKER = "mode=fill"
 _EXPLAIN_MARKER = "mode=explain"
 
+# POINT_DEMO_LONG_FILL=1 swaps the fill fixture for a 46-line one.
+#
+# Why a second fixture rather than a longer first one: `filler_fill.json`
+# is what B28 shipped and what `manual_b28_demo_mode.py` asserts against,
+# and its five-line proposal is the right size for demonstrating the
+# feature. It is the wrong size for TESTING the Editor's ghost rendering
+# -- scrolling, click-to-line mapping and arrow movement through ghost
+# rows only misbehave visibly once the region is taller than the pane,
+# which five lines never is. F15's gate could only see a caret offset by
+# reaching for a real model, which brings its own unrelated output-format
+# problems (see this episode's notes on qwen2.5:3b).
+#
+# So: same provider, same deterministic replay, one env var. Both
+# fixtures propose against app.py lines 4-8, so B24 validates either one
+# identically and the only difference is how much text comes back.
+_LONG_FILL_ENV = "POINT_DEMO_LONG_FILL"
+
+# Two debug-only pacing overrides, same shape and same reasoning as
+# _LONG_FILL_ENV above: off unless set, read once per stream so a
+# long-lived process can be re-paced between runs, and confined to this
+# module -- which only loads for the Demo provider, so they are demo-only
+# by construction rather than by a check someone has to remember.
+#
+# filler_fill_long.json carries NO baked-in per-chunk delay, deliberately:
+# its 604 pieces are there to be paced by the first variable below, and
+# baking a cadence in would mean ~600 platform timer waits on every gate
+# and test run for a cadence nobody is watching. Unset, it streams in
+# about 0.06s. The one 50ms lead-in chunk stays, so the ghost's first
+# paint is a frame rather than an already-finished region.
+#
+# They exist because the Editor's ghost has two behaviours that are only
+# observable WHILE text is arriving, and the shipped fixtures arrive
+# faster than a human can look:
+#
+#   POINT_DEMO_STREAM_DELAY_MS  per chunk, REPLACING the fixture's own
+#                               `delay` rather than adding to it -- one
+#                               number gives an even cadence to watch
+#                               the ghost scroll, follow the caret and
+#                               click a line mid-stream. Additive would
+#                               mean two fixtures paced differently at
+#                               the same setting; an even cadence is also
+#                               what makes a scroll hitch readable as the
+#                               VIEWPORT's rather than the fixture's.
+#
+#                               PER CHUNK, and the fixtures have very
+#                               different chunk counts, so the useful
+#                               value depends on which one is playing:
+#
+#                                 filler_fill_long   604 chunks, no
+#                                   baked-in delay. 10 gives a smooth
+#                                   ~9s typewriter over its 46 lines;
+#                                   40 gives ~28s. Measured, including
+#                                   the timer overshoot below.
+#                                 filler_fill          2 chunks, 500-600ms
+#                                 filler_explain       4 chunks, 500-700ms
+#                                   -- for these a value under ~500 is
+#                                   FASTER than shipped, not slower.
+#
+#                               The overshoot is real and not worth
+#                               correcting for: 604 waits of 10ms took
+#                               9.45s rather than 6.04s, because each
+#                               asyncio.sleep rounds up to the platform
+#                               timer. Pick by feel, not by arithmetic.
+#
+#   POINT_DEMO_CARD_DELAY_MS    one pause before the DONE chunk, which
+#                               is the gap between "the ghost stopped
+#                               growing" and "the diff card opens": the
+#                               backend pushes B24's FillProposal AFTER
+#                               TaskDone, and TaskDone follows DONE, so
+#                               holding DONE back holds both. Separate
+#                               from the per-chunk delay because the
+#                               thing being inspected is the fully
+#                               streamed ghost with no card over it,
+#                               which no per-chunk value can produce.
+#
+# Neither is a product feature and neither belongs in config.toml: they
+# pace a fixture replay, and a real provider's pacing is the network's.
+_STREAM_DELAY_ENV = "POINT_DEMO_STREAM_DELAY_MS"
+_CARD_DELAY_ENV = "POINT_DEMO_CARD_DELAY_MS"
+
+_log = logging.getLogger(__name__)
+
+
+def _delay_override(name: str) -> Optional[float]:
+    """Milliseconds from `name`, in seconds, or None if unset.
+
+    A value that is not a non-negative number is IGNORED rather than
+    raised on -- a typo in a debugging variable must not fail a session
+    -- but it is logged, because a silently ignored override reads
+    exactly like a feature that does not work. Stderr, never stdout
+    (that is the protocol channel).
+    """
+    raw = os.environ.get(name)
+    if raw is None or raw == "":
+        return None
+    try:
+        ms = float(raw)
+    except ValueError:
+        _log.warning("demo: ignoring %s=%r -- not a number", name, raw)
+        return None
+    if ms < 0:
+        _log.warning("demo: ignoring %s=%r -- must not be negative", name, raw)
+        return None
+    return ms / 1000.0
+
 
 def _forbid_web_search(data: Any, source: Path) -> None:
     """D55/F10: Demo mode is "no network", enforced here rather than left
@@ -123,6 +230,21 @@ class DemoProvider(BaseProvider):
         self._chat_turn = 0
 
     # -- fixture loading ----------------------------------------------------
+
+    @staticmethod
+    def _fill_fixture() -> str:
+        """Which fill fixture to replay -- see _LONG_FILL_ENV.
+
+        Read per call rather than cached at construction so the variable
+        can be flipped between runs of a long-lived process (the gate
+        launches Point more than once against one scratch profile), and
+        read as "exactly 1" for the same reason POINT_MOCK and
+        POINT_BACKEND_VERBOSE are: a truthy-string test would make
+        POINT_DEMO_LONG_FILL=0 turn it ON.
+        """
+        if os.environ.get(_LONG_FILL_ENV) == "1":
+            return "filler_fill_long.json"
+        return "filler_fill.json"
 
     def _fixture(self, name: str) -> dict[str, Any]:
         cached = self._fixture_cache.get(name)
@@ -188,7 +310,7 @@ class DemoProvider(BaseProvider):
     async def stream(self, request: GenerationRequest) -> AsyncIterator[ProviderStreamChunk]:
         kind = self._classify(request)
         if kind == "fill":
-            async for chunk in self._play(self._fixture("filler_fill.json")["chunks"]):
+            async for chunk in self._play(self._fixture(self._fill_fixture())["chunks"]):
                 yield chunk
         elif kind == "explain":
             async for chunk in self._play(self._fixture("filler_explain.json")["chunks"]):
@@ -255,8 +377,14 @@ class DemoProvider(BaseProvider):
             )
             yield ProviderStreamChunk(type=ProviderChunkType.DONE)
             return
+        # The per-chunk override applies here too: the variable is named
+        # for streaming, not for fill, and a research step that ignored
+        # it would make the name a lie. _CARD_DELAY_ENV deliberately does
+        # NOT -- a research step has no diff card, and its DONE ends a
+        # tool-loop iteration rather than a reply.
+        per_chunk = _delay_override(_STREAM_DELAY_ENV)
         for text_chunk in step.get("text_chunks", []):
-            chunk_delay = float(text_chunk.get("delay", 0.0))
+            chunk_delay = float(text_chunk.get("delay", 0.0)) if per_chunk is None else per_chunk
             if chunk_delay:
                 await asyncio.sleep(chunk_delay)
             yield ProviderStreamChunk(type=ProviderChunkType.TEXT, text=text_chunk.get("text", ""))
@@ -281,9 +409,15 @@ class DemoProvider(BaseProvider):
         player: no `rate_limit`, no `hang` -- Demo mode never scripts a
         retry or a timeout, so there is nothing here to keep in sync with
         if Mock ever grows another test-only kind."""
+        # Read once per stream, not per chunk: same granularity as
+        # _fill_fixture (which stream() calls once), and it keeps a bad
+        # value's warning to one line instead of one per chunk.
+        per_chunk = _delay_override(_STREAM_DELAY_ENV)
+        card_gap = _delay_override(_CARD_DELAY_ENV)
+
         saw_done = False
         for chunk in chunks:
-            delay = float(chunk.get("delay", 0.0))
+            delay = float(chunk.get("delay", 0.0)) if per_chunk is None else per_chunk
             if delay:
                 await asyncio.sleep(delay)
             kind = chunk.get("type")
@@ -301,6 +435,15 @@ class DemoProvider(BaseProvider):
                 raise ProviderError(chunk.get("error", "demo: scripted failure"))
             elif kind == "done":
                 saw_done = True
+                if card_gap:
+                    await asyncio.sleep(card_gap)
                 yield ProviderStreamChunk(type=ProviderChunkType.DONE)
         if not saw_done:
+            # Both exits get the gap. A fixture that ends without an
+            # explicit `done` chunk takes this branch, and
+            # filler_fill.json is one of them -- an override that worked
+            # for the long fixture and not the shipped one would be worse
+            # than no override.
+            if card_gap:
+                await asyncio.sleep(card_gap)
             yield ProviderStreamChunk(type=ProviderChunkType.DONE)

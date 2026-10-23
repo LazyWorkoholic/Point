@@ -316,7 +316,7 @@ func TestAutosaveStoppedReachesTheStatusBarForALockedFile(t *testing.T) {
 	// One ordinary edit, through the funnel Update uses.
 	probe := ws.probeActive()
 	a.insertRune('x')
-	ws.autosaveAfter(probe)
+	ws.autosaveAfter(probe, "test")
 
 	if !a.dirty {
 		t.Fatal("precondition: a lock-held buffer is still editable and must be dirty")
@@ -362,7 +362,7 @@ func TestAutosaveStoppedClearsWhenTheLockComesBack(t *testing.T) {
 	a.lock, a.lockedBy, a.lockedAge = lockHeldByOther, "sam@other", 90
 	probe := ws.probeActive()
 	a.insertRune('x')
-	ws.autosaveAfter(probe)
+	ws.autosaveAfter(probe, "test")
 	if !hasSegment(ws, "autosave stopped") {
 		t.Fatal("precondition: the segment is not showing")
 	}
@@ -373,5 +373,57 @@ func TestAutosaveStoppedClearsWhenTheLockComesBack(t *testing.T) {
 
 	if hasSegment(ws, "autosave stopped") {
 		t.Errorf("still stopped after the lock came back: %q", ws.StatusSegments())
+	}
+}
+
+// The status bar names the leader's PRIMARY key, not the legacy one.
+//
+// F15's gate: the Editor's status bar still read "ctrl+w w workspace" after
+// F2 became the primary leader -- so the one on-screen pointer to the
+// workspace switcher named the binding that cannot be relied on (see
+// actions.Leader). It is derived from actions.Leader now, so a leader
+// change cannot leave it behind.
+//
+// Primary only, deliberately: Root's fitHints drops WHOLE segments when the
+// row is narrow, so "F2 / ctrl+w w workspace" would be the first thing to
+// vanish. The help screen and the palette print both keys.
+func TestTheStatusBarNamesTheLeaderByItsPrimaryKey(t *testing.T) {
+	// The workspace hint lives in the two EMPTY states. Once a file is
+	// open the row is already full of the file's own segments and the hint
+	// is not among them -- that is F13a's layout, not this fix's business.
+	noProject := New(Options{Theme: testTheme()})
+
+	noFile := New(Options{Theme: testTheme()})
+	noFile.projectID, noFile.projectRoot = "p1", `C:\p`
+
+	for name, segs := range map[string][]string{
+		"no project":   noProject.StatusSegments(),
+		"no file open": noFile.StatusSegments(),
+	} {
+		joined := strings.Join(segs, " | ")
+		if !strings.Contains(joined, "F2 w workspace") {
+			t.Errorf("%s: segments = %q, want an %q segment",
+				name, joined, "F2 w workspace")
+		}
+		if strings.Contains(joined, "ctrl+w") {
+			t.Errorf("%s: segments = %q still name the legacy leader key", name, joined)
+		}
+	}
+
+	// And every state spells its own function keys the way the help screen
+	// does -- the second half of the same casing bug.
+	open, _ := editorAt(t, "alpha\nbeta", 120, 30)
+	for name, segs := range map[string][]string{
+		"no project":   noProject.StatusSegments(),
+		"no file open": noFile.StatusSegments(),
+		"file open":    open.StatusSegments(),
+	} {
+		joined := strings.Join(segs, " | ")
+		for _, lower := range []string{"f5 ", "f6 ", "f7 "} {
+			if strings.Contains(joined, lower) {
+				t.Errorf("%s: segments = %q print a lower-case function key %q",
+					name, joined, lower)
+			}
+		}
 	}
 }

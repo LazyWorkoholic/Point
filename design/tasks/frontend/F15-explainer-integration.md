@@ -144,8 +144,33 @@ same config — the **invocation site decides presentation**.
    a green F15 that skipped this leaves F9 permanently short of one
    criterion. Verify the refusal is shown ON THE CARD, not only in a log,
    and that the card does not read "applied".
-8. The same agent invoked from Chat produces a result card instead of an inline
-   diff.
+8. The same agent invoked from Chat produces **no inline diff card** -- the
+   reply streams into the transcript as an ordinary assistant message, and the
+   diff card is the Editor's presentation only.
+
+   > **Wording corrected 2026-10-20, after F15's own gate run.** It read "produces
+   > a **result card** instead of an inline diff", and that half of it asked for
+   > something this build deliberately does not do. **The task tray is background
+   > work only:** `app	asks.go`'s `builtinAgentBackground` records
+   > `filler-explainer` as `false` (it is `max_steps=1`, so `is_bounded_loop` is
+   > false and the backend runs it as an inline turn), `trayRows` filters on
+   > exactly that, and the tray's own empty state says so verbatim -- "no
+   > background tasks ... an inline turn's reply is in the transcript, not here".
+   > F9a's own framing is "the global task tray -- every workspace's BACKGROUND
+   > work".
+   >
+   > So an inline turn correctly has no tray row and therefore no result card to
+   > open, and the first gate run was answered "pass" against a criterion that
+   > could not be met. **The tray was not changed**: opening a result card for a
+   > reply already sitting in the transcript would duplicate it, which is the
+   > reason the filter exists. What survives of #8 is the half that is actually
+   > about this episode -- the invocation site decides presentation -- and it is
+   > verifiable: the Editor builds a `DiffCard` only for a proposal matching its
+   > OWN corr_id (`TestAForeignProposalBuildsNoCard`).
+   >
+   > A single-step agent whose result IS worth keeping (there is none today) would
+   > need the tray to register inline tasks too, which is a change to F9a's filter
+   > and its own decision to make, not this one's.
 
 ## Manual verification (PowerShell)
 

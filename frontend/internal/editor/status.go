@@ -3,6 +3,7 @@ package editor
 import (
 	"fmt"
 
+	"github.com/lazyworkoholic/point/frontend/internal/actions"
 	"github.com/lazyworkoholic/point/frontend/internal/config"
 )
 
@@ -30,13 +31,31 @@ import (
 // reaching this workspace at all. KeyCapturer could claim it, but this
 // episode's claim list is deliberately two keys long, so the tree gets a
 // free chord instead of a contested one.
+// workspaceHint names the leader's PRIMARY key only -- "F2 w workspace".
+//
+// It said "ctrl+w w workspace" until F15's close, which was the legacy
+// binding and the one that cannot be relied on (actions.Leader's own doc
+// has the mechanism): the status bar was advertising the broken half of a
+// dual binding as if it were the only one.
+//
+// Primary only, NOT actions.LeaderLabel's "F2 / ctrl+w". The help screen
+// and the palette print both, because they are reference surfaces and
+// neither key should be a secret there. This is the status bar, where
+// every other segment is one terse binding ("ctrl+p palette", "F7 close")
+// and Root's fitHints drops WHOLE segments when the row is too narrow --
+// so a segment five cells wider is a segment that disappears sooner, and
+// what disappears here is the only on-screen pointer to the workspace
+// switcher. Built from actions.Leader rather than typed out, so a change
+// to the leader key cannot leave this naming the old one.
+var workspaceHint = actions.KeyLabel(actions.Leader) + " w workspace"
+
 func (w *Workspace) StatusSegments() []string {
 	if len(w.docs) == 0 {
 		if w.projectID == "" {
-			return []string{"no project", "ctrl+p palette", "ctrl+w w workspace"}
+			return []string{"no project", "ctrl+p palette", workspaceHint}
 		}
-		return []string{"no file open", ctrlOHint, "f5 re-index",
-			"ctrl+p palette", "ctrl+w w workspace"}
+		return []string{"no file open", ctrlOHint, "F5 re-index",
+			"ctrl+p palette", workspaceHint}
 	}
 
 	d := w.docs[w.active]
@@ -97,10 +116,22 @@ func (w *Workspace) StatusSegments() []string {
 		segs = append(segs, "autosave stopped")
 	}
 
+	// F15: a live invocation, for `d.saving`'s own reason one surface
+	// over -- an explain whose panel has been dismissed, or a fill whose
+	// ghost anchor has scrolled out of view, is still running and would
+	// otherwise be invisible. It also tells a user who switched back from
+	// Chat that the thing they left is still going.
+	//
+	// Not per-document: the invocation is the workspace's (one at a time),
+	// and it names its own file.
+	if w.liveInvocation() {
+		segs = append(segs, w.inv.kind.String()+"ing "+w.inv.name+"… esc cancels")
+	}
+
 	// f7 goes LAST so fitHints -- which drops whole parts from the end
 	// -- sheds it first on a narrow terminal. Discoverable when there is
 	// room, never at the cost of a segment that describes the file.
-	segs = append(segs, ctrlOHint, "ctrl+p palette", "f7 close")
+	segs = append(segs, ctrlOHint, "ctrl+p palette", "F7 close")
 	return segs
 }
 

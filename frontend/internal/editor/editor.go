@@ -2,6 +2,7 @@ package editor
 
 import (
 	"encoding/json"
+	"io"
 	"log/slog"
 	"time"
 
@@ -36,6 +37,25 @@ type Options struct {
 	// AutosaveDelay is the after_delay interval. Zero means the 1000ms
 	// default.
 	AutosaveDelay time.Duration
+
+	// Provider is F10's stored provider default, the same value chat
+	// forwards on ITS CreateSession (chat\protocol.go's onSessionList).
+	//
+	// F15 needs it because the Editor now creates a session of its own
+	// (invoke.go's header says why it must), and a session created with no
+	// provider inherits config.toml's default instead of the one the user
+	// picked through Point's own UI -- so in Demo mode a fill would
+	// silently run against whichever provider config.toml names rather
+	// than the demo one.
+	//
+	// A VALUE, not a config.State, and the editor still neither reads nor
+	// writes state.json: main.go passes this in and chat remains the only
+	// workspace that persists it. The two-writer rule config\state.go's
+	// saveStateTo arbitrates is unchanged. A default chosen while Point is
+	// running arrives as app.ProviderDefaultSetMsg instead (Update), which
+	// Root also REPLAYS to a freshly loaded workspace, so a choice made
+	// before this workspace existed is not lost either.
+	Provider *config.ProviderDefault
 }
 
 // focusTarget is which of the Editor's two panes has the keyboard.
@@ -118,6 +138,18 @@ type Workspace struct {
 	// ConnectedMsg to a freshly loaded workspace, so both fire on every
 	// load after the handshake. See protocol.go's onConnected.
 	resolving bool
+	// writeFn is the UNCORRELATED write: one envelope, an id the caller
+	// minted, no pending entry and no waiter. F15's SendMessage and
+	// CancelTask are the only users, and both need it for chat's own
+	// reason -- a send answers with a whole stream of events sharing one
+	// corr_id, and Request's waiter channel holds exactly one.
+	//
+	// A second seam beside sendFn rather than a widened sendFn, which is
+	// the shape chat already uses (sendMsgFn beside its own send): the two
+	// differ in what they do about correlation, which is the only
+	// interesting thing either of them does.
+	writeFn func(id, cmdType string, payload map[string]any) error
+
 	// sendFn is a struct field defaulting to doSend so a test can
 	// substitute a recorder: what the tests exercise is the decision logic
 	// in onProject/onFileList/onFile, not protocol.Client's send path,
@@ -149,6 +181,95 @@ type Workspace struct {
 	backendDown    bool
 	diagnosticsSeq int
 
+	// ---- F15: the Filler-Explainer ----------------------------------
+	//
+	// All six of these are TRANSIENT and none is suspended: an
+	// invocation, a ghost, a prompt, a panel and a card are all about a
+	// moment, and a resumed workspace that restored a ghost would be
+	// showing model output nothing is still producing. Suspend() is
+	// unchanged by this episode.
+
+	// sessionID is the Editor's OWN session (invoke.go's header), created
+	// lazily on the first invocation. Empty until then; never read from
+	// or written to state.json.
+	sessionID       string
+	creatingSession bool
+	// provider is Options.Provider, kept current by
+	// app.ProviderDefaultSetMsg.
+	provider *config.ProviderDefault
+
+	// inv is the single live explain-or-fill invocation, or nil. One at a
+	// time, deliberately -- see invoke.go.
+	inv *invocation
+	// pendingSend is an invocation waiting for the session that will
+	// carry it.
+	pendingSend *pendingSend
+	// settleGen generations the post-TaskDone wait for a FillProposal, so
+	// a superseded tick does nothing -- autosave's own per-document
+	// pattern (C5).
+	settleGen int
+
+	// ghostFollow is "keep the pane at the live edge of the streaming
+	// ghost", the editor's counterpart to chat's `pinned`.
+	//
+	// Set when a fill starts, cleared by scrolling up out of the stream,
+	// and set again by scrolling back down to the edge. Cleared with the
+	// ghost itself -- a finished region must not keep dragging the
+	// viewport anywhere.
+	ghostFollow bool
+
+	// ghost is the fill reply drawn at the caret. Display-only, not in any
+	// buffer; ghost.go's header is the record of why.
+	ghost *ghostText
+	// prompt is the inline one-line fill instruction, or nil.
+	prompt *fillPrompt
+	// panel is the explain panel splitting the Code File pane, or nil.
+	panel *explainPanel
+	// card is the last DiffCard this workspace built. Held only so the
+	// staleness reply can find the card it was asked for; the card itself
+	// is owned by Root's overlay slot.
+	card *DiffCard
+	// staleCard hands a card to doSend for one CheckFileStale request --
+	// see protocol.go's doSend for why it is a field.
+	staleCard *DiffCard
+	// deferredCard is a card built while this workspace was backgrounded,
+	// waiting for it to be on screen again -- see onWorkspaceActivated.
+	deferredCard *DiffCard
+
+	// onScreen is whether this workspace is the active one.
+	//
+	// Tracked rather than asked, because a workspace cannot ask: Root
+	// never tells it anything about the others and there is no "am I
+	// active" call. Set by app.WorkspaceActivatedMsg and cleared by
+	// app.WorkspaceDeactivatedMsg -- BOTH halves, from Root, explicitly.
+	//
+	// # This field shipped broken once, and the reason is worth keeping
+	//
+	// It was set by the activation message and "cleared" by inferring a
+	// switch away from that same message naming a different workspace.
+	// That cannot work and the comment describing it was incoherent: Root
+	// sends the activation message to the workspace BECOMING active and
+	// to no one else, so this workspace never saw one naming anyone else
+	// and the clearing branch was dead code. The flag latched true on the
+	// first activation and stayed true, so the deferral it gates never
+	// engaged -- a diff card finished in the background opened over Chat,
+	// and its apply message then went to Chat too and was dropped.
+	//
+	// The general shape: a workspace cannot infer a transition it is not
+	// told about. If a state has two edges, both edges need a message.
+	//
+	// It starts FALSE, which is correct: a workspace that has never been
+	// activated has never been on screen.
+	onScreen bool
+
+	// clipOut is where copySelection writes its OSC 52 sequence. Nil
+	// means stderr -- see copy.go's clipTarget.
+	clipOut io.Writer
+
+	// settleDelay substitutes proposalSettleDelay in tests. Zero means
+	// the real value -- see settleWait.
+	settleDelay time.Duration
+
 	// note is the LAST transient line this workspace emitted. It is kept
 	// only so the empty state can repeat it; the line the user actually
 	// reads is the one Root puts in the status bar via
@@ -169,6 +290,7 @@ func New(opts Options) *Workspace {
 		holder:        opts.Holder,
 		autosaveMode:  opts.Autosave,
 		autosaveDelay: opts.AutosaveDelay,
+		provider:      opts.Provider,
 		tree:          newFileTree(),
 		pending:       make(map[string]pendingReq),
 	}
@@ -179,6 +301,7 @@ func New(opts Options) *Workspace {
 		w.autosaveDelay = config.DefaultAutosaveDelayMs * time.Millisecond
 	}
 	w.sendFn = w.doSend
+	w.writeFn = w.doWrite
 	return w
 }
 
@@ -226,6 +349,57 @@ func (w *Workspace) Cards() []layout.CardSlot {
 
 // CapturesKey is app.KeyCapturer.
 //
+// # F15 made this CONDITIONAL, and the divergence is deliberate
+//
+// What follows below was written as "EXACTLY TWO KEYS... The claim is
+// unconditional rather than gated on focus", and the reasoning for that is
+// still right for `tab`/`shift+tab`: a key whose meaning depends on which
+// pane has the keyboard is a key the user has to track.
+//
+// F15 adds a claim of a different kind, for a surface that is MODAL rather
+// than focus-dependent: while the inline fill prompt or the explain panel
+// is open, `esc` and `ctrl+c` belong to it. Both are required by the spec
+// ("`esc` cancels", "Cancelling (`esc` or `ctrl+c`) discards the ghost
+// entirely and cancels the task", "dismissed with `esc`") and neither can
+// be had any other way: dispatchKey consults the chord registry BEFORE this
+// workspace, `esc` is chat.browse's chord and `ctrl+c` is chat.cancel's,
+// and both have Chat-only When predicates -- so in this workspace they are
+// swallowed with "… is not available right now" and never arrive (keys.go's
+// header records that as pre-existing behaviour).
+//
+// Why that does not reintroduce the problem the unconditional rule exists
+// to prevent:
+//
+//   - the claim is on the existence of a surface the user just opened, not
+//     on which pane has focus. With nothing open these keys behave exactly
+//     as they did before this episode -- including still printing "not
+//     available right now", which is unchanged, not newly broken;
+//   - both surfaces advertise the key they claim, in their own footer or
+//     label, which is F04's standing rule;
+//   - the alternative was to make the explain panel an app.Overlay, which
+//     gets `esc` for free and would have covered the code it is explaining.
+//     See explainpanel.go's header.
+//
+// The GHOST counts as one of those surfaces, which is easy to miss and is
+// Done-when 3c: a fill whose prompt has already closed on Enter has no
+// prompt and no panel, only a ghost growing at the caret -- and `esc` there
+// is what cancels the stream. Gated on a LIVE invocation rather than on
+// w.ghost being non-nil so a ghost left on screen by a finished task cannot
+// hold a key hostage.
+//
+// ESC ONLY. ctrl+c is claimed UNCONDITIONALLY below, because in this
+// workspace it means copy and nothing else -- see copy.go for why that is
+// a deliberate divergence from F15's Build and why a scoped ctrl+c would
+// be the worse of the two options.
+func (w *Workspace) capturesModalKey(key string) bool {
+	if w.prompt == nil && w.panel == nil && !w.liveInvocation() {
+		return false
+	}
+	return key == "esc"
+}
+
+// The original claim, unchanged:
+//
 // EXACTLY TWO KEYS, and they are named here rather than left to be
 // discovered in a switch statement because every captured key is a key
 // whose global binding stops working while this workspace is active:
@@ -247,7 +421,12 @@ func (w *Workspace) Cards() []layout.CardSlot {
 // keyboard, which is a key whose meaning the user has to track -- and the
 // tree does not want Tab for anything.
 func (w *Workspace) CapturesKey(key string) bool {
-	return key == "tab" || key == "shift+tab"
+	// ctrl+c is claimed whatever is on screen: it is COPY here, always,
+	// and the chord table would otherwise answer "Cancel Stream is not
+	// available right now" and swallow it (chat.cancel's chord, whose
+	// When is Chat-only). See copy.go.
+	return key == "tab" || key == "shift+tab" || key == "ctrl+c" ||
+		w.capturesModalKey(key)
 }
 
 func (w *Workspace) Update(msg tea.Msg) (app.Workspace, tea.Cmd) {
@@ -258,6 +437,37 @@ func (w *Workspace) Update(msg tea.Msg) (app.Workspace, tea.Cmd) {
 		return w, w.handleEnvelope(m.Envelope)
 	case protocol.BackendLostMsg:
 		w.backendDown = true
+	case app.WorkspaceActivatedMsg:
+		// Root sends this to the workspace BECOMING active and to no one
+		// else, so the id is always this one; the check is an assertion,
+		// not the mechanism. (Treating it as the mechanism -- "false when
+		// it names someone else" -- is exactly how onScreen came to latch
+		// true forever. See the field's own doc.)
+		if m.ID != layout.WorkspaceEditor {
+			break
+		}
+		w.onScreen = true
+		return w, w.onWorkspaceActivated()
+
+	case app.WorkspaceDeactivatedMsg:
+		// The other half, from Root, before it changes which workspace is
+		// active. Nothing is inferred.
+		if m.ID == layout.WorkspaceEditor {
+			w.onScreen = false
+		}
+
+	case app.ProviderDefaultSetMsg:
+		// A provider chosen while Point is running, and (via
+		// switchWorkspace's replay) one chosen before this workspace
+		// existed. Kept for the NEXT CreateSession only -- an existing
+		// session is never rebound, which is F10c's own inherited limit
+		// (Decision 2) and not something this episode solves.
+		d := m.Default
+		w.provider = &d
+
+	case proposalSettleMsg:
+		return w, w.onProposalSettle(m)
+
 	case app.DiagnosticsMsg:
 		// Seq-guarded for the race chat\protocol.go documents: each push
 		// is its own tea.Cmd goroutine and arrival order is not
@@ -269,13 +479,35 @@ func (w *Workspace) Update(msg tea.Msg) (app.Workspace, tea.Cmd) {
 			w.backendDown = m.D.ConnState == protocol.StateFailed
 		}
 	case app.PasteMsg:
+		// F15: whichever surface owns the keyboard owns the paste.
+		//
+		// This case used to reach the buffer unconditionally, and it is
+		// ABOVE the tea.KeyMsg case that routes to the modal surfaces --
+		// so a paste while the inline fill prompt was open went into the
+		// FILE at the caret instead of into the prompt, invisibly, only
+		// showing up once the prompt was dismissed. That is also where
+		// F15's gate's "nothing wrote app.py" failures came from: the
+		// pasted text was a real buffer edit, so autosave persisted it,
+		// correctly, one second later.
+		//
+		// The prompt takes it. The explain panel SWALLOWS it: the panel
+		// is a reading surface that owns the keyboard, and a paste
+		// falling past it into the file underneath is the same bug with
+		// a different overlay on top.
+		if w.prompt != nil {
+			w.prompt.paste(m.Text)
+			return w, nil
+		}
+		if w.panel != nil {
+			return w, nil
+		}
 		// editPaste, not editOther: one physical paste can arrive as
 		// several PasteMsgs (see that kind's own doc), and they have to
 		// collapse back into one undo step.
 		if len(w.docs) > 0 && w.focus == focusBuffer {
 			probe := w.probeActive()
 			w.docs[w.active].insertText(m.Text, editPaste)
-			return w, w.autosaveAfter(probe)
+			return w, w.autosaveAfter(probe, "paste into the buffer")
 		}
 
 	// ---- F13b -------------------------------------------------------
@@ -305,7 +537,7 @@ func (w *Workspace) Update(msg tea.Msg) (app.Workspace, tea.Cmd) {
 	case tea.MouseMsg:
 		probe := w.probeActive()
 		cmd := w.handleMouse(m)
-		return w, tea.Batch(cmd, w.autosaveAfter(probe))
+		return w, tea.Batch(cmd, w.autosaveAfter(probe, "mouse"))
 	case tea.KeyMsg:
 		// The autosave debounce is armed from the buffer's own
 		// Version(), compared across the whole key handler, rather than
@@ -317,7 +549,7 @@ func (w *Workspace) Update(msg tea.Msg) (app.Workspace, tea.Cmd) {
 		// which is autosave rule 4, for free.
 		probe := w.probeActive()
 		cmd := w.handleKey(m)
-		return w, tea.Batch(cmd, w.autosaveAfter(probe))
+		return w, tea.Batch(cmd, w.autosaveAfter(probe, "key "+m.String()))
 	}
 	return w, nil
 }

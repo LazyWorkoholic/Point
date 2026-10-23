@@ -496,6 +496,93 @@ What Point is, the recording, install steps, a screenshot of the context card,
 and an honest **"what it does not do"** section. That last section is a
 credibility signal, not a weakness.
 
+### Ollama fill-mode JSON reliability — carried forward from F15 (19). BACKEND ONLY, NOT DONE
+
+**The Filler's own prompt shows the model a placeholder, and the model
+copies it verbatim.** `_render_editor_context` in
+`backend\managers\context.py` renders the fill-mode schema line as:
+
+```
+{"file": "<path>", "start_line": <int>, "end_line": <int>, ...}
+```
+
+The model fills in the integers and echoes `<path>` back as a literal
+string. B24 then **correctly** rejects the proposal as `file_mismatch`.
+The dominant failure is therefore not malformed JSON — it is the right
+JSON shape carrying the wrong filename.
+
+Measured during F15's gate work against `qwen2.5:3b` through Ollama's own
+`/api/chat`, five trials per arm, byte-identical messages:
+
+| arm | accepted | verdicts |
+|---|---|---|
+| as today | **2/5** | `file_mismatch` ×3, ACCEPTED ×2 |
+| `+ format: "json"` | **0/5** | `file_mismatch` ×5 |
+
+**The fix is a one-line prompt change**: name the actual file, or say "use
+exactly this file name", instead of showing a placeholder.
+
+**Why it is here and not in F15.** It is backend work — F15 is a frontend
+episode and does not touch `managers\context.py` — and a prompt change has
+to land **alone** to be measurable, which is B24's own rule ("a prompt
+change and a new parser landing together make it impossible to tell which
+one the numbers describe"). The full entry, with both raw replies and the
+three superseded assumptions, is the parking-lot item in
+`../backend/INDEX.md`; this is the pointer, not a second copy.
+
+> ⚠ **`format: "json"` is not the cheap fix it looks like.** It did not
+> help and made it worse, which is consistent with constraining the decoder
+> to valid JSON while leaving the model free to put the wrong STRING in a
+> valid field. It also applies to the whole turn, so it would constrain
+> explain-mode prose unless the provider is told which mode it is in — and
+> the provider deliberately knows nothing about agents or modes. A more
+> tolerant parser is separately rejected by B24's own design ("never hunts
+> embedded JSON").
+>
+> This also does **not** reopen B24's own 0/5: that run measured a
+> different failure (`end_line` reported as the replacement's length rather
+> than the shown region's span, giving `range_outside_shown`) from a
+> different cursor position. Both are the model's output format; they are
+> not the same defect, and a fix for one will not show up in the other's
+> number.
+
+Nothing in Demo mode is affected — its fixtures are deterministic and
+always name the real file. This bites only against a real local model,
+which is why F15 could ship green without it.
+
+### The Editor's quick-close-file key wants a better binding than `f7`
+
+`f7` closes the active tab today, and it works — it is in this file's
+"ALREADY SHIPPED" section above. It is also the third key tried, and it
+reads as an arbitrary function key rather than something a hand finds.
+
+**Leave the replacement open.** What this entry is for is recording the
+options already **ruled out**, so the next round does not re-propose one of
+them:
+
+- **`ctrl+w`** is the leader's legacy binding (`actions.LeaderAlt`), which
+  is what makes `ctrl+w e` and `ctrl+w w` work. It cannot also mean close.
+- **`ctrl+shift+w`** is not a distinct key on Windows: bubbletea's
+  console-record reader produces the same control character for `Ctrl+W`
+  and `Ctrl+Shift+W`, so it arrives as `ctrl+w` — the leader again.
+  Measured for `Ctrl+Shift+L` during F13b and the same mechanism.
+- **`Alt+w`** — considered and **rejected** during F15 (19), for a reason
+  worth not rediscovering. `key_windows.go` builds `tea.Key`'s `Alt` field
+  unconditionally from `ControlKeyState`, outside `keyType`'s lookups, so
+  unlike a ctrl chord it cannot be silently lost. But **AltGr is
+  `LEFT_CTRL|RIGHT_ALT`, which sets that same `Alt` bit**, so on a non-US
+  layout an alt-letter binding would swallow AltGr-composed characters.
+  That is the **same collision class already ruled out for the leader key**
+  (`actions.Leader`'s own doc comment carries the full finding) — trading
+  one layout-dependent ambiguity for another is not an improvement.
+
+So the replacement must be a key that is neither a ctrl chord bubbletea can
+mangle, nor an alt chord AltGr can claim, nor already in the chord registry
+(`ctrl+c`, `ctrl+e`, `ctrl+l`, `ctrl+p`, `ctrl+q`, `ctrl+r`, `esc`, `f1`,
+`f2`, `f3`, `tab`). **If nothing better exists under those constraints, `f7`
+stays and this entry closes as "considered, kept"** — which is a real
+outcome, not a failure to decide.
+
 ## Do NOT
 
 - Add features.

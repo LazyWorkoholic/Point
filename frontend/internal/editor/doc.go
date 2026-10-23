@@ -1,6 +1,7 @@
 package editor
 
 import (
+	"crypto/sha256"
 	"path"
 	"strings"
 )
@@ -105,6 +106,28 @@ type doc struct {
 	lfCount         int
 	bom             bool
 	trailingNewline bool
+
+	// diskHash is a hash of the buffer's text as of the last read, the
+	// last successful write, or the last reload -- i.e. of the bytes that
+	// are on disk right now, in the one form this package can compare
+	// against (Buffer.Text: LF-joined, no BOM, no trailing newline, which
+	// is exactly what the save path sends as `content`).
+	//
+	// # Why a hash of the content and not a version number
+	//
+	// Because `Version()` cannot answer the question this exists for.
+	// Undo is a Splice like any other, so undoing an edit moves the
+	// version FORWARD while returning the content to what is on disk. A
+	// version comparison therefore reports "changed" for a buffer that is
+	// byte-identical to the file, which is what made F15's Done-when 5
+	// fail: apply a proposal, press ctrl+z once, and the autosave timer
+	// armed by the undo wrote the file back with identical bytes and a
+	// brand-new mtime.
+	//
+	// A hash rather than a retained copy of the text: the comparison runs
+	// at most once per autosave tick, and keeping a second full copy of
+	// every open file to answer it would be the larger cost.
+	diskHash [32]byte
 
 	readOnly bool
 	roReason readOnlyReason
@@ -294,7 +317,30 @@ func newDoc(f wireFile, projectRoot string, hasProject bool) *doc {
 	d.indent = detectIndent(d.buf)
 	d.hl = newHighlighter(f.Path, d.lineEndingHint())
 	d.lang = d.hl.name
+	// The buffer IS what is on disk at this instant.
+	d.setDiskBaseline()
 	return d
+}
+
+// setDiskBaseline records that the buffer now matches the file.
+//
+// Called from exactly three places, and they are the only three moments
+// at which that is true: the read that opens a document (newDoc), a
+// successful write that was not overtaken (onWriteSucceeded), and a
+// reload that replaced the buffer with the bytes on disk (applyReload).
+// Anything else calling it would be asserting a match it has not made.
+func (d *doc) setDiskBaseline() {
+	d.diskHash = sha256.Sum256([]byte(d.buf.Text()))
+}
+
+// matchesDisk reports whether the buffer is byte-identical to the file.
+//
+// True after an edit and its undo, which is the case this exists for --
+// see diskHash. It is a real answer rather than a conservative one: the
+// content sent by a save is `Buffer.Text()` and nothing else, so a
+// matching hash means a write would produce the same bytes already there.
+func (d *doc) matchesDisk() bool {
+	return d.diskHash == sha256.Sum256([]byte(d.buf.Text()))
 }
 
 // lineEndingHint is the language hint passed to the lexer when the

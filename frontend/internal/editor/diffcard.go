@@ -8,6 +8,7 @@ import (
 
 	"github.com/lazyworkoholic/point/frontend/internal/app"
 	"github.com/lazyworkoholic/point/frontend/internal/diff"
+	"github.com/lazyworkoholic/point/frontend/internal/protocol"
 	"github.com/lazyworkoholic/point/frontend/internal/theme"
 )
 
@@ -193,6 +194,11 @@ type DiffCard struct {
 	applied bool
 	refusal string
 
+	// checking is true while the on-disk staleness round trip is in
+	// flight (F15). It makes `⏎` a no-op for the duration rather than
+	// stacking a second check -- doc.saving's own reason, one layer up.
+	checking bool
+
 	// scroll is the first visible diff row, and editRows/diffRows are the
 	// pane heights the last render used -- remembered so paging moves by a
 	// real page and the clamp counts the page actually on screen, which is
@@ -208,11 +214,51 @@ type DiffCard struct {
 	cachedVer  uint64
 	cachedIsOK bool
 
-	// RecordedMtime and RecordedSize are Done-when #7's inputs, carried
-	// and UNPOPULATED this session. See the type's header for why they
-	// cannot be filled yet and why nothing local was substituted.
+	// RecordedMtime and RecordedSize are the file's (mtime, size) AS OF
+	// REGION GENERATION, and they are POPULATED as of F15.
+	//
+	// F9b shipped them zero and recorded why at length (the type header
+	// below still carries that history, which is worth keeping: it is the
+	// record of a guard that was left absent rather than approximated).
+	// B36 then made `_render_editor_context` stat the same file descriptor
+	// it reads the region from and put the pair on `FillProposal`, and
+	// F15's `onFillProposal` fills these from THAT event and from nothing
+	// else.
+	//
+	// Never from `doc.mtime`/`doc.size`. Those describe the open or
+	// last-save moment and fail in both directions -- a false refusal when
+	// the region was generated from content newer than the open, and a
+	// MISSED refusal when a successful save refreshed the pair after
+	// generation. The second one is the dangerous direction, because a
+	// check that permits the unsafe apply is believed.
 	RecordedMtime float64
 	RecordedSize  int
+
+	// HasRecordedPair says whether RecordedMtime/RecordedSize describe a
+	// real generation-time stat.
+	//
+	// An explicit flag rather than testing RecordedMtime against zero,
+	// which is what this shipped with and which cannot be justified: a
+	// zero mtime is a real possible value (a file stamped at the epoch),
+	// and a zero SIZE is entirely ordinary (an empty file), so the
+	// float's zero value is a sentinel that can collide with the fact it
+	// is standing in for. The flag cannot.
+	//
+	// It is also the honest shape of the question: "did a producer give
+	// me a pair" is not a property of the pair's value.
+	HasRecordedPair bool
+
+	// SessionID is the session that produced the proposal (F15), taken off
+	// the FillProposal envelope.
+	//
+	// It is what makes the staleness check resolve the right scope: B36's
+	// `CheckFileStale` resolves the SESSION's own project via
+	// `_attachment_scope` when given a session_id, and falls back to
+	// `_resolve_optional_project`'s walk-up from the path when not --
+	// which answers a different question and is B12's bug #2. F9a's
+	// hazard 1 ("resolve the SESSION's scope first") is why this field
+	// exists rather than being derived here from the path.
+	SessionID string
 }
 
 type diffCardMode int
@@ -254,9 +300,15 @@ type DiffCardOptions struct {
 	Original    []string
 	BaseVersion uint64
 
-	// RecordedMtime and RecordedSize are Done-when #7's, unpopulated.
-	RecordedMtime float64
-	RecordedSize  int
+	// RecordedMtime and RecordedSize are the generation-moment pair, from
+	// B36's FillProposal fields and from nowhere else, and
+	// HasRecordedPair says they are real. SessionID is the session that
+	// produced the proposal, so the check resolves that session's scope.
+	// See the fields of the same name on DiffCard.
+	RecordedMtime   float64
+	RecordedSize    int
+	HasRecordedPair bool
+	SessionID       string
 }
 
 // NewDiffCard builds the card from a validated proposal and a snapshot of
@@ -270,17 +322,19 @@ func NewDiffCard(o DiffCardOptions) *DiffCard {
 	copy(original, o.Original)
 
 	return &DiffCard{
-		path:          o.Path,
-		name:          o.Name,
-		note:          o.Note,
-		startLine:     o.StartLine,
-		endLine:       o.EndLine,
-		original:      original,
-		baseVersion:   o.BaseVersion,
-		scratch:       newScratchDoc(o.Replacement, o.Path),
-		mode:          diffReview,
-		RecordedMtime: o.RecordedMtime,
-		RecordedSize:  o.RecordedSize,
+		path:            o.Path,
+		name:            o.Name,
+		note:            o.Note,
+		startLine:       o.StartLine,
+		endLine:         o.EndLine,
+		original:        original,
+		baseVersion:     o.BaseVersion,
+		scratch:         newScratchDoc(o.Replacement, o.Path),
+		mode:            diffReview,
+		RecordedMtime:   o.RecordedMtime,
+		RecordedSize:    o.RecordedSize,
+		HasRecordedPair: o.HasRecordedPair,
+		SessionID:       o.SessionID,
 	}
 }
 
@@ -360,6 +414,7 @@ func (c *DiffCard) markApplied() {
 func (c *DiffCard) refuse(why string) {
 	c.applied = false
 	c.refusal = why
+	c.checking = false
 }
 
 // ---------------------------------------------------------------------------
@@ -395,11 +450,27 @@ func (c *DiffCard) Update(msg tea.Msg) (app.Overlay, tea.Cmd) {
 }
 
 // reviewKey is the card's own three bindings plus scrolling.
+//
+// # ctrl+z is deliberately NOT bound here
+//
+// Written down because its absence was read as a bug once (F15's gate
+// reported "ctrl+z does nothing" with a card open). Review mode has
+// nothing to undo: no edit has been made, the card is a view over a
+// proposal, and the buffer behind it is untouched until an apply. The
+// undo that matters is the one AFTER an apply, and it belongs to the
+// editor -- which is where it lands, in one press, once the card is
+// closed (Done-when #6). Binding ctrl+z here to mean "undo the apply"
+// would need the card to outlive its own apply and to know what to
+// reverse, when `ctrl+z` in the buffer already does exactly that.
+//
+// Edit mode is different and does bind it: there, ctrl+z undoes typing in
+// the SCRATCH buffer. See editKey.
 func (c *DiffCard) reviewKey(k tea.KeyMsg) (app.Overlay, tea.Cmd) {
 	switch k.String() {
 	case "enter":
-		if c.applied {
-			// Already landed. Re-applying would splice the same region a
+		if c.applied || c.checking {
+			// Already landed, or the on-disk check for this same press is
+			// still in flight. Re-applying would splice the same region a
 			// second time, against line numbers that no longer describe
 			// the buffer.
 			return c, nil
@@ -677,7 +748,28 @@ func (c *DiffCard) footer() string {
 	case c.mode == diffEdit:
 		return "esc review   ⏎ newline   ctrl+z undo edit   (apply from review)"
 	case c.applied:
-		return "d close   esc close"
+		// ONE key, not the two this shipped with ("d close   esc close").
+		//
+		// Both still close -- reviewKey takes `d` and `esc` in the same
+		// case, and that is unchanged -- but advertising two bindings for
+		// one action asks the reader to look for a difference that is not
+		// there. `esc` is the one kept because it is what dismisses every
+		// overlay in this app; `d` is F09's own footer key for DISCARD,
+		// and there is nothing left to discard once the change has landed.
+		// Advertising fewer keys than work is allowed; the reverse is
+		// what F04's rule forbids.
+		return "esc close"
+	case c.checking:
+		return "checking the file on disk…"
+	case c.refusal != "":
+		// The RE-GENERATE OFFER, which F15's Done-when 7 and 7b both
+		// require of a refusal ("refused, with re-generate offered").
+		// It is a sentence rather than a key because re-generating is
+		// not something this card can do: the proposal came from a task
+		// against a region at the caret, so the offer is to ask again
+		// where asking happens. Naming the real binding keeps F04's rule
+		// -- no hint for a key that does nothing here.
+		return "d discard   esc close   (re-generate: close, then leader → f at the caret)"
 	default:
 		return "⏎ apply   e edit   d discard   ↑/↓ scroll"
 	}
@@ -699,7 +791,7 @@ func (c *DiffCard) editPanes(th theme.Theme, textW, body int) []string {
 		// No room for a split and a rule between them. The editor pane is
 		// the subject, so it takes what there is.
 		c.editRows, c.diffRows = body, 0
-		c.scratch.ensureVisible(body, textW-c.scratchGutter()-1)
+		c.scratch.ensureVisible(plainIndex(c.scratch), body, textW-c.scratchGutter()-1, 0)
 		return c.scratchView(th, textW, body)
 	}
 
@@ -713,7 +805,7 @@ func (c *DiffCard) editPanes(th theme.Theme, textW, body int) []string {
 	diffRows := body - editRows - 1
 	c.editRows, c.diffRows = editRows, diffRows
 
-	c.scratch.ensureVisible(editRows, textW-c.scratchGutter()-1)
+	c.scratch.ensureVisible(plainIndex(c.scratch), editRows, textW-c.scratchGutter()-1, 0)
 
 	out := c.scratchView(th, textW, editRows)
 	out = append(out, th.Style(theme.BorderSubtle).Render(
@@ -883,17 +975,26 @@ func diffGutterWidth(r diff.Result) int {
 //
 // # What it deliberately does NOT guard
 //
-// Nothing here stats the file, asks `CheckFileStale`, or resolves a
-// project. Done-when #7 and F9a's hazard-1 guard order are deferred, with
-// the reasons in `DiffCard`'s own header -- and deferred means absent, not
-// approximated from `d.mtime`.
+// # F15 made this TWO-PHASE, and guard 6 is new
+//
+// Guards 1-5 below are synchronous and unchanged. Guard 6 -- "did the FILE
+// change on disk since the region was generated" -- is F9's Done-when #7,
+// which F9b deferred as its Hazard 2 because no generation-time
+// (mtime, size) pair existed to compare against. B36 added it;
+// `onFillProposal` populates it; this function now asks `CheckFileStale`
+// about it and splices nothing until the answer comes back. The splice
+// itself moved to `applyNow`.
+//
+// Still nothing here approximates the pair from `d.mtime`/`d.size`, which
+// is what DiffCard's header has always forbidden and why the fields are
+// filled from the event instead.
 func (w *Workspace) onDiffApply(m diffApplyMsg) tea.Cmd {
 	c := m.card
 	if c == nil || c.applied {
 		return nil
 	}
 
-	i, d := w.docIndexByPath(c.path)
+	_, d := w.docIndexByPath(c.path)
 	switch {
 	case d == nil:
 		c.refuse(c.name + " is no longer open")
@@ -914,18 +1015,80 @@ func (w *Workspace) onDiffApply(m diffApplyMsg) tea.Cmd {
 		return w.say("nothing to apply — " + c.name + " already matches the proposal")
 	}
 
-	// editProbe is the seam autosave.go already anticipated: "insertRune,
-	// backspace, ... Undo, Redo and ApplyRegion all mutate -- and arming
-	// the timer from the buffer's own Version() cannot miss one, including
-	// the two F9b and F15 will add." Taken on the TARGET rather than via
-	// probeActive, because the document being spliced is not necessarily
-	// the active one.
-	probe := editProbe{path: d.path, ver: d.buf.Version()}
+	// ---- F15: guard 6, the file ON DISK ------------------------------
+	//
+	// F9's Done-when #7, which F9b deferred as its Hazard 2 and B36
+	// unblocked. It is a DIFFERENT question from the version check above,
+	// over a different thing: that one is the in-memory buffer being
+	// spliced, this one is the bytes on disk. Both have to pass.
+	//
+	// It is also the one guard here that cannot be answered locally, which
+	// is why the apply is two-phase: every synchronous guard runs first and
+	// nothing is spliced, then this asks the backend and the splice happens
+	// only in the reply, in `applyNow`, with the version guard re-run
+	// because the buffer can move during the round trip.
+	//
+	// Nothing stats the file from Go. `CheckFileStale` is the backend's
+	// own comparison, it is where the path guard lives, and B36 taught it
+	// `size` and `session_id` for exactly this caller.
+	if c.HasRecordedPair {
+		c.checking = true
+		w.staleCard = c
+		payload := map[string]any{
+			"path":  c.path,
+			"mtime": c.RecordedMtime,
+			"size":  c.RecordedSize,
+		}
+		if c.SessionID != "" {
+			// The session that produced the proposal, so the scope
+			// resolved is that session's own (B36's `_attachment_scope`
+			// branch) rather than a walk-up from the path. F9a's hazard
+			// 1, finally with something to call.
+			payload["session_id"] = c.SessionID
+		}
+		w.send(protocol.CmdCheckFileStale, queryStaleCheck, payload)
+		return w.say("checking " + c.name + " on disk…")
+	}
+
+	// A card with NO recorded pair is one no F15 producer built -- the
+	// only constructor that leaves the flag false is a test, or a future
+	// caller holding a proposal from somewhere other than B24's event. It
+	// applies without the disk guard, and it says so in the log rather
+	// than pretending the guard ran.
+	w.log.Warn("editor: applying a diff card with no generation-time mtime — "+
+		"the on-disk staleness guard did not run", "file", c.name)
+	return w.applyNow(c)
+}
+
+// applyNow is phase two: every guard has passed, including the one that
+// needed a round trip, so the buffer is spliced.
+//
+// The order inside it is F9b's, unchanged and for F9b's reasons -- probe,
+// splice, prove the version moved, THEN mark the card applied. Marking it
+// before the splice is proven is F9a's hazard 3 and F8's chip bug: a card
+// that looks applied when it was not.
+func (w *Workspace) applyNow(c *DiffCard) tea.Cmd {
+	c.checking = false
+	i, d := w.docIndexByPath(c.path)
+	if d == nil {
+		c.refuse(c.name + " is no longer open")
+		return w.say(c.name + " is no longer open — nothing was applied")
+	}
+
+	// The version BEFORE the splice. It is the only evidence available
+	// that ApplyRegion did anything: it returns nothing and no-ops
+	// silently on a read-only document.
+	//
+	// Taken as a plain uint64 rather than an `editProbe` as of F15,
+	// because the probe's other field (the path) existed only to hand to
+	// `autosaveAfter`, which this function no longer calls -- see the
+	// block at the end.
+	before := d.buf.Version()
 
 	from, to := c.regionRange(d.buf)
 	d.ApplyRegion(from, to, c.ResultText())
 
-	if d.buf.Version() == probe.ver {
+	if d.buf.Version() == before {
 		// ApplyRegion declined and said nothing. No condition reaching
 		// here is known -- the guards above cover read-only, and an empty
 		// change is refused -- so this is the honest report of an
@@ -950,10 +1113,93 @@ func (w *Workspace) onDiffApply(m diffApplyMsg) tea.Cmd {
 	w.focus = focusBuffer
 
 	c.markApplied()
+
+	// And the card GETS OUT OF THE WAY.
+	//
+	// It used to stay open showing "Applied · name", which looks like a
+	// confirmation and is actually a trap: an open overlay takes every
+	// key, and review mode binds no ctrl+z (see reviewKey) -- so the undo
+	// this very function's status line promises could not reach the
+	// buffer until the user guessed that they had to close the card
+	// first. F9b's Done-when #6 ("applying in the Editor is undone by a
+	// SINGLE ctrl+z") was therefore false through the UI while passing at
+	// the workspace level, which is where its own test drove it.
+	//
+	// Nothing is lost by closing: the result is in the buffer, which is
+	// the thing the user wanted to see, and the status line below says
+	// what happened and names both keys.
+	closeCard := func() tea.Msg { return app.CloseWorkspaceOverlayMsg{Overlay: c} }
+
+	// AUTOSAVE IS NOT ARMED HERE, and that is a change from what F9b
+	// shipped on this line (`w.autosaveAfter(probe, "test")`).
+	//
+	// # Why it had to change
+	//
+	// F15's Done-when 5 is "the file's mtime is unchanged until the user
+	// saves", verified by comparing `LastWriteTime` across
+	// apply-then-undo. With autosave in its DEFAULT mode (after_delay,
+	// 1000ms -- D90), arming the timer here means an agent-proposed region
+	// reaches disk one second after the apply with no further keypress at
+	// all. That is CLAUDE.md's first hard rule read the wrong way round:
+	// "an agent-proposed change reaches disk only through a buffer the
+	// user saves" is about an act, and a debounce firing on its own is not
+	// one.
+	//
+	// F9b could not observe this: nothing constructed a DiffCard, so the
+	// line never ran. F15 is the first producer, which makes it the first
+	// episode where the behaviour exists -- recorded in this episode's
+	// completed doc as a defect this episode found rather than as a
+	// refactor of a shipped line.
+	//
+	// What is NOT changed: the apply still marks the buffer dirty (that is
+	// `ApplyRegion`'s own splice), so the file is saveable, the status bar
+	// says "• modified", the unload dialog pins the workspace, and the
+	// very next keystroke arms the timer through `handleKey`'s own probe
+	// exactly as it always did. The user is one ctrl+s, or one character,
+	// away from the file being written -- they are simply not zero
+	// keypresses away.
 	return tea.Batch(
-		w.say("applied to "+c.name+" — ctrl+z undoes it in one press"),
-		w.autosaveAfter(probe),
+		closeCard,
+		w.say("applied to "+c.name+" — ctrl+z undoes it in one press, ctrl+s saves it"),
 	)
+}
+
+// onStaleResult is CheckFileStale's reply: the on-disk half of the guard.
+//
+// `{"changed": bool}` and nothing else -- no path, no mtime, no echo of
+// what was compared -- which is why the request carried the card
+// (protocol.go's pendingReq.card).
+//
+// # The refusal wording is deliberately NOT the buffer one
+//
+// F15's gate says a 7b that refuses for the wrong reason fails: "check the
+// message names the file changing on disk, not the buffer (that is
+// Done-when 7, and F9b's baseVersion guard would catch it either way, which
+// is exactly how a disk check that never ran could look like it passed)".
+// Two different sentences, over two different things, so the card itself is
+// the evidence of which guard fired.
+func (w *Workspace) onStaleResult(req pendingReq, env protocol.Envelope) tea.Cmd {
+	c := req.card
+	if c == nil {
+		return nil
+	}
+	var p struct {
+		Changed bool `json:"changed"`
+	}
+	if err := env.UnmarshalPayload(&p); err != nil {
+		// An undecodable answer is an unanswered question, and an
+		// unanswered staleness question refuses.
+		w.log.Warn("editor: decoding a FileStaleResult", "err", err)
+		c.refuse("could not check the file on disk")
+		return w.say("not applied — the file on disk could not be checked")
+	}
+	if p.Changed {
+		c.refuse(c.name + " changed on disk after this region was generated")
+		w.log.Info("editor: apply refused, file changed on disk",
+			"file", c.name, "recorded_mtime", c.RecordedMtime, "recorded_size", c.RecordedSize)
+		return w.say(c.name + " changed on disk — nothing was applied")
+	}
+	return w.applyNow(c)
 }
 
 // docIndexByPath is docByPath with the index, which the apply needs in

@@ -385,6 +385,38 @@ func (w *Workspace) onSessionList(env protocol.Envelope) {
 		w.loadErr = err.Error()
 		return
 	}
+	// F15: a session another workspace owns is not this workspace's to
+	// open OR to list, and dropping it here -- at the one point the list
+	// is assigned -- covers both surfaces with one rule.
+	//
+	// # The leak this closes, which was found at F15's gate
+	//
+	// The Editor creates and owns a session of its own for its
+	// Filler-Explainer invocations (editor\invoke.go explains why it must
+	// have one). Its turns persist like any others, so the moment one
+	// runs it becomes the most-recently-updated session in the database --
+	// and the pick below takes the most recent usable row. So Chat
+	// bootstrapped straight onto the EDITOR's session and rendered its
+	// transcript: a tester saw "explain this" and the Filler's answer
+	// appear as real sent messages in Chat, and separately saw a fill
+	// refusal appear there with nothing pressed at all. One cause, both
+	// symptoms.
+	//
+	// It is NOT a missing filter on incoming envelopes, which was the
+	// first hypothesis and is worth recording as wrong: entryFor (stream.go)
+	// already matches only this workspace's own corr_id or task_id, so no
+	// live event from another session can reach the transcript. The leak
+	// was in which session Chat ADOPTED, not in what it rendered.
+	kept := make([]wireSession, 0, len(p.Sessions))
+	for _, s := range p.Sessions {
+		if s.Workspace != "" && s.Workspace != string(app.WorkspaceChat) {
+			w.log.Debug("chat: skipping another workspace's session",
+				"session", s.ID, "workspace", s.Workspace)
+			continue
+		}
+		kept = append(kept, s)
+	}
+	p.Sessions = kept
 	// F6's Sessions card: kept beyond the bootstrap decision below, which
 	// only reads it to pick one to open.
 	w.sessions = p.Sessions
@@ -536,6 +568,25 @@ func (w *Workspace) setSession(s wireSession) {
 	// everything else session-shaped, so a draft never bleeds across
 	// sessions.
 	w.restoreDraft()
+	// F15: and whatever `send to chat` handed over before this session
+	// finished loading.
+	//
+	// restoreDraft setText()s the saved draft unconditionally, which is
+	// right for a session change and wrong for exactly one case: Root
+	// switches to Chat and calls PrefillDraft SYNCHRONOUSLY, while the
+	// ListSessions/GetSession round trip it just started is still in
+	// flight. The reply then lands here and overwrites the prefill with
+	// the (usually empty) stored draft -- so pressing `c` on the explain
+	// panel appeared to lose the exchange entirely. Found at F15's gate,
+	// where it was indistinguishable from "c sent a message instead of
+	// prefilling", because the session leak above was putting the exchange
+	// in the transcript at the same moment.
+	//
+	// Re-applied AFTER restoreDraft rather than guarded inside it: the
+	// prefill is the newer of the two and must win, and PrefillDraft
+	// already knows how to combine it with whatever is in the buffer
+	// without destroying it.
+	w.applyPendingPrefill()
 	// Last, and deliberately after the transcript is complete: the tasks
 	// join only decorates, so nothing waits on it. See requestTaskRows.
 	w.requestTaskRows()

@@ -293,7 +293,7 @@ func BenchmarkScrollFrame(b *testing.B) {
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		d.scrollBy(1)
+		d.scrollBy(plainIndex(d), 1)
 		if d.top > 4900 {
 			d.top = 0
 		}

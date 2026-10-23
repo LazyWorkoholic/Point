@@ -160,6 +160,7 @@ type idleState struct {
 // idle timer now running. All loaded workspaces coexist; only the active one
 // renders (render.go's View calls current().View, singular).
 func (r *Root) switchWorkspace(id WorkspaceID) tea.Cmd {
+	var deactivateCmd tea.Cmd
 	def, ok := r.defByID[id]
 	if !ok {
 		return status(fmt.Sprintf("no workspace registered as %q", id))
@@ -173,13 +174,36 @@ func (r *Root) switchWorkspace(id WorkspaceID) tea.Cmd {
 
 	// The outgoing workspace's timer starts NOW, not at the moment the
 	// next tick happens to notice.
+	//
+	// F15: and the outgoing workspace is TOLD it is going, which is the
+	// other half of WorkspaceActivatedMsg below and was missing. Without
+	// it a workspace can only ever learn that it became active and never
+	// that it stopped being so -- which made "am I on screen" a flag that
+	// latched true on the first switch in and stayed true for the life of
+	// the process. The Editor's deferred diff card was gated on exactly
+	// that flag, so the gate never engaged and a card finished in the
+	// background opened over Chat.
+	//
+	// Sent BEFORE r.active moves, so `r.workspaces[r.active]` is still
+	// the one leaving, and its returned command is kept: a workspace
+	// going off screen may still have something to say to Root (it may
+	// not take the status line -- that rule is deliverBackgroundReply's
+	// and is unchanged).
 	if r.active != "" && r.active != id {
-		if _, loaded := r.workspaces[r.active]; loaded {
+		if outgoing, loaded := r.workspaces[r.active]; loaded {
 			r.lastActive[r.active] = r.now()
+			updated, cmd := outgoing.Update(WorkspaceDeactivatedMsg{ID: r.active})
+			r.workspaces[r.active] = updated
+			if cmd != nil {
+				deactivateCmd = cmd
+			}
 		}
 	}
 
 	var cmds []tea.Cmd
+	if deactivateCmd != nil {
+		cmds = append(cmds, deactivateCmd)
+	}
 	if _, loaded := r.workspaces[id]; !loaded {
 		if cmd, err := r.loadWorkspace(def); err != nil {
 			return status(err.Error())
@@ -278,6 +302,26 @@ func (r *Root) switchWorkspace(id WorkspaceID) tea.Cmd {
 		if cmd != nil {
 			cmds = append(cmds, cmd)
 		}
+	}
+
+	// F15: the workspace is now the one on screen, and it is told so.
+	//
+	// Unlike the three replays above, this fires on EVERY switch in --
+	// including to an already-loaded workspace, which is the case the
+	// others deliberately do not cover. It exists because a workspace can
+	// finish something while backgrounded that should only reach the
+	// screen when the user is looking at it: the Editor holds a finished
+	// fill's diff card and opens it here rather than popping it over Chat,
+	// where it would trap every key the user typed into a workspace the
+	// card has nothing to do with.
+	//
+	// Sent last, after the size and the handshake, so a workspace handling
+	// it is already laid out -- an overlay opened from here is fit-checked
+	// against the real terminal size rather than a zero one.
+	wsAct, actCmd := r.current().Update(WorkspaceActivatedMsg{ID: id})
+	r.storeCurrent(wsAct)
+	if actCmd != nil {
+		cmds = append(cmds, actCmd)
 	}
 	return tea.Batch(cmds...)
 }
@@ -685,7 +729,7 @@ func (r *Root) walkIdle(now time.Time) tea.Cmd {
 // — the same rule bindingsHint already follows.
 func (r *Root) keepHint() string {
 	if a, ok := r.actions.ByID("workspace.switcher"); ok && a.Leader != "" {
-		return actions.Leader + " " + a.Leader
+		return actions.LeaderLabel + " " + a.Leader
 	}
 	return "switching to it"
 }

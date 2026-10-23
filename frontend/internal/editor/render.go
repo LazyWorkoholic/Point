@@ -31,8 +31,20 @@ func (w *Workspace) View(l layout.Layout) string {
 	w.tabStrip = layout.Rect{}
 	w.tabSpans = nil
 
+	// F15: the explain panel SPLITS the Code File pane rather than
+	// overlaying it -- see explainpanel.go for why an app.Overlay was the
+	// wrong shape for a surface whose whole purpose is to be read beside
+	// the code. Compute is untouched: this is the workspace subdividing a
+	// rect it was already handed.
+	main, panelRect := l.Main, layout.Rect{}
+	if w.panel != nil && !l.Main.IsZero() {
+		pw := panelWidth(l.Main.W)
+		panelRect = layout.Rect{X: l.Main.X + l.Main.W - pw, Y: l.Main.Y, W: pw, H: l.Main.H}
+		main.W = l.Main.W - pw
+	}
+
 	left := stack(
-		w.codeFileBox(l.Main),
+		sideBySide(w.codeFileBox(main), main.W, w.panelBox(panelRect), panelRect.W, 0),
 		w.terminalBox(l.Secondary),
 	)
 
@@ -124,10 +136,37 @@ func (w *Workspace) codeFileBox(r layout.Rect) string {
 	// never computed two different ways.
 	w.textArea = layout.Rect{X: r.X + 1 + 1 + gutter, Y: r.Y + 2, W: cells, H: textRows}
 
-	d.ensureVisible(textRows, cells)
+	// ONE index and ONE scroll position for this frame, built at the
+	// width about to be drawn into so the count and the drawing cannot
+	// disagree. Everything below works in VIEW ROWS -- see viewrows.go
+	// for what that means and for the two-coordinate design it replaced.
+	vi := w.viewIndexAt(d, cells)
+
+	// Reveal the caret, plus the one row under it when the fill prompt is
+	// open: the prompt is what the user is typing into, so it must not be
+	// the row that falls off the bottom.
+	//
+	// A tall ghost is deliberately NOT revealed here. Showing the whole
+	// region would mean every arrow key jumped to the region's end, and
+	// the live edge is the follow's job. This is also what fixes the
+	// arrow-key glitch: the old code shrank the reveal's row budget by
+	// the injected row count, which for a region taller than the pane
+	// clamped to ONE row and snapped the viewport on every keystroke.
+	extra := 0
+	if w.prompt != nil {
+		extra = 1
+	}
+	d.ensureVisible(vi, textRows, cells, extra)
+
+	// AUTO-FOLLOW a growing ghost, the way Chat's transcript follows a
+	// growing reply -- now by moving the single scroll position to an
+	// ordinary row in the sequence, rather than pinning the file to the
+	// anchor and scrolling a nested window inside it.
+	w.followGhost(d, vi, textRows, cells)
+
 	content := make([]string, 0, rows)
 	content = append(content, strip)
-	content = append(content, w.renderCode(d, gutter, cells, textRows)...)
+	content = append(content, w.renderCode(d, vi, gutter, cells, textRows)...)
 	return paneBox(w.edge(focused), w.label(focused), r, title, content, 1)
 }
 
@@ -146,13 +185,27 @@ const (
 	paintCaret
 )
 
-// renderCode draws the gutter and one visible buffer line per row.
-func (w *Workspace) renderCode(d *doc, gutter, cells, rows int) []string {
+// renderCode draws one row of the unified sequence per pane row.
+//
+// The walk is over VIEW ROWS, not buffer lines: `vi.at` says whether a row
+// is a line of the file or one of the rows injected into it, and the same
+// function answers the hit-test (mouse.go). That is the whole of what makes
+// a long proposed region scroll, arrow and click like the text it will
+// become -- see viewrows.go.
+func (w *Workspace) renderCode(d *doc, vi viewIndex, gutter, cells, rows int) []string {
 	th := w.theme
 	num := th.Style(theme.TextDim)
 	cur := th.Style(theme.TextSecondary)
 
-	styled := d.hl.window(th, d.buf, d.top, rows)
+	// The highlighter is asked for a window starting at the first REAL
+	// line this frame draws, which is not d.top when the top of the pane
+	// has scrolled into an injected block. `rows` lines is always at
+	// least as many as the frame can show.
+	firstLine, topInjected, _ := vi.at(d.top)
+	if topInjected {
+		firstLine++
+	}
+	styled := d.hl.window(th, d.buf, firstLine, rows)
 	selFrom, selTo := d.selectionRange()
 	hasSel := d.hasSelection()
 
@@ -172,11 +225,26 @@ func (w *Workspace) renderCode(d *doc, gutter, cells, rows int) []string {
 
 	out := make([]string, 0, rows)
 	for i := 0; i < rows; i++ {
-		line := d.top + i
-		if line >= d.buf.Lines() {
+		line, injected, blockRow := vi.at(d.top + i)
+
+		// F15's two display-only injections. Neither is in the buffer;
+		// both are rows this function emits and nothing else knows about
+		// (ghost.go's header is the record of why that is the design
+		// rather than a shortcut).
+		//
+		// They are rows of the sequence like any other, so the lines
+		// below them are simply further down it -- which is what makes a
+		// proposed insertion read the way it would if applied, and what
+		// lets the scroll carry straight on into the code after it.
+		if injected {
+			out = append(out, w.injectedRowView(d, line, blockRow, gutter, cells))
+			continue
+		}
+		if line < 0 || line >= d.buf.Lines() {
 			out = append(out, "")
 			continue
 		}
+
 		label := fmt.Sprintf("%*d ", gutter-1, line+1)
 		style := num
 		if line == d.cursor.Line {
@@ -184,8 +252,8 @@ func (w *Workspace) renderCode(d *doc, gutter, cells, rows int) []string {
 		}
 
 		var runes []styledRune
-		if i < len(styled) {
-			runes = styled[i]
+		if k := line - firstLine; k >= 0 && k < len(styled) {
+			runes = styled[k]
 		}
 		// The highlighter's slice is the authority on ROLE; the buffer is
 		// the authority on CONTENT. They can disagree for exactly one
@@ -203,6 +271,51 @@ func (w *Workspace) renderCode(d *doc, gutter, cells, rows int) []string {
 			w.sliceCells(runes, paint, d.left, cells, caretOn && line == caretLine, d.cursor.Col))
 	}
 	return out
+}
+
+// injectedRowView draws ONE injected row: the blockRow-th row of the block
+// that hangs off `line`.
+//
+// The prompt occupies the block's first row when it is open on that line,
+// which is the order viewIndexAt adds the two in -- stated in both places
+// because a disagreement would silently draw a ghost row where the prompt
+// should be.
+func (w *Workspace) injectedRowView(d *doc, line, blockRow, gutter, cells int) string {
+	th := w.theme
+
+	// The prompt sits at the CARET row (F15: "a one-line prompt at the
+	// cursor row"), after it, so the line being asked about stays visible
+	// above the question.
+	if w.prompt != nil && line == d.cursor.Line {
+		if blockRow == 0 {
+			return w.prompt.view(w, gutter+cells)
+		}
+		blockRow--
+	}
+
+	// The ghost sits after its anchor -- the caret line as of the moment
+	// the question was asked, not the caret now. A ghost whose anchor has
+	// been scrolled out of view simply is not drawn this frame; it is not
+	// moved to the top of the viewport, because a proposed insertion
+	// drawn somewhere other than where it would land is a lie about where
+	// it would land.
+	rows := w.ghostRows(cells)
+	if blockRow < 0 || blockRow >= len(rows) {
+		return ""
+	}
+	// A marker column instead of a line number, because these rows have
+	// no line numbers: they are not in the file. `+` is what every diff
+	// uses for a line that is not there yet.
+	marker := th.Style(theme.AccentSecondary).Render(
+		fmt.Sprintf("%*s ", gutter-1, "+"))
+	role := theme.TextDim
+	if w.ghost != nil && w.ghost.literal {
+		// Not a proposed region: the agent's own words (a refusal, or a
+		// reply that is not a proposal). Rendered as prose in a different
+		// role so it cannot be mistaken for code it wants to insert.
+		role = theme.TextSecondary
+	}
+	return marker + th.Style(role).Render(padCells(rows[blockRow], cells))
 }
 
 // paintRow decides each rune's overlay on one line: selected, caret, or
@@ -394,8 +507,8 @@ func (w *Workspace) emptyState(width, rows int) []string {
 			dim.Render("ctrl+o   move between tree and file, ⏎ opens"),
 			dim.Render("in the tree: j/k or arrows move, l expand/open, h collapse"),
 			dim.Render("ctrl+n   next tab        ctrl+b  previous"),
-			dim.Render("f5       re-index        f6  take over a stale lock"),
-			dim.Render("f7       close the tab   ctrl+s  save"),
+			dim.Render("F5       re-index        F6  take over a stale lock"),
+			dim.Render("F7       close the tab   ctrl+s  save"),
 		)
 	}
 	// NO note here, deliberately, and this is a change from F13a.
@@ -485,4 +598,85 @@ func (w *Workspace) taskCard(r layout.Rect) []string {
 		out = append(out, th.Style(theme.TextDim).Render("no tasks"))
 	}
 	return out
+}
+
+// ---------------------------------------------------------------------------
+// Injected rows: the one place that knows where they are
+// ---------------------------------------------------------------------------
+//
+// renderCode emits rows the buffer does not have (ghost text, the inline
+// fill prompt). Two other things have to agree with it about exactly where
+// they fall: the click mapping (mouse.go's posAt) and the "did they click a
+// real line" test. Both go through viewrows.go's `viewIndex` rather than
+// re-deriving it, because three copies of "which row is which" is the shape
+// of drift this package has already paid for in render/mouse arithmetic --
+// and then a second time in the ghost's own scroll offset, which this
+// helper set no longer has.
+
+// ghostRows is what the ghost actually DRAWS at a given content width, and
+// the only place that decides it.
+//
+// A proposed region is CODE and is truncated: re-flowing code changes what
+// it means, and a long line is read by scrolling horizontally, as it is
+// everywhere else in this pane.
+//
+// Literal text -- a refusal, or any reply that is not a proposal -- is
+// PROSE and is wrapped. It used to be truncated like code, which is what
+// F15's gate saw as text running past the pane's border: a sentence cut at
+// the edge mid-word reads as overflow.
+//
+// ALL of the rows, every time. There is no offset applied here any more:
+// the rows are entries in the document's one row sequence, and which of
+// them is on screen is decided by the single scroll position like any other
+// row. The slice this used to return -- `all[g.top:]` -- was the nested
+// sub-viewport viewrows.go's header describes.
+func (w *Workspace) ghostRows(cells int) []string {
+	g := w.ghost
+	if g == nil || cells < 1 {
+		return nil
+	}
+	if !g.literal {
+		out := make([]string, 0, len(g.lines))
+		for _, l := range g.lines {
+			out = append(out, truncateCells(l, cells))
+		}
+		return out
+	}
+	var out []string
+	for _, l := range g.lines {
+		out = append(out, wrapCells(l, cells)...)
+	}
+	return out
+}
+
+// followGhost keeps the pane at the live edge of a streaming region, by
+// moving the ONE scroll position to an ordinary row of the sequence.
+//
+// Same semantics as chat\scroll.go's `pinned`: while following, the top is
+// recomputed every frame from the region's end, so arriving rows push the
+// view along; scrolling away stops it (mouse.go). Nothing is pinned to the
+// anchor and nothing stops the user scrolling straight past the region into
+// the code below it -- which the previous two-coordinate version did, and
+// which is the defect that prompted this rewrite.
+func (w *Workspace) followGhost(d *doc, v viewIndex, rows, cells int) {
+	if !w.ghostFollow {
+		return
+	}
+	if top, ok := w.followTarget(d, v, rows, cells); ok {
+		d.top = v.clampTop(top)
+	}
+}
+
+// injectedRow reports whether a screen row offset within the text area is
+// an injected row rather than a line of the file.
+//
+// The caller that matters is mousePress: a click on a ghost row has no
+// buffer position, so it moves focus and nothing else.
+func (w *Workspace) injectedRow(rowOffset int) bool {
+	d, v := w.activeIndex()
+	if d == nil || len(v.blocks) == 0 {
+		return false
+	}
+	_, injected, _ := v.at(d.top + rowOffset)
+	return injected
 }

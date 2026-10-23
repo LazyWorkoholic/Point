@@ -99,7 +99,7 @@ does not have to be inferred:**
                                  what 18d found missing. RUNS BEFORE 19 so
                                  F15's EvFillProposal decoder is written
                                  once against the final payload shape.
-19   F15   filler-explainer      CALLS F13a's buffer and F9b's diff
+19   F15   filler-explainer      DONE. CALLS F13a's buffer and F9b's diff
                                  function; writes nothing to disk. 18b is
                                  a SCHEDULING prerequisite only — v1 is
                                  not feature-complete while F13 is open.
@@ -2870,9 +2870,16 @@ WORKFLOW.md for F9b's deferred half.
 
 ---
 
-# SESSION 19 — F15 Filler-Explainer Integration
+# SESSION 19 — F15 Filler-Explainer Integration  ✅ DONE
 
-**Goal:** v1 feature-complete.
+**Goal:** v1 feature-complete. — **met.** Recorded in
+`design/completed/frontend/F15-explainer-integration.md`. Four defects found at
+the gate were not in the Build section and are written up there as root causes:
+bubbletea's Windows chord leak (mitigated with F2/F3 beside the legacy
+ctrl+w/ctrl+q, both kept and both shown), the inline prompt's undo coalescing,
+`ctrl+c`'s double meaning (now copy only; `esc` is the only cancel), and the
+ghost's scroll architecture (rewritten to one row sequence and one scroll
+position). **F9's Done-when #7 closed here** as F15's 7b.
 
 > **F9b's packaging collision does NOT block this episode — confirmed, so
 > nobody re-raises it here as a blocker.** F9b left open where a diff card
@@ -3659,6 +3666,198 @@ number that proves the "does not touch the stdin/stdout protocol and
 costs almost nothing" claim in decisions.md's D86. If it does not match
 what D86 estimated, update D86 rather than leaving two numbers in
 disagreement.
+```
+
+**Then:** commit · `/clear`
+
+---
+
+# SESSION 28 — F21 Multi-line Fill-Prompt Input + B37  (not started)
+
+> **Scheduled after v1 ships, time permitting — otherwise deferred to a
+> later session.** This and the two sessions below are **Part 2 of the
+> Filler/Explainer**: wanted, specced, and deliberately not part of v1.
+> Everything in v1's own list comes first — CLAUDE.md's phase rule is that
+> `[P2]` is touched only after every `[P1]` item is done and verified.
+>
+> **Two sessions, not one, and B37 runs FIRST.** The frontend must not work
+> around a missing B37 by flattening newlines before sending — that would
+> ship the prompt-collision bug invisibly, which is the one failure this
+> pair exists to prevent.
+
+**Goal:** a fill request can be longer than one line.
+
+**Paste (B37 first):**
+```
+Read CLAUDE.md and the B37 row in design/tasks/backend/INDEX.md.
+
+Decide how a MULTI-LINE user request is delimited inside the prompt
+_render_editor_context builds, so the model can tell the request from
+Point's own instruction block. Say what happens when the request itself
+contains the delimiter. Backend only; do not change the Go side.
+
+Stop at the verification gate with PowerShell checks.
+
+If anything is ambiguous or seems to assume something not true of this
+repo, stop and tell me before writing code.
+```
+
+**Paste (F21 second):**
+```
+Read CLAUDE.md and design/tasks/frontend/F21-multiline-fill-prompt.md.
+
+The prompt becomes a small bounded multi-line editor. Decide the submit
+key and the newline key, and VERIFY the newline key arrives distinctly on
+Windows before committing to it -- shift is not carried on tea.KeyMsg.
+Reuse the buffer's undo-coalescing rule; do not write a third copy of it.
+The prompt is already a block in viewrows.go's row index -- give it a row
+count, do not emit rows from the renderer.
+
+Stop at the verification gate with PowerShell checks.
+
+If anything is ambiguous or seems to assume something not true of this
+repo, stop and tell me before writing code.
+```
+
+**You do:** type a four-line request and watch for the caret line being
+pushed off the pane. Then paste 500 lines into the prompt.
+
+**Record:**
+```
+Write design/completed/backend/B37-<slug>.md and
+design/completed/frontend/F21-multiline-fill-prompt.md following the
+format in design/completed/backend/INDEX.md. Add a row to each INDEX.
+Record the newline key chosen and what was MEASURED about the rejected
+one, and whether the prompt ended up holding a Buffer or its own slice.
+```
+
+**Then:** commit · `/clear`
+
+---
+
+# SESSION 29 — F22 Explain as an Ongoing Conversation + B38  (not started)
+
+> **Scheduled after v1 ships, time permitting — otherwise deferred to a
+> later session.**
+>
+> **B38 is the larger half and runs FIRST.** Its three decisions are what
+> make a follow-up answer build on the previous one; the panel is the easy
+> part.
+
+**Goal:** the explain panel becomes a real back-and-forth.
+
+**Paste (B38 first):**
+```
+Read CLAUDE.md and the B38 row in design/tasks/backend/INDEX.md.
+
+Three decisions, all backend: whether a follow-up replays the prior
+exchange as message history or as a summary; whether editor_context is
+re-sent per turn, and what the user is told when the region changed
+underneath the exchange; and the token bound plus what happens at it.
+
+The second one is B36's problem one layer up -- pairing an answer with a
+region read at a different moment. Do not decide it by analogy; decide it
+and write down which way and why.
+
+Stop at the verification gate with PowerShell checks.
+
+If anything is ambiguous or seems to assume something not true of this
+repo, stop and tell me before writing code.
+```
+
+**Paste (F22 second):**
+```
+Read CLAUDE.md and design/tasks/frontend/F22-explain-as-conversation.md.
+
+The panel gains entries and an input. ONE scroll position over the whole
+exchange -- read viewrows.go's header first; F15 built the
+follow-the-live-edge behaviour twice and the first version was a nested
+sub-viewport. Order esc's three meanings and write them in panelKey.
+ctrl+c stays copy only.
+
+Stop at the verification gate with PowerShell checks.
+
+If anything is ambiguous or seems to assume something not true of this
+repo, stop and tell me before writing code.
+```
+
+**You do:** ask a follow-up that only makes sense with the prior turn
+("why?"), and read the rendered prompt out of the backend log to confirm the
+model actually saw turn 1. A plausible second answer is not evidence.
+
+**Record:**
+```
+Write design/completed/backend/B38-<slug>.md and
+design/completed/frontend/F22-explain-as-conversation.md following the
+format in design/completed/backend/INDEX.md. Add a row to each INDEX.
+Record B38's three decisions as settled, the esc precedence, and whether
+the input was shared with F21's or built fresh.
+```
+
+**Then:** commit · `/clear`
+
+---
+
+# SESSION 30 — F23 Fill on a Blank Line + B39  (not started)
+
+> **Scheduled after v1 ships, time permitting — otherwise deferred to a
+> later session.**
+>
+> **B39 runs FIRST and is the larger half.** The risk in this pair is not
+> the new feature — it is weakening the EXISTING rewrite path's validation
+> on the way to the new one.
+
+**Goal:** fill works where there is no code to rewrite — pure generation.
+
+**Paste (B39 first):**
+```
+Read CLAUDE.md, the B39 row in design/tasks/backend/INDEX.md, and
+design/tasks/frontend/F23-fill-on-a-blank-line.md for the shape of the
+case.
+
+A THIRD EditorContext.mode, not a flag on fill. Decide what the model is
+shown and how it is marked read-only; write a generation instruction
+block that does NOT copy the "<path>" placeholder line; and validate an
+insertion point plus a length bound INSTEAD of a range inside a shown
+region -- without loosening the existing rewrite check. Capture
+(mtime, size) the way B36 does, from the same descriptor as the read.
+
+Stop at the verification gate with PowerShell checks.
+
+If anything is ambiguous or seems to assume something not true of this
+repo, stop and tell me before writing code.
+```
+
+**Paste (F23 second):**
+```
+Read CLAUDE.md and design/tasks/frontend/F23-fill-on-a-blank-line.md.
+
+The FRONTEND decides the mode (it already computes `enclosing`); the
+backend must not re-derive it. Additions-only diff card -- do not
+fabricate an old side. Check whether doc.ApplyRegion already handles an
+empty range as one undoable edit and use it if so; do not add a second
+splice entry point. The staleness guard stays.
+
+Stop at the verification gate with PowerShell checks.
+
+If anything is ambiguous or seems to assume something not true of this
+repo, stop and tell me before writing code.
+```
+
+**You do:** the regression check matters most — a blank line INSIDE an
+existing function must still take the rewrite path. Then check indentation
+inside a class body.
+
+**Record:**
+```
+Write design/completed/backend/B39-<slug>.md and
+design/completed/frontend/F23-fill-on-a-blank-line.md following the
+format in design/completed/backend/INDEX.md. Add a row to each INDEX.
+
+State EXPLICITLY whether generation mode made the rewrite path's
+validation weaker. That is the one way this pair can do real damage, and
+a completed doc that does not answer it leaves the question open for
+whoever reads B24's checks next.
 ```
 
 **Then:** commit · `/clear`

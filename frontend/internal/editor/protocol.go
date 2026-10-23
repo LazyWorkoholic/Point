@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 
@@ -101,6 +102,13 @@ const (
 	// an unconditional steal, and this is not one.
 	queryRetakeLock
 	queryReloadFile
+
+	// F15's two. queryCreateSession is the Editor's own session
+	// (invoke.go); queryStaleCheck is the diff card's on-disk staleness
+	// guard, which is F9's Done-when #7 and the one guard in the apply
+	// path that cannot be answered without a round trip.
+	queryCreateSession
+	queryStaleCheck
 )
 
 // pendingReq is one query in flight: what kind of reply to expect, and
@@ -113,6 +121,16 @@ const (
 type pendingReq struct {
 	kind queryKind
 	path string
+
+	// card is the DiffCard a queryStaleCheck was asked for (F15).
+	//
+	// A pointer rather than a path, for the same reason diffApplyMsg
+	// carries one: FileStaleResult's payload is `{"changed": bool}` and
+	// names nothing at all -- not the file, not the mtime it compared --
+	// so the request is the only thing that knows what the answer is
+	// about, and the answer has to reach THAT card to refuse or apply on
+	// it. Nil for every other kind.
+	card *DiffCard
 }
 
 // localID mints a request id. protocol's own newID does the same job but is
@@ -154,8 +172,46 @@ func (w *Workspace) doSend(cmdType string, kind queryKind, payload map[string]an
 		return
 	}
 	path, _ := payload["path"].(string)
-	w.pending[id] = pendingReq{kind: kind, path: path}
+	req := pendingReq{kind: kind, path: path}
+	if kind == queryStaleCheck {
+		// The card this check is for, handed over by the apply handler
+		// immediately before the send and consumed here.
+		//
+		// A field rather than a parameter because `sendFn` is the test
+		// seam every test in this package substitutes, and widening its
+		// signature for one kind of query would rewrite a dozen tests
+		// that have nothing to do with this one. Consumed rather than
+		// read, so a later query of a different kind cannot inherit it.
+		req.card = w.staleCard
+		w.staleCard = nil
+	}
+	w.pending[id] = req
 }
+
+// doWrite is writeFn's real implementation: one envelope, no waiter, no
+// pending entry.
+//
+// Deliberately NOT doSend with a nil kind. The difference is not cosmetic:
+// doSend registers a correlation waiter and a pendingReq, and a SendMessage
+// answers with dozens of events sharing one corr_id, so a waiter would be
+// satisfied by the first and the entry would be deleted before the rest
+// arrived -- which is exactly the bug `invocationEnvelope` running BEFORE
+// the pending lookup exists to avoid.
+func (w *Workspace) doWrite(id, cmdType string, payload map[string]any) error {
+	if w.client == nil {
+		return errNoClient
+	}
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+	return w.client.Send(protocol.Envelope{ID: id, Type: cmdType, Payload: raw})
+}
+
+// errNoClient is doWrite's answer with no backend attached. A sentinel
+// rather than a formatted string so the one caller that wants to say
+// something specific about it can.
+var errNoClient = errors.New("no backend connection")
 
 // onConnected starts the sequence. Fired from every protocol.ConnectedMsg,
 // first launch and every later reconnect alike, so a backend restart
@@ -183,6 +239,16 @@ func (w *Workspace) onConnected() {
 }
 
 func (w *Workspace) handleEnvelope(env protocol.Envelope) tea.Cmd {
+	// F15's invocation events are tried FIRST, exactly as chat tries its
+	// stream events before its own pending map, and for the same reason: a
+	// SendMessage registers no correlation waiter (one corr_id, a whole
+	// stream of events, and Request's waiter channel holds one), so none of
+	// them is in `pending` and the `!ours` early return below would drop
+	// every token, every terminal event and the FillProposal with them.
+	if cmd, claimed := w.invocationEnvelope(env); claimed {
+		return cmd
+	}
+
 	req, ours := w.pending[env.CorrID]
 	if !ours {
 		return nil
@@ -219,6 +285,10 @@ func (w *Workspace) handleEnvelope(env protocol.Envelope) tea.Cmd {
 		return nil
 	case queryReloadFile:
 		return w.onReloaded(req, env)
+	case queryCreateSession:
+		return w.onSessionCreated(env)
+	case queryStaleCheck:
+		return w.onStaleResult(req, env)
 	}
 	return nil
 }
@@ -257,6 +327,27 @@ func (w *Workspace) onError(req pendingReq, env protocol.Envelope) tea.Cmd {
 			d.saving = false
 			d.autosaveBlocked = true
 		}
+	}
+
+	// F15: a refused CheckFileStale REFUSES THE APPLY. The question "did
+	// this file change since the region was generated" has not been
+	// answered, and the only safe reading of an unanswered staleness
+	// question is the one that does not splice -- F15's own words: "A
+	// staleness check that permits the dangerous apply is worse than no
+	// check at all, because it is believed."
+	//
+	// Reachable: `_handle_check_file_stale` resolves the SESSION's scope
+	// when given a session_id, and `resolve_path` raises PathDeniedError
+	// (an Error envelope, not a slug) for a file outside it -- which is
+	// exactly a document opened from a different project than the one the
+	// Editor's session is bound to.
+	if req.kind == queryStaleCheck && req.card != nil {
+		req.card.refuse("could not check the file on disk — " + msg)
+		return w.say("not applied — the file on disk could not be checked")
+	}
+	if req.kind == queryCreateSession {
+		w.creatingSession = false
+		return w.failPending("the backend refused to create a session — " + msg)
 	}
 	return w.say(msg)
 }

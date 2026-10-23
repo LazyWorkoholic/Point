@@ -41,9 +41,9 @@ func (w *Workspace) handleMouse(m tea.MouseMsg) tea.Cmd {
 func (w *Workspace) mousePress(m tea.MouseMsg) tea.Cmd {
 	switch m.Button {
 	case tea.MouseButtonWheelUp:
-		return w.wheel(m, -3)
+		return w.wheelBy(m, -wheelStep)
 	case tea.MouseButtonWheelDown:
-		return w.wheel(m, +3)
+		return w.wheelBy(m, +wheelStep)
 	case tea.MouseButtonLeft:
 	default:
 		return nil
@@ -63,6 +63,31 @@ func (w *Workspace) mousePress(m tea.MouseMsg) tea.Cmd {
 	if inRect(w.textArea, m.X, m.Y) && len(w.docs) > 0 {
 		w.focus = focusBuffer
 		d := w.docs[w.active]
+		// The click, resolved, in one log line.
+		//
+		// F15's gate reported the caret landing a line below the row
+		// clicked, and it could not be reproduced from synthesised
+		// events: a sweep that clicks EVERY visible row and compares the
+		// caret against the line number the gutter actually printed finds
+		// no mismatch, with or without a ghost, scrolled or not
+		// (rowmap_test.go). The one input this package cannot synthesise
+		// is the terminal's own mouse coordinate, so this records what
+		// arrived and what was made of it -- the same approach that
+		// settled "what wrote app.py" after three rounds of theories.
+		line, injected, blockRow := w.viewIndex(d).at(d.top + m.Y - w.textArea.Y)
+		w.log.Debug("editor: click resolved",
+			"screen_y", m.Y, "text_area_y", w.textArea.Y,
+			"row_offset", m.Y-w.textArea.Y, "top_row", d.top,
+			"line", line+1, "injected", injected, "block_row", blockRow)
+
+		if injected {
+			// A ghost row or the fill prompt. Not a line in the file, so
+			// there is no caret position to move to -- the focus change
+			// above is the whole of the response. Snapping to the
+			// nearest real line instead would move the caret somewhere
+			// the user did not click.
+			return nil
+		}
 		d.moveTo(w.posAt(d, m.X, m.Y), false)
 		// The anchor is planted even though nothing is selected yet, so
 		// the first motion event extends from where the press landed
@@ -76,8 +101,33 @@ func (w *Workspace) mousePress(m tea.MouseMsg) tea.Cmd {
 }
 
 // posAt turns a screen cell into a buffer position.
+//
+// # One row sequence, one conversion
+//
+// render.go emits rows the BUFFER does not have: the ghost text of a live
+// fill, and the inline fill prompt. They are entries in the document's row
+// sequence (viewrows.go), so a screen row is `d.top + rowOffset` in that
+// sequence and `viewIndex.at` says which line it is -- the SAME call the
+// renderer made to decide what to draw there. F15's gate hit the version of
+// this that counted screen rows as lines: clicking what looked like line 7
+// put the caret past line 12.
+//
+// This was re-derived for the unified model and is not the old arithmetic
+// carried over. The previous version subtracted an injected-row count that
+// was itself computed from the ghost's own scroll offset, which only held
+// while the ghost could never be above the top of the pane. It can be now
+// -- scrolling past a region is the point of the rewrite -- and `at` is
+// correct for that case by construction, because it is the same walk in
+// both directions.
+//
+// A click on an injected row itself has NO buffer position -- it is not in
+// the file. posAt still has to return something (every caller wants a Pos),
+// so it returns the line the block hangs off, which is where a caret put
+// there would sit anyway. The CALLER is what declines to move the caret at
+// all (see mousePress), so a click on a ghost row does nothing rather than
+// snapping somewhere arbitrary.
 func (w *Workspace) posAt(d *doc, x, y int) Pos {
-	line := d.top + (y - w.textArea.Y)
+	line, _, _ := w.viewIndex(d).at(d.top + y - w.textArea.Y)
 	if line < 0 {
 		line = 0
 	}
@@ -105,10 +155,10 @@ func (w *Workspace) dragTo(x, y int) {
 	d := w.docs[w.active]
 	switch {
 	case y < w.textArea.Y:
-		d.scrollBy(-1)
+		d.scrollBy(w.viewIndex(d), -1)
 		y = w.textArea.Y
 	case y >= w.textArea.Y+w.textArea.H:
-		d.scrollBy(+1)
+		d.scrollBy(w.viewIndex(d), +1)
 		y = w.textArea.Y + w.textArea.H - 1
 	}
 	d.cursor = d.buf.Clamp(w.posAt(d, x, y))
@@ -117,9 +167,28 @@ func (w *Workspace) dragTo(x, y int) {
 	d.desiredValid = false
 }
 
-func (w *Workspace) wheel(m tea.MouseMsg, lines int) tea.Cmd {
+// wheelStep is how many rows one notch of the wheel moves.
+const wheelStep = 3
+
+// wheelBy scrolls whichever card the pointer is over.
+//
+// # The follow, and why a scroll down is never eaten any more
+//
+// Any manual scroll stops the auto-follow, exactly as scrolling up out of
+// Chat's transcript unpins it. The follow RESUMES only when a scroll down
+// CROSSES the live edge from above -- not merely when it ends up at or past
+// it.
+//
+// That distinction is the whole fix for "scrolling down gets stuck inside
+// the ghost". The previous version re-armed the follow whenever a scroll
+// down reached the ghost's own last row, so the next frame pulled the
+// viewport straight back to the region and the code after the insertion
+// point was unreachable. Crossing is a one-time event: once the follow has
+// pinned the view to the edge, the next notch starts AT the edge, does not
+// cross it, and carries on down into the rest of the file.
+func (w *Workspace) wheelBy(m tea.MouseMsg, rows int) tea.Cmd {
 	if inRect(w.treeRect, m.X, m.Y) {
-		w.tree.top += lines
+		w.tree.top += rows
 		if w.tree.top < 0 {
 			w.tree.top = 0
 		}
@@ -128,8 +197,18 @@ func (w *Workspace) wheel(m tea.MouseMsg, lines int) tea.Cmd {
 		}
 		return nil
 	}
-	if len(w.docs) > 0 {
-		w.docs[w.active].scrollBy(lines)
+	d := w.activeDoc()
+	if d == nil {
+		return nil
+	}
+	v := w.viewIndex(d)
+	target, haveEdge := w.followTarget(d, v, w.textArea.H, w.textArea.W)
+
+	before := d.top
+	w.ghostFollow = false
+	d.scrollBy(v, rows)
+	if haveEdge && rows > 0 && before < target && d.top >= target {
+		w.ghostFollow = true
 	}
 	return nil
 }

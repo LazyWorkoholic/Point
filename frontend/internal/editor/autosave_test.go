@@ -188,7 +188,7 @@ func TestUndoAndApplyRegionBothArmTheAutosave(t *testing.T) {
 			ws, _, a, _ := autosaveWorkspace(t)
 			probe := ws.probeActive()
 			c.act(a)
-			if cmd := ws.autosaveAfter(probe); cmd == nil {
+			if cmd := ws.autosaveAfter(probe, "test"); cmd == nil {
 				t.Error("no autosave armed — rule 4 would be unmet")
 			}
 		})
@@ -203,7 +203,7 @@ func TestAKeyThatDoesNotEditArmsNothing(t *testing.T) {
 	ws, _, _, _ := autosaveWorkspace(t)
 	probe := ws.probeActive()
 	ws.handleKey(tea.KeyMsg{Type: tea.KeyRight})
-	if cmd := ws.autosaveAfter(probe); cmd != nil {
+	if cmd := ws.autosaveAfter(probe, "test"); cmd != nil {
 		t.Error("a caret move armed an autosave")
 	}
 }
@@ -218,7 +218,7 @@ func TestATabSwitchIsNotMistakenForAnEdit(t *testing.T) {
 
 	probe := ws.probeActive() // A
 	ws.cycleTab(+1)           // now B is active
-	if cmd := ws.autosaveAfter(probe); cmd != nil {
+	if cmd := ws.autosaveAfter(probe, "test"); cmd != nil {
 		t.Error("a tab switch armed an autosave for an unedited file")
 	}
 }

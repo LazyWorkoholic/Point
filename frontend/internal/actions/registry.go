@@ -19,10 +19,109 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 )
 
-// Leader is the prefix key for the leader sequences. Ctrl+Alt+<letter> is
-// unreliable on Windows Terminal, so the leader plus the palette is the
-// supported path for everything that is not a top-tier chord.
-const Leader = "ctrl+w"
+// Leader and LeaderAlt are BOTH the prefix key for the leader sequences.
+// Either one starts a chord; neither is a fallback for the other.
+//
+// # Why there are two
+//
+// ctrl+w cannot be relied on, through no fault of this codebase.
+// bubbletea's Windows key reader (v1 key_windows.go) returns KeyRunes when
+// a CTRL bit is set but neither the control character nor the virtual-key
+// code matches its tables -- its final `return KeyRunes` -- and KeyMsg has
+// no Ctrl field to carry the modifier. Ctrl+Shift+W reports Char 'W', so
+// it arrives as an ordinary printable rune, indistinguishable from typing.
+// In an editor that means the letter is inserted into the file. F15's gate
+// caught it three ways: `cause="key w"` on repeated fast presses,
+// `cause="key W"` right after a workspace load, `cause="key q"` at quit --
+// and a doubled "ww" when the chord was pressed immediately after
+// submitting the fill prompt, where the mangled first key leaves nothing
+// pending so the SECOND key lands as text too.
+//
+// F2 is immune by construction: VK_F2 resolves in the virtual-key table
+// BEFORE the ctrl/rune branch is reached, and carries no rune to insert.
+//
+// Alt+<letter> was read and rejected rather than assumed. It is a cleaner
+// path than ctrl -- Alt is set unconditionally from ControlKeyState on
+// every KeyMsg, outside keyType's lookups, so it cannot be lost the same
+// way -- but AltGr is LEFT_CTRL|RIGHT_ALT, which sets that same Alt bit,
+// so on a non-US layout an alt-letter leader would swallow AltGr-composed
+// characters. Trading one layout-dependent ambiguity for another is not a
+// fix.
+//
+// # Both stay, and both are shown
+//
+// Removing ctrl+w would make every muscle-memory press insert a literal
+// letter 100% of the time instead of occasionally -- strictly worse. So it
+// stays fully wired, and LeaderLabel below is what every hint, help screen
+// and status line prints, so neither key is a secret.
+const (
+	Leader    = "f2"
+	LeaderAlt = "ctrl+w"
+)
+
+// LeaderLabel is how the leader is NAMED to the user, everywhere.
+//
+// One value so a hint can never advertise half of it -- F04's rule that a
+// hint must not describe a binding that does not work, applied to the
+// opposite failure: a binding that works and is not described.
+//
+// DERIVED from the two keys rather than written out. It was a hand-typed
+// "F2 / ctrl+w" first, which is how the casing bug below got in: the
+// constant said F2 and every other function key printed itself raw, so the
+// help screen read "f3 / ctrl+q" next to "F2 / ctrl+w". Deriving it means
+// changing a leader key cannot leave the label describing the old one, and
+// the casing is whatever KeyLabel says for everybody.
+var LeaderLabel = KeyLabel(Leader) + " / " + KeyLabel(LeaderAlt)
+
+// KeyLabel is how ONE key is named to the user.
+//
+// # Function keys are upper-case; everything else is printed as it is bound
+//
+// bubbletea spells function keys lower-case ("f1", "f12") because that is
+// the key NAME it matches on, and for a while this package passed those
+// straight through to the UI while LeaderLabel spelled its own "F2" by
+// hand. The result was visible in one line of the help screen --
+// "f3 / ctrl+q · F2 / ctrl+w q" -- and in the Editor's empty state, which
+// printed "f5", "f6" and "f7" beside it. Nobody writes F2 as f2 on a
+// keyboard; the key is engraved upper-case.
+//
+// Modifier chords are NOT touched. "ctrl+p" stays lower-case, which is
+// what every hint in this app has printed since F1 and what the status bar
+// still prints beside these ("ctrl+p palette"). Upper-casing those would
+// be a second, larger change to every hint in the app for no reason
+// anybody asked for -- and "CTRL+P" is not how this UI talks.
+//
+// Named keys that are words ("tab", "esc", "enter") fall through
+// unchanged for the same reason.
+func KeyLabel(key string) string {
+	if isFunctionKey(key) {
+		return strings.ToUpper(key)
+	}
+	return key
+}
+
+// isFunctionKey matches exactly f1..f99 and nothing else -- not "ctrl+f1"
+// (a modifier chord, left alone) and not "friend" (not a key, but cheap
+// insurance against a label that is a word beginning with f).
+func isFunctionKey(key string) bool {
+	if len(key) < 2 || len(key) > 3 || key[0] != 'f' {
+		return false
+	}
+	for i := 1; i < len(key); i++ {
+		if key[i] < '0' || key[i] > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+// IsLeader reports whether a key starts a leader sequence.
+//
+// Every caller asks this rather than comparing against Leader, so adding
+// or changing a leader key cannot leave one site behind.
+func IsLeader(key string) bool {
+	return key == Leader || key == LeaderAlt
+}
 
 // Action is one registered capability.
 //
@@ -37,8 +136,35 @@ type Action[T any] struct {
 	Category    string
 	Leader      string
 	Chord       string
-	When        func(T) bool
-	Run         func(T) tea.Cmd
+	// AltChord is a SECOND direct binding for the same action, equal in
+	// standing to Chord rather than a fallback. It exists because quit
+	// needs one for the reason the leader does -- see Leader's own doc on
+	// bubbletea's Windows key reader -- and both are shown to the user.
+	AltChord string
+	When     func(T) bool
+	Run      func(T) tea.Cmd
+}
+
+// chords is every direct binding this action answers to.
+func (a Action[T]) chords() []string {
+	var out []string
+	if a.Chord != "" {
+		out = append(out, a.Chord)
+	}
+	if a.AltChord != "" {
+		out = append(out, a.AltChord)
+	}
+	return out
+}
+
+// ChordLabel is how this action's direct binding is NAMED to the user:
+// both keys when there are two, so neither is a secret.
+func (a Action[T]) ChordLabel() string {
+	out := a.chords()
+	for i, k := range out {
+		out[i] = KeyLabel(k)
+	}
+	return strings.Join(out, " / ")
 }
 
 // Available reports whether this action can run right now. An action with no
@@ -93,11 +219,11 @@ func (r *Registry[T]) Register(a Action[T]) {
 	// Chords and leader sequences live in separate namespaces: a leader "wp"
 	// and a chord "ctrl+p" do not collide, because you cannot type one when
 	// the other is expected.
-	if a.Chord != "" {
-		if prev, dup := r.byChord[a.Chord]; dup {
+	for _, chord := range a.chords() {
+		if prev, dup := r.byChord[chord]; dup {
 			r.problems = append(r.problems, fmt.Sprintf(
 				"duplicate chord %q: bound to %q (%s) and %q (%s)",
-				a.Chord, r.list[prev].ID, r.list[prev].Name, a.ID, a.Name))
+				chord, r.list[prev].ID, r.list[prev].Name, a.ID, a.Name))
 			return
 		}
 	}
@@ -124,8 +250,8 @@ func (r *Registry[T]) Register(a Action[T]) {
 	idx := len(r.list)
 	r.list = append(r.list, a)
 	r.byID[a.ID] = idx
-	if a.Chord != "" {
-		r.byChord[a.Chord] = idx
+	for _, chord := range a.chords() {
+		r.byChord[chord] = idx
 	}
 	if a.Leader != "" {
 		r.byLeader[a.Leader] = idx

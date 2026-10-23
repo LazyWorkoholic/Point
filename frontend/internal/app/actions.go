@@ -33,8 +33,15 @@ func registerActions() *actions.Registry[*Root] {
 		// Bug 17's draft flush below moved WITH the action, not with the
 		// old chord — leaving it behind would have restored the exact
 		// data loss F4 spent a verification round finding.
-		Chord:  "ctrl+q",
-		Leader: "q",
+		// BOTH, equally. ctrl+q has the same Windows input-layer hazard
+		// the leader does -- F15's gate logged `cause="key q"` at the
+		// moment of a quit press, the letter landing in the file -- and
+		// f3 is immune for the same reason f2 is: a virtual-key code
+		// resolved before the ctrl/rune branch, carrying no rune.
+		// Neither is a fallback; ChordLabel() prints both.
+		Chord:    "f3",
+		AltChord: "ctrl+q",
+		Leader:   "q",
 		Run: func(root *Root) tea.Cmd {
 			// F7: quit with a backend task running is a destructive action
 			// — it abandons work in progress — and routes through Confirm
@@ -379,6 +386,78 @@ func registerActions() *actions.Registry[*Root] {
 		Run: func(root *Root) tea.Cmd {
 			root.client.Retry()
 			return status("retrying the backend")
+		},
+	})
+
+	// ---- F15 ------------------------------------------------------------
+	//
+	// leader → a (explain, "ask") and leader → f (fill), NOT the `x`
+	// F15's Build asks for -- and not `e` either, which was this
+	// episode's first substitution and was also wrong.
+	//
+	// Both unavailable letters are unavailable the same way, and it is
+	// not a conflict to live with: actions.Registry.Validate rejects a
+	// duplicate leader sequence as a BOOT FAILURE (registry.go: "called
+	// at boot, before the program starts, so a duplicate binding is a
+	// boot failure"), so either one would have produced an app that does
+	// not start, not a key that does the wrong thing.
+	//
+	//   `x`  context.expand, since S13d.
+	//   `e`  workspace.switch.editor -- NOT a hand-registered action and
+	//        so not visible in a grep for `Leader: "`, which is how this
+	//        episode picked it in the first place. registerWorkspaces
+	//        derives one switch action per workspace from
+	//        WorkspaceDef.LeaderKey (registry.go), main.go sets `e` for
+	//        the Editor, and contribute_test.go's
+	//        TestLeaderEIsNotTakenByAShippedAction exists specifically to
+	//        keep it free. Caught by that test on the first run.
+	//
+	// This is the same substitution S13d itself made and recorded: F12
+	// asked for `c`/`e` for the workspace switcher, `c` had been
+	// pane.right.toggle's since S13d, and the switcher moved to `w`.
+	// `a` and `f` are free against the WHOLE shipped set, including the
+	// derived ones -- asserted by this episode's own test rather than by
+	// reading a list.
+	//
+	// Both are registered unconditionally and gated by When, which is what
+	// makes them appear in the palette and the help screen in Chat too --
+	// greyed, with the honest reason, rather than invisible. That is the
+	// same treatment context.expand gets from the same shape of predicate.
+	r.Register(actions.Action[*Root]{
+		ID:          "editor.explain",
+		Name:        "Explain Code",
+		Description: "Ask the Filler-Explainer about the code under the caret -- the reply opens in a panel beside it",
+		Category:    "Editor",
+		Leader:      "a",
+		When: func(root *Root) bool {
+			_, ok := root.current().(EditorAgent)
+			return ok
+		},
+		Run: func(root *Root) tea.Cmd {
+			ea, ok := root.current().(EditorAgent)
+			if !ok {
+				return nil
+			}
+			return ea.BeginExplain()
+		},
+	})
+
+	r.Register(actions.Action[*Root]{
+		ID:          "editor.fill",
+		Name:        "Fill at the Caret",
+		Description: "Ask the Filler-Explainer to write a region at the caret -- reviewed as a diff before it reaches the buffer",
+		Category:    "Editor",
+		Leader:      "f",
+		When: func(root *Root) bool {
+			_, ok := root.current().(EditorAgent)
+			return ok
+		},
+		Run: func(root *Root) tea.Cmd {
+			ea, ok := root.current().(EditorAgent)
+			if !ok {
+				return nil
+			}
+			return ea.BeginFill()
 		},
 	})
 
