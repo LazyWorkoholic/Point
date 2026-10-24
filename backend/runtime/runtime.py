@@ -16,6 +16,7 @@ import appconfig_overrides
 from agents.executor import AgentExecutor, BoundsOverride
 from agents.registry import AgentRegistry
 from database.connection import open_database
+from database.event_repository import EventRepository
 from database.message_checkpoint_repository import MessageCheckpointRepository
 from database.migrations import SCHEMA_VERSION
 from database.proposal_repository import ProposalRepository
@@ -177,6 +178,15 @@ class Runtime:
         # the real `messages` row exists. Nothing that reads history can
         # see it -- see migration v7 for why it is a separate table.
         self.checkpoints = MessageCheckpointRepository(db_conn)
+        # B40: the durable event log. Every session-scoped envelope that
+        # leaves `_emit` is written here, and `EventsSince` reads it back
+        # after a reconnect. Constructed before `_register_handlers()`
+        # because the handler closes over it.
+        #
+        # It does NOT hold the token stream -- see
+        # `database\event_repository.py` for the policy and the measured
+        # reason for it.
+        self.events = EventRepository(db_conn)
         # The recorder is how a Task's state transitions reach the `tasks`
         # table. TaskManager still owns the live objects.
         self.tasks = TaskManager(recorder=self._record_task)
@@ -466,7 +476,7 @@ class Runtime:
         self.dispatcher.register(IncomingEventType.SET_BEHAVIOUR_OVERRIDE, self._handle_set_behaviour_override)
         self.dispatcher.register(IncomingEventType.GET_DOCTOR_REPORT, self._handle_get_doctor_report)
         self.dispatcher.register(IncomingEventType.WORKSPACE_UNLOAD, self._handle_workspace_unload)
-        self.dispatcher.register(IncomingEventType.SESSION_REPLAY_SINCE, self._handle_session_replay_since)
+        self.dispatcher.register(IncomingEventType.EVENTS_SINCE, self._handle_events_since)
 
     async def receive(self, raw: dict[str, Any]) -> None:
         try:
@@ -1733,51 +1743,56 @@ class Runtime:
             },
         ))
 
-    async def _handle_session_replay_since(self, event: IncomingEvent) -> None:
-        r"""The replay rung of F2's recovery ladder (B15), served at
-        MESSAGE level.
+    async def _handle_events_since(self, event: IncomingEvent) -> None:
+        r"""The replay rung of F2's recovery ladder (B40), served from
+        the durable event log.
 
-        **Read `events.py`'s note on SESSION_REPLAY_SINCE before
-        changing this.** It is not `session.events_since`: there is no
-        event log in this schema, nothing persists an `OutgoingEvent`,
-        and the envelope `seq` a replay would have to be keyed on is an
-        in-memory per-task counter that does not outlive the task. What
-        IS durable and ordered per session is `messages.seq` (B18), so
-        that is what this is keyed on, and the payload says so in
-        `mechanism` rather than leaving a client to assume otherwise.
+        **This replaces B15's `SessionReplaySince`, which is deleted.**
+        B15 was asked for `events_since(session_id, seq)` and this repo
+        had no event log to serve it from, so it shipped message-level
+        replay keyed on `messages.seq` as a named interim and deferred
+        the real thing. Migration v8's `events` table is that thing.
 
-        What Go gets back is what it needs to rebuild a transcript it
-        was disconnected from: the messages after its high-water mark,
-        oldest first, plus the current state of that session's tasks so
-        a task it marked UNKNOWN can be resolved to what actually
-        happened -- including a `backend_died` row written by crash
-        recovery before this process accepted a single event.
+        The difference is what a client gets back. Message-level replay
+        answered *what does this transcript look like now*. This answers
+        *what happened while I was gone* -- the tool call that started
+        AND completed in the gap, the progress steps, the usage update,
+        the `FillProposal` pushed after a terminal event. None of those
+        are messages, so none of them were expressible before.
 
-        `since_seq` of 0 (or absent) means "everything", which is the
-        honest answer for a client that has no mark yet. It is bounded
-        by `limit` like every other history query here, and
-        `has_more` tells a caller to come back with a higher mark
-        rather than silently truncating.
+        What it deliberately does not replay is the token stream.
+        `TextDelta`/`ThinkingDelta`/`TaskToken` are not in the log at
+        all (see `database\event_repository.py` for the policy and the
+        measurement behind it), so a replayed turn arrives as its
+        structure with the prose coming from `messages` -- or, for a
+        reply the process died mid-way through, from B15's
+        `message_checkpoints`, which this episode does not touch.
+
+        `since_seq` is the `event_seq` cursor and nothing else. 0 or
+        absent means everything the log still holds, which retention
+        bounds -- so a client whose mark has been swept past gets the
+        oldest surviving events rather than a lie about completeness,
+        and `has_more` is how it learns to come back.
+
+        `tasks` is carried over from B15's reply unchanged, for the
+        reason B15 gave: replaying events rebuilds the view, and the
+        task rows are what resolve a task the client marked UNKNOWN --
+        including a `backend_died` row written by crash recovery before
+        this process accepted a single event. Live objects first,
+        durable rows second, the same rule `_handle_list_tasks` states.
         """
         p = event.payload
         session_id = p.get("session") or p.get("session_id")
         if not session_id:
-            raise InvalidEventError("SessionReplaySince requires 'session'")
+            raise InvalidEventError("EventsSince requires 'session'")
 
-        since_seq = _parse_optional_int(p.get("since_seq"), "SessionReplaySince", "since_seq") or 0
+        since_seq = _parse_optional_int(p.get("since_seq"), "EventsSince", "since_seq") or 0
         if since_seq < 0:
-            raise InvalidEventError("SessionReplaySince 'since_seq' must not be negative")
-        limit = _parse_optional_positive_int(p.get("limit"), "SessionReplaySince", "limit") or 200
+            raise InvalidEventError("EventsSince 'since_seq' must not be negative")
+        limit = _parse_optional_positive_int(p.get("limit"), "EventsSince", "limit") or 200
 
-        messages, _has_before, has_more = await self.sessions.get_messages_page(
-            session_id, before=None, after=since_seq, limit=limit,
-        )
+        events, has_more = await self.events.events_since(session_id, since_seq, limit)
 
-        # Live objects first, durable rows second -- the same rule
-        # `_handle_list_tasks` states, for the same reason. A task that
-        # is still running after a RECONNECT (the backend did not die;
-        # the pipe did) must report `running`, not whatever its row last
-        # said.
         live = {t.id: t for t in self.tasks.list_all() if t.session_id == session_id}
         tasks = [
             {
@@ -1803,15 +1818,15 @@ class Runtime:
             })
 
         await self._emit(OutgoingEvent(
-            type=OutgoingEventType.SESSION_REPLAY,
+            type=OutgoingEventType.SESSION_EVENTS,
             request_id=event.request_id,
             session_id=session_id,
             payload={
                 "session": session_id,
                 "since_seq": since_seq,
-                "mechanism": "messages.seq",
+                "mechanism": "events.session_seq",
                 "replay": True,
-                "messages": [m.to_dict() for m in messages],
+                "events": events,
                 "tasks": tasks,
                 "has_more": has_more,
             },
@@ -2224,7 +2239,56 @@ class Runtime:
         )
 
     async def _emit(self, event: OutgoingEvent) -> None:
-        await self.outbox.put(self._fill_envelope(event))
+        r"""The one serialization boundary, and now the one persistence
+        boundary too (B40).
+
+        The log is written from HERE, not from `main.py`'s writer loop,
+        and that was B40's call rather than an accident of convenience:
+        the writer loop is transport, it holds no database handle, and a
+        log that only records what was successfully written to stdout
+        cannot record the envelopes that mattered when stdout died.
+
+        Order matters. The envelope is filled first (so the log stores
+        the same `session_id` the client will see), then persisted (so
+        the assigned cursor exists), then put on the outbox carrying
+        that cursor as `event_seq`. Putting it on the outbox first would
+        be faster and would emit envelopes whose `event_seq` is null
+        even though the row exists -- a client marking its high-water
+        mark would skip them and replay them forever.
+
+        The event log is a recovery aid and the envelope is the product,
+        so **nothing the log does may stop an envelope going out.**
+        `EventRepository.append` already catches operational failures (a
+        locked database, a full disk) and returns None, which is the
+        first line of that. The `try` here is the second, and it is not
+        redundant: the guarantee belongs to the boundary that depends on
+        it. Without it, any defect in the log path -- not just the
+        failures `append` anticipated -- turns into a reply the user
+        waiting for it never receives, which is a far worse outcome than
+        a degraded replay. B40's own check caught this by stubbing a
+        raising `append` and watching the request die.
+        """
+        filled = self._fill_envelope(event)
+        try:
+            event_seq = await self.events.append(
+                event_id=filled.event_id,
+                session_id=filled.session_id,
+                task_id=filled.task_id,
+                corr_id=filled.request_id,
+                event_type=filled.type.value,
+                stream_seq=filled.seq,
+                ts=filled.timestamp,
+                payload=filled.payload,
+            )
+        except Exception:
+            _log.warning(
+                "event log raised for %s; emitting with no event_seq",
+                filled.type.value, exc_info=True,
+            )
+            event_seq = None
+        if event_seq is not None:
+            filled = replace(filled, event_seq=event_seq)
+        await self.outbox.put(filled)
 
     async def emit_hello(self) -> None:
         """First envelope on the wire, before anything else, caused by no
@@ -2299,6 +2363,14 @@ class Runtime:
         while True:
             await asyncio.sleep(interval)
             self.tasks.sweep_finished()
+            # B40 retention. Same loop, same reason the task sweep is
+            # here: a bounded store needs something that bounds it, and
+            # the heartbeat is the only thing in this process that runs
+            # forever and is not on a request path. `maybe_sweep` is
+            # throttled internally (every ~5 min, not every 5s) -- the
+            # cadence belongs with the caps, in the repository, not
+            # spread across this loop.
+            await self.events.maybe_sweep()
             if not self.state.is_accepting_events():
                 continue
             await self._emit(OutgoingEvent(

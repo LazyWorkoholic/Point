@@ -821,3 +821,142 @@ streaming thousands — negligible on the wire, and it removes a special case
 rather than adding one. B15 makes the change and deletes `busyGrace` with it;
 until then the frontend carries a workaround for a backend decision, which is
 the wrong side for it to live on.
+
+### D99 — The event log holds lifecycle events, not the token stream
+
+**B40.** `events` (migration v8) persists every session-scoped envelope
+that leaves `Runtime._emit`, **except** `TextDelta`, `ThinkingDelta` and
+`TaskToken`.
+
+**Why:** a write per envelope on the streaming hot path goes through
+B22's `SerializedConnection`, which takes a connection-wide
+`asyncio.Lock` and commits per statement. Measured with
+`cli.py bench event-log` over a 2,000-delta fixture, four runs: logging
+everything costs ~2ms per envelope and **15-20x** the baseline wall-clock
+of a turn (~4.0s vs ~0.23s); logging only lifecycle events is four writes
+a turn and sits inside run-to-run noise. **(c)'s cost is not claimed to
+be zero** — its measured spread straddles zero, which is the honest
+reading of a sub-300ms measurement.
+
+It is also the correct answer and not merely the cheap one. Those three
+types are exactly `IsDroppable` in
+`frontend\internal\protocol\types.go`: the live path may already discard
+them under backpressure, because the accumulated string re-renders from
+the next token. An event the live path may drop is not one a replay can
+be expected to have. And the text is not lost by its absence — it
+rebuilds from `messages`, or from B15's `message_checkpoints` for a reply
+the process died mid-way through. Persisting the deltas would be a third
+copy of the same string, written per delta.
+
+So a replay reconstructs the **structure** of what happened — the tool
+call that started and completed while the client was away, progress
+steps, usage updates, a `FillProposal` after a terminal event, none of
+which B15's message-level interim could express — with the prose coming
+from the tables that already own prose.
+
+**Cost:** a reconnect cannot replay a half-finished sentence
+token-by-token. It gets the finished text, or the checkpointed partial,
+and the event structure around it. Option (b) (buffer and flush) was not
+built: (c) made it unnecessary rather than preferable, since the volume
+(b) exists to batch is the volume (c) does not write.
+
+**Corollary, found while building:** the reply to `EventsSince` must NOT
+be logged. `_emit` is the one persistence boundary and the reply goes
+through it, so the first version logged a row whose payload was a copy of
+a page of the log — growing super-linearly in replays, and making
+`events_since(session, max_seq)` never settle. `REPLAY_TYPES` excludes it
+unconditionally. **An envelope that carries log contents is not log
+content.**
+
+### D100 — `event_seq` is a new envelope field; `seq` keeps its meaning
+
+**B40.** The durable per-session event cursor rides on the envelope as
+`event_seq`. The existing `seq` still means `StreamManager`'s
+per-task stream counter, unchanged.
+
+**Why:** additive is the rule B1-B5 are frozen under and the pattern
+B18, B24 and B36 all followed, and here it is also a concrete count —
+**four consumers already decode `seq`** (`StreamAccumulator`, F5's stream
+ordering, F18's pagination, B24's `FillProposal` note). Redefining it
+would be one field instead of two, bought with a contract change
+arriving disguised as the same field: the kind a frontend episode finds
+six weeks later, because nothing fails at the boundary.
+
+There are now three distinct per-something counters in this repo and
+conflating any two is a bug: the per-task stream `seq` (in-memory,
+dropped at `close_stream()`, null on every lifecycle event),
+`messages.seq` (v6/B18, per-session message insertion order), and
+`events.session_seq` / `event_seq` (v8/B40, per-session event order).
+
+`event_seq` is null on any envelope the log does not hold — one with no
+session, and the three token types of D99. A client marks the non-null
+ones with `MarkSeen`; the nulls are not gaps.
+
+**Cost:** one more nullable integer on every envelope, and B24's note
+that *"`seq` is null on BOTH envelopes and cannot order them"* is now
+incomplete rather than wrong — `seq` is still null there, and `event_seq`
+is what can order them.
+
+`MarkSeen` stays the **consumer's** to call even though `event_seq` is a
+routing field the protocol package now parses. The mark means "has been
+rendered", not "has arrived": auto-marking in `deliver()` would advance
+it for events still sitting in a channel, and a reconnect would then skip
+exactly the events the UI never drew.
+
+### D101 — The event log is per-session, so session-less envelopes are not logged
+
+**B40.** `events.session_id` is `NOT NULL REFERENCES sessions(id) ON
+DELETE CASCADE`. `hello`, `ping`, and every reply that carries no session
+are not written.
+
+**Why:** B40's own Build section drafted the column nullable, reasoning
+that "an event log that cannot hold them is not a log of what went over
+the wire" — and that contradicted its own next column. `session_seq` is a
+**per-session** cursor, so an envelope with no session has no position in
+any cursor space for a `NOT NULL` column to take, and the one query
+against the table (`WHERE session_id = ? AND session_seq > ?`) can never
+return such a row. The contradiction resolves in favour of the cursor,
+because the cursor is the only reason the table exists.
+
+This is wider than `hello`/`ping`. `_fill_envelope` backfills
+`session_id` only when the *request* carried one, so `SessionList`,
+`ProviderList`, `ProviderModelList`, `AgentList`, `DirectoryList`,
+`DoctorReport`, `BehaviourOverrideSet`, `TaskList`, `shutdown.complete`
+and any `Error` raised before a session is known all emit session-less.
+Writing them would be unreplayable rows — at one `ping` every five
+seconds forever, given B15's unconditional heartbeat (D98).
+
+**Cost:** the table's claim is narrower than "everything on the wire".
+It is what went over the wire **for a session**, and the narrower claim
+is the true one. Wire-completeness would need a second global cursor
+column and a nullable `session_id`, buying a `ping` row every five
+seconds that nothing reads.
+
+### D102 — Event retention: 7 days or 2,000 rows per session, swept from the heartbeat
+
+**B40.** Two caps, both enforced by `EventRepository.sweep()`, called
+from `_heartbeat_loop` every 60th beat (~5 min).
+
+**Why:** an append-only log on a long-lived local backend is a disk-full
+bug with a long fuse, and B40 required the policy decided in-episode
+rather than deferred to B17. Age (7 days) is the cap that matches what
+replay is *for* — a client away a week restarted, it is not
+reconnecting — and still leaves the log readable as a "what did the
+backend send yesterday" diagnostic. The per-session row cap (2,000)
+bounds one very busy session inside that window; per-session rather than
+global so a chatty session cannot evict a quiet one's replayable
+history, and 2,000 is an order of magnitude above `client.go`'s
+`replayLimit` of 200. `TaskManager.sweep_finished` is the precedent for
+running it from the heartbeat; the throttle keeps a DELETE scan off a
+5-second cadence.
+
+**A sweep does not renumber.** `session_seq` has gaps afterwards and that
+is correct: the cursor is a high-water mark, `events_since` asks `> seq`
+rather than for a dense run, and renumbering would invalidate every
+client's existing mark. A client whose mark was swept past gets the
+oldest surviving events plus `has_more`, which is the most a bounded log
+can honestly offer.
+
+**Cost:** replay has a horizon. Beyond it a reconnect falls back to the
+transcript, which is what B15's interim did for every case.
+

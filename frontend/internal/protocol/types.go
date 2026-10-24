@@ -73,20 +73,32 @@ const (
 	// backend's lifetime, not the view's. The reply says which resources
 	// a live task's existence protected.
 	CmdWorkspaceUnload = "WorkspaceUnload"
-	// CmdSessionReplaySince is the replay rung of F2's ladder, finally
-	// callable — and NOT named `session.events_since`, which is what F2
-	// specified and what this file's own TODO used to point at.
+	// CmdEventsSince is the replay rung of F2's ladder, read from the
+	// backend's durable event log (B40, migration v8) — the command F2 was
+	// specified against.
 	//
-	// There is no event log in the backend's schema: nothing persists an
-	// OutgoingEvent, and the envelope `seq` is an in-memory per-TASK
-	// counter the backend drops when the task ends. What is durable and
-	// ordered per session is `messages.seq` (B18), so replay is keyed on
-	// that and the reply says `mechanism: "messages.seq"` out loud. The
-	// real event log is B15's deferred half, B40, which replaces this
-	// command — see design\tasks\backend\B40-durable-event-log.md.
+	// B15 could not serve it: nothing persisted an OutgoingEvent, so it
+	// shipped CmdSessionReplaySince instead, message-level replay keyed on
+	// `messages.seq` with `mechanism` stated on the wire. **B40 deleted
+	// that command rather than keeping it beside this one**, because two
+	// replay commands with two different cursors is a second copy that can
+	// disagree.
 	//
-	// Payload: {session, since_seq, limit}. since_seq 0 means everything.
-	CmdSessionReplaySince = "SessionReplaySince"
+	// The cursor here is `event_seq` (the backend's `events.session_seq`),
+	// which is neither `messages.seq` nor the per-task stream `seq`. What
+	// it buys over message-level replay is everything that is not a
+	// message: the tool call that started AND completed while this client
+	// was away, progress steps, usage updates, a FillProposal pushed after
+	// a terminal event.
+	//
+	// The token stream is deliberately absent from the log, so a replayed
+	// turn arrives as its structure and the prose comes from `messages`.
+	// That is the same trade IsDroppable already makes live.
+	//
+	// Payload: {session, since_seq, limit}. since_seq 0 means everything
+	// the log still holds — retention bounds it, so `has_more` is how a
+	// caller learns its mark was swept past.
+	CmdEventsSince = "EventsSince"
 )
 
 // Events — Python to Go (OutgoingEventType).
@@ -196,14 +208,16 @@ const (
 	// does not have, e.g. symbol caches, which do not exist). Nothing in
 	// it claims freed memory, and nothing in this client should either.
 	EvWorkspaceUnloaded = "WorkspaceUnloaded"
-	// EvSessionReplay is the reply to CmdSessionReplaySince: {session,
-	// since_seq, mechanism, replay, messages, tasks, has_more}.
+	// EvSessionEvents is the reply to CmdEventsSince: {session, since_seq,
+	// mechanism, replay, events, tasks, has_more}.
 	//
 	// It is routed as RouteReplay, never RouteSession, so a consumer can
-	// never mistake a replayed message for a new one. Messages carry
-	// their `seq` and their id; merge by those rather than appending, and
-	// a replay that overlaps what is already rendered costs nothing.
-	EvSessionReplay = "SessionReplay"
+	// never mistake a replayed ToolCompleted for a tool completing now.
+	// Each entry in `events` is the envelope as it originally went out,
+	// carrying its own `event_seq`; merge by that and by id rather than
+	// appending, and a replay overlapping what is already rendered costs
+	// nothing.
+	EvSessionEvents = "SessionEvents"
 	// EvShutdownComplete is the ONE terminal ack for CmdShutdown, and the
 	// last envelope this client ever reads from that backend process.
 	// Before B15 the backend acked nothing and did not exit.

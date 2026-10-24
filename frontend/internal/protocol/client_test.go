@@ -881,19 +881,19 @@ func TestNextYieldsMessagesThenClosed(t *testing.T) {
 // A replayed message must never look like a new one. It carries a session_id
 // and a corr_id, so without its own route it would arrive as RouteSession or
 // RouteCorrelation and a consumer that appended it would duplicate history.
-func TestSessionReplayGetsItsOwnRoute(t *testing.T) {
+func TestSessionEventsReplayGetsItsOwnRoute(t *testing.T) {
 	c, f, get, done := connected(t)
 	defer done()
 
-	replies, err := c.Request(Envelope{ID: "req-r", Type: CmdSessionReplaySince}, time.Second)
+	replies, err := c.Request(Envelope{ID: "req-r", Type: CmdEventsSince}, time.Second)
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	f.out <- Envelope{
-		V: Version, ID: "rep", Type: EvSessionReplay, CorrID: "req-r",
+		V: Version, ID: "rep", Type: EvSessionEvents, CorrID: "req-r",
 		SessionID: "s1",
-		Payload:   json.RawMessage(`{"session":"s1","since_seq":0,"replay":true,"messages":[],"tasks":[]}`),
+		Payload:   json.RawMessage(`{"session":"s1","since_seq":0,"replay":true,"events":[],"tasks":[]}`),
 	}
 
 	msg := waitFor(t, get, func(m tea.Msg) bool {
@@ -1009,7 +1009,7 @@ func TestReconnectRequestsReplayFromTheMark(t *testing.T) {
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
 		for _, env := range backends[1].sent() {
-			if env.Type == CmdSessionReplaySince {
+			if env.Type == CmdEventsSince {
 				e := env
 				replay = &e
 				break
@@ -1021,7 +1021,7 @@ func TestReconnectRequestsReplayFromTheMark(t *testing.T) {
 		time.Sleep(time.Millisecond)
 	}
 	if replay == nil {
-		t.Fatal("reconnect sent no SessionReplaySince -- the seam is still a no-op")
+		t.Fatal("reconnect sent no EventsSince -- the seam is still a no-op")
 	}
 	if replay.SessionID != "sess-1" {
 		t.Errorf("replay session = %q, want sess-1", replay.SessionID)

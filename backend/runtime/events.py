@@ -31,6 +31,22 @@ output, otherwise unused -- the SSH and tracing hooks.
 payload (where it still appears, so StreamAccumulator is untouched). It
 is null on envelopes that are not part of a task's token stream; a
 lifecycle event is identified by its type, not by counting.
+
+`event_seq` (B40) is a SECOND, unrelated cursor, and the distinction is
+load-bearing: it is the durable, per-session, monotonic position of this
+envelope in `events` (migration v8). It was added as a new field rather
+than by redefining `seq`, which is the additive rule B1-B5 are frozen
+under and the pattern B18, B24 and B36 all followed -- `seq` still means
+exactly what it meant, so StreamAccumulator, F5's stream ordering and
+F18's pagination all keep working untouched. Redefining `seq` would have
+been one field instead of two and a contract change arriving disguised
+as the same field, which is the kind a frontend episode finds six weeks
+later.
+
+`event_seq` is null on any envelope the log does not hold: one with no
+session, and the three token-stream types `database\event_repository.py`
+excludes. A client marks its high-water mark from the non-null ones and
+asks `EventsSince` for the gap.
 """
 
 from __future__ import annotations
@@ -121,24 +137,24 @@ class IncomingEventType(str, Enum):
     # event, and the refusal rule in `runtime\lifecycle.py` is what
     # makes that safe rather than a hope.
     WORKSPACE_UNLOAD = "WorkspaceUnload"
-    # B15: the replay rung of F2's recovery ladder, as much of it as
-    # this repo can honestly serve.
+    # B40: the replay rung of F2's recovery ladder, served from the
+    # durable event log (migration v8) -- the command F2 was written
+    # against and B15 could not serve.
     #
-    # **NOT `session.events_since`, and the difference is the point.**
-    # B15's Build section asks for `events_since(session_id, seq)`, and
-    # there is no event log to read it from: no `events` table in the
-    # schema, nothing persists an `OutgoingEvent`, and the envelope's
-    # `seq` is an in-memory per-TASK counter (`StreamManager._sequences`)
-    # dropped by `close_stream()` and null on every lifecycle event.
-    # `messages.seq` (migration v6, B18) is a different quantity
-    # entirely: per-session insertion order, durable, indexed.
+    # B15 shipped `SessionReplaySince` here instead: message-level
+    # replay keyed on `messages.seq`, named for what it did, with
+    # `mechanism` on the wire so no consumer had to guess which `seq` it
+    # held. **B40 DELETED it rather than keeping it beside this.** Two
+    # replay commands with two different cursors is the "second copy
+    # that can disagree" this repo removes on sight (`managers\provider.py`,
+    # `managers\tool.py`).
     #
-    # So this serves MESSAGE-level replay keyed on `messages.seq`, which
-    # is what F2 actually needs to rebuild a transcript, and it is named
-    # for what it does. The real event log is B40
-    # (`design\tasks\backend\B40-durable-event-log.md`), which replaces
-    # this command and must re-run B15's Done-when #4 when it lands.
-    SESSION_REPLAY_SINCE = "SessionReplaySince"
+    # Payload: {session, since_seq, limit}. `since_seq` is the
+    # `event_seq` cursor (`events.session_seq`), NOT `messages.seq` and
+    # NOT the per-task stream `seq`. 0 or absent means everything the log
+    # still holds -- which retention bounds, so "everything" is honest
+    # rather than complete, and `has_more` is how a caller finds out.
+    EVENTS_SINCE = "EventsSince"
 
 
 @dataclass(frozen=True)
@@ -283,12 +299,21 @@ class OutgoingEventType(str, Enum):
     # tasks and their states) and `absent` (a resource B15 names that
     # this backend does not have). Nothing in it claims freed memory.
     WORKSPACE_UNLOADED = "WorkspaceUnloaded"
-    # B15: the reply to SessionReplaySince. `{session, since_seq,
-    # messages, tasks, replay: true, mechanism: "messages.seq"}`.
-    # `replay: true` is what lets Go route these through the same
-    # `deliver()` path as live events without mistaking a replayed
-    # message for a new one.
-    SESSION_REPLAY = "SessionReplay"
+    # B40: the reply to EventsSince. `{session, since_seq, events,
+    # tasks, has_more, mechanism: "events.session_seq"}`.
+    #
+    # Each entry in `events` is the envelope as it went out, with
+    # `replay: true` on it -- which is what lets Go route these through
+    # the same `deliver()` path as live events without mistaking a
+    # replayed `ToolCompleted` for a tool completing now. `mechanism` is
+    # kept from B15's reply for the same reason B15 put it there: a
+    # client should read which cursor it is holding, not infer it.
+    #
+    # `tasks` rides along unchanged from B15's reply. Replaying the
+    # events is what rebuilds the view; the task states are what resolve
+    # a task the client marked UNKNOWN, including a `backend_died` row
+    # crash recovery wrote before this process accepted an event.
+    SESSION_EVENTS = "SessionEvents"
     # B15: the ONE terminal ack for a `Shutdown` command, emitted and
     # flushed before the outbox writer stops. This is the last envelope
     # Go ever reads from this process. Before B15 the handler acked
@@ -316,6 +341,10 @@ class OutgoingEvent:
     connection_id: Optional[str] = None
     trace_id: Optional[str] = None
     seq: Optional[int] = None
+    # B40's durable per-session event cursor. Set by `Runtime._emit`
+    # from what the log assigned, so it is null on every envelope the
+    # log does not hold -- see this module's docstring.
+    event_seq: Optional[int] = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -328,6 +357,7 @@ class OutgoingEvent:
             "connection_id": self.connection_id,
             "trace_id": self.trace_id,
             "seq": self.seq,
+            "event_seq": self.event_seq,
             "ts": self.timestamp,
             "payload": self.payload,
         }

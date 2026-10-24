@@ -59,10 +59,10 @@ const (
 	// against it in every state. The budget below is the honest one for
 	// both idle and busy.
 
-	// replayLimit caps one CmdSessionReplaySince request. A session with
-	// more history than this replays its newest page and reports
-	// has_more; the mark advances as the consumer renders, so the next
-	// request continues rather than repeating.
+	// replayLimit caps one CmdEventsSince request. A session with more
+	// log than this replays its oldest unseen page and reports has_more;
+	// the mark advances as the consumer renders, so the next request
+	// continues rather than repeating.
 	replayLimit = 200
 )
 
@@ -199,8 +199,14 @@ type Client struct {
 	pending  map[string]*waiter
 	inflight map[string]struct{}
 
-	// lastSeq is the per-session replay high-water mark (B15): the
-	// highest `messages.seq` a consumer has told us it has rendered.
+	// lastSeq is the per-session replay high-water mark: the highest
+	// `event_seq` a consumer has told us it has rendered.
+	//
+	// B15 built this over `messages.seq`, because that was the only
+	// durable per-session cursor the backend had. B40 gave it a real
+	// event cursor, and this is now keyed on that — the quantity changed
+	// under the same field, which is why B40 re-ran B15's own Done-when
+	// #4 against the new mechanism rather than editing a doc to match.
 	//
 	// A session appears here with 0 the first time any envelope carrying
 	// its session_id arrives, so a reconnect knows WHICH sessions to
@@ -267,13 +273,22 @@ func NewClient(opts Options) *Client {
 }
 
 // MarkSeen records that the consumer has rendered `seq` for this session —
-// B15's replay high-water mark.
+// the replay high-water mark.
 //
-// It is the consumer's to report and not this package's to derive: `seq` here
-// is `messages.seq`, which lives in a message payload, and this package reads
-// types and correlation fields only (see the package comment). Monotonic, so a
-// late or out-of-order call cannot walk the mark backwards and cause a replay
-// to re-deliver what has already been shown.
+// `seq` here is B40's `event_seq` (Envelope.EventSeq), NOT `messages.seq`,
+// which is what it was when B15 built this, and NOT the per-task stream
+// `Seq`. Envelopes with a null EventSeq — the token stream, and anything with
+// no session — are not marks and must not be passed here; EventSeqOr(0) plus
+// this function's own `seq <= 0` guard makes that a no-op rather than a
+// footgun.
+//
+// It stays the consumer's to report even though EventSeq is now a routing
+// field this package parses, and that is deliberate. The mark means "has been
+// rendered", not "has arrived": auto-marking in deliver() would advance it for
+// events still sitting in a channel, and a reconnect would then skip exactly
+// the events the UI never got to draw. Monotonic, so a late or out-of-order
+// call cannot walk the mark backwards and cause a replay to re-deliver what
+// has already been shown.
 //
 // A session with no mark replays from 0 on reconnect, which is the honest
 // default: this client knows it has seen traffic for that session and knows
@@ -683,14 +698,19 @@ func (c *Client) run(b Backend) string {
 	}
 }
 
-// afterReconnect is the replay rung of F2's ladder, filled in by B15.
+// afterReconnect is the replay rung of F2's ladder.
 //
-// It was a logged no-op until this episode, because F2 specified
+// It was a logged no-op until B15, because F2 specified
 // `session.events_since(session, last_seq)` and no such command existed —
 // inventing backend surface from a frontend episode is what CLAUDE.md
-// forbids. B15 built the command (as CmdSessionReplaySince, message-level
-// over `messages.seq`; see types.go for why the name differs) and this is
-// where it gets called.
+// forbids. B15 built an interim (CmdSessionReplaySince, message-level over
+// `messages.seq`) and B40 built the real one, CmdEventsSince, over a durable
+// event log. This calls B40's; B15's command no longer exists on either side.
+//
+// What changed for a consumer: the reply carries `events`, not `messages`, so
+// a tool call that started and completed in the gap is now replayable. The
+// text is not in those events by design — it comes from `messages`, or from
+// B15's checkpoint for a reply the backend died mid-way through.
 //
 // Fire-and-forget on purpose. This runs on the supervisor goroutine BEFORE
 // run() starts reading, so a Request here would wait for a reply nobody is
@@ -725,7 +745,7 @@ func (c *Client) afterReconnect() {
 		}
 		env := Envelope{
 			ID:        newID(),
-			Type:      CmdSessionReplaySince,
+			Type:      CmdEventsSince,
 			SessionID: session,
 			Payload:   payload,
 		}
@@ -830,7 +850,7 @@ func (c *Client) deliver(env Envelope) {
 
 	route := RouteUnroutable
 	switch {
-	case env.Type == EvSessionReplay:
+	case env.Type == EvSessionEvents:
 		// Before the correlation case, not after: a replay reply carries
 		// the corr_id of whatever asked for it and a session_id, so it
 		// would otherwise arrive as RouteCorrelation or RouteSession and

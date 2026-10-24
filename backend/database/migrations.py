@@ -29,7 +29,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional, Union
 
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 
 # Applied to every connection, here and in database/connection.py.
 #   WAL          -- 12 makes shared-WAL the basis of SSH topology B, and
@@ -459,6 +459,67 @@ CREATE INDEX IF NOT EXISTS idx_message_checkpoints_task ON message_checkpoints(t
 """
 
 
+# ---------------------------------------------------------------------------
+# v8 -- B40's durable event log.
+#
+# What this table is for: `events_since(session_id, seq)`, the replay rung
+# of F2's recovery ladder. B15 could not serve it -- nothing persisted an
+# `OutgoingEvent` -- so it shipped message-level replay over `messages.seq`
+# as an explicit interim and deferred the real thing here.
+#
+# `session_id` is NOT NULL, and that is a decision, not an oversight.
+# B40's own Build section drafted it nullable, reasoning that `hello` and
+# `ping` have no session and "an event log that cannot hold them is not a
+# log of what went over the wire". That draft contradicted its own next
+# column: `session_seq` is a PER-SESSION cursor, so an envelope with no
+# session has no position in any cursor space for a NOT NULL column to
+# hold. The contradiction resolves in favour of the cursor, because the
+# cursor is the only reason the table exists -- the single query against
+# it is `WHERE session_id = ? AND session_seq > ?`, which a session-less
+# row can never satisfy.
+#
+# That is not only `hello`/`ping`. `Runtime._fill_envelope` backfills
+# `session_id` from the correlation map only when the REQUEST carried
+# one, so `SessionList`, `ProviderList`, `ProviderModelList`, `AgentList`,
+# `DirectoryList`, `DoctorReport`, `BehaviourOverrideSet`, `TaskList`,
+# `shutdown.complete` and any `Error` raised before a session is known
+# all emit with a null session. Writing them would be unreplayable rows
+# at a `ping` every five seconds forever (B15's unconditional heartbeat,
+# D98). So this log is what went over the wire FOR A SESSION, and the
+# narrower claim is the honest one.
+#
+# The (session_id, session_seq) index is UNIQUE. It is the index
+# `events_since` reads, and making it unique puts B40's Done-when #1
+# ("a monotonic per-session cursor") under the database rather than under
+# a convention: a second row claiming a cursor already taken fails the
+# INSERT instead of producing a replay with a duplicate.
+#
+# `stream_seq` keeps the EXISTING per-task stream counter
+# (`StreamManager._sequences`) where an event has one. Two different
+# quantities, two columns, neither one overwriting the other -- the same
+# rule v6's `messages.seq` note states, for the same reason.
+#
+# `idx_events_ts` serves retention's age cap, which sweeps by `ts` and
+# would otherwise scan the table it is there to bound.
+# ---------------------------------------------------------------------------
+
+_V8 = """
+CREATE TABLE IF NOT EXISTS events (
+    id            TEXT PRIMARY KEY,
+    session_id    TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+    task_id       TEXT,
+    corr_id       TEXT,
+    type          TEXT NOT NULL,
+    session_seq   INTEGER NOT NULL,
+    stream_seq    INTEGER,
+    ts            REAL NOT NULL,
+    payload       TEXT NOT NULL
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_events_session_seq ON events(session_id, session_seq);
+CREATE INDEX IF NOT EXISTS idx_events_ts ON events(ts);
+"""
+
 @dataclass(frozen=True)
 class Migration:
     version: int
@@ -474,6 +535,7 @@ MIGRATIONS: tuple[Migration, ...] = (
     Migration(5, "message terminal outcome: interrupted, outcome, error_code", _V5),
     Migration(6, "message seq (keyset pagination cursor) + (session_id, seq) index", _V6),
     Migration(7, "message_checkpoints (B15 partial-reply checkpoint)", _V7),
+    Migration(8, "events (B40 durable event log) + unique (session_id, session_seq)", _V8),
 )
 
 

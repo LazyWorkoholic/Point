@@ -22,7 +22,8 @@ verified without Go (B6 14).
     uv run python cli.py project browse <path> [--project ID] [--cwd DIR]
     uv run python cli.py workspace unload chat [--json]
     uv run python cli.py bench unload-cycles --n 20 [--path DIR]
-    uv run python cli.py session replay [--session ID] [--since-seq N] [--json]
+    uv run python cli.py bench event-log [--script NAME]
+    uv run python cli.py session events-since [--session ID] [--seq N] [--json]
     uv run python cli.py send "write a long essay" --shutdown-after 2
 
 Run from inside `backend\`, like everything else here.
@@ -119,7 +120,8 @@ _EXPECTED_REPLY: dict[str, set[str]] = {
     "SetBehaviourOverride": {"BehaviourOverrideSet"},
     # B15.
     "WorkspaceUnload": {"WorkspaceUnloaded"},
-    "SessionReplaySince": {"SessionReplay"},
+    # B40 -- replaces B15's "SessionReplaySince": {"SessionReplay"}.
+    "EventsSince": {"SessionEvents"},
     "Shutdown": {"shutdown.complete"},
 }
 
@@ -248,6 +250,11 @@ async def default_provider(runtime: Runtime) -> tuple[str, str]:
 # read as what they test, and so a fixture rename is one edit here rather
 # than five in a document.
 SCRIPT_DIR = Path(__file__).resolve().parent / "tests" / "fixtures"
+
+# Read from the mock provider rather than re-spelled here, so a rename on
+# that side cannot leave this file setting an env var nothing reads.
+from providers.mock.provider import ENV_ENABLED as MOCK_ENV_ENABLED
+from providers.mock.provider import ENV_FIXTURE as MOCK_ENV_FIXTURE
 
 
 def script_fixture(name: str) -> Path:
@@ -1231,16 +1238,22 @@ def _climbing(values: list) -> bool:
     return len(values) > 1 and all(b > a for a, b in zip(values, values[1:]))
 
 
-async def cmd_session_replay(runtime: Runtime, args: argparse.Namespace) -> int:
-    """`session replay --session ID --since-seq N` (B15) -- the CLI view
-    of what F2's reconnect asks for. Message-level, keyed on
-    `messages.seq`; see B40 for the real event log."""
+async def cmd_session_events_since(runtime: Runtime, args: argparse.Namespace) -> int:
+    r"""`session events-since --session ID --seq N` (B40) -- the CLI view
+    of what F2's reconnect asks for, read from the durable event log.
+
+    Replaces B15's `session replay`, which was message-level over
+    `messages.seq` and is deleted along with the command it drove. The
+    cursor here is `event_seq` (`events.session_seq`), which is a
+    different quantity from both `messages.seq` and the per-task stream
+    `seq` -- see `database\event_repository.py`.
+    """
     session_id = await _session_for(runtime, args)
     if not session_id:
         return EXIT_FAILED
     envelopes = await call(
-        runtime, "SessionReplaySince", verbose=args.verbose,
-        session=session_id, since_seq=args.since_seq, limit=args.limit,
+        runtime, "EventsSince", verbose=args.verbose,
+        session=session_id, since_seq=args.seq, limit=args.limit,
     )
     _print_errors(envelopes)
     if _failed(envelopes) or not envelopes:
@@ -1251,21 +1264,98 @@ async def cmd_session_replay(runtime: Runtime, args: argparse.Namespace) -> int:
         return EXIT_OK
     print(f"session {payload['session']}  since_seq {payload['since_seq']}  "
           f"mechanism {payload['mechanism']}  has_more {payload['has_more']}")
-    for message in payload["messages"]:
-        content = message.get("content", {})
-        text = (content.get("text") or "").replace("\n", " ")
-        flags = []
-        if message.get("interrupted"):
-            flags.append("interrupted")
-        if message.get("error_code"):
-            flags.append(message["error_code"])
-        suffix = f"  [{', '.join(flags)}]" if flags else ""
-        print(f"  seq {message.get('seq'):>4}  {message.get('role'):<9} "
-              f"{text[:70]!r}{suffix}")
+    for ev in payload["events"]:
+        task = (ev.get("task_id") or "")[:8]
+        detail = ""
+        body = ev.get("payload") or {}
+        # Whatever this event type's one interesting field is. A replay
+        # listing is for reading, and dumping every payload would make
+        # it unreadable; --json is the complete view.
+        for key in ("tool", "name", "status", "state", "message_id", "step"):
+            if key in body:
+                detail = f"{key}={body[key]}"
+                break
+        print(f"  seq {ev['event_seq']:>4}  {ev['type']:<22} "
+              f"task={task or '-':<8} {detail}")
     for task in payload["tasks"]:
         print(f"  task {task['id'][:8]}  {task['state']:<10} "
               f"{task.get('error_code') or '-':<14} live={task['live']}")
-    print(f"\n{len(payload['messages'])} message(s), {len(payload['tasks'])} task(s)")
+    print(f"\n{len(payload['events'])} event(s), {len(payload['tasks'])} task(s)")
+    return EXIT_OK
+
+
+async def cmd_bench_event_log(runtime: Runtime, args: argparse.Namespace) -> int:
+    r"""`bench event-log` (B40) -- the measurement B40 section 2 owes
+    before it may pick a write strategy.
+
+    Three arms over one fixture, each a full send through the real
+    runtime, each into its own fresh session so the per-session cursor
+    starts at zero and the row counts mean something:
+
+        none  -- the event log disabled: what `_emit` cost before B40
+        c     -- lifecycle events logged, token deltas not (what ships)
+        a     -- every session-scoped envelope logged, deltas included
+
+    The fixture matters more than the arms do. `mock_slow.json` is 20
+    chunks at `delay: 0.3`, so six seconds of `asyncio.sleep` in the
+    mock provider swamps any per-write cost and all three arms report
+    ~6.0s -- two numbers that look like evidence and are not.
+    `mock_dense.json` is 2,000 deltas at zero delay, which is why it is
+    the default here: it puts the emit path in the measurement instead
+    of the provider's sleeps. `--script mock_slow` still runs, and is
+    worth running, as the realistic-cadence arm.
+
+    **This reports wall-clock on one machine, once. It is a cost
+    comparison between arms on identical input, not a benchmark, and
+    nothing here should be quoted as a throughput number.**
+    """
+    from database.event_repository import EventRepository
+
+    fixture = script_fixture(args.script)
+    if not fixture.exists():
+        print(f"error: no such script: {args.script} "
+              f"(available: {', '.join(available_scripts()) or 'none'})",
+              file=sys.stderr)
+        return EXIT_FAILED
+    if os.environ.get(MOCK_ENV_ENABLED) != "1":
+        print("error: bench event-log requires POINT_MOCK=1", file=sys.stderr)
+        return EXIT_FAILED
+    os.environ[MOCK_ENV_FIXTURE] = str(fixture)
+
+    arms = (
+        ("none", EventRepository(runtime.db, enabled=False)),
+        ("c", EventRepository(runtime.db)),
+        ("a", EventRepository(runtime.db, persist_volatile=True)),
+    )
+
+    print(f"fixture {fixture.name}")
+    results = []
+    for name, repo in arms:
+        session = await runtime.sessions.create(
+            title=f"b40 bench {name}", provider="mock", model="mock-dense",
+        )
+        runtime.events = repo
+        started = time.perf_counter()
+        envelopes = await call(
+            runtime, "SendMessage", timeout=180.0, verbose=False,
+            match=lambda envelope: True,
+            until=lambda envelope: (
+                envelope["type"] in _TASK_TERMINAL or envelope["type"] == "Error"
+            ),
+            session=session.id, text="bench",
+        )
+        elapsed = time.perf_counter() - started
+        deltas = sum(1 for e in envelopes if e["type"] in ("TextDelta", "TaskToken"))
+        rows = await repo.count(session.id)
+        results.append((name, elapsed, deltas, rows, repo.written, repo.skipped))
+
+    baseline = results[0][1]
+    print(f"\n{'arm':<6}{'wall_s':>9}{'deltas':>9}{'rows':>8}"
+          f"{'written':>9}{'skipped':>9}{'vs none':>10}")
+    for name, elapsed, deltas, rows, written, skipped in results:
+        delta_pct = (elapsed / baseline - 1.0) * 100 if baseline else 0.0
+        print(f"{name:<6}{elapsed:>9.3f}{deltas:>9}{rows:>8}"
+              f"{written:>9}{skipped:>9}{delta_pct:>9.1f}%")
     return EXIT_OK
 
 
@@ -1962,19 +2052,20 @@ def build_parser() -> argparse.ArgumentParser:
         help="page size; neither --before nor --after given means the newest --limit (default: 50)",
     )
 
-    replay = session.add_parser(
-        "replay",
-        help="B15: the messages and task states after a seq cursor (what F2's "
-             "reconnect asks for)",
+    events_since = session.add_parser(
+        "events-since",
+        help="B40: the events and task states after an event cursor (what "
+             "F2's reconnect asks for). Replaces B15's `session replay`",
         parents=[common],
     )
-    replay.add_argument("--session", default=None, help="default: most recently updated")
-    replay.add_argument(
-        "--since-seq", type=int, default=0, metavar="SEQ",
-        help="messages with seq > SEQ (default: 0 -- everything)",
+    events_since.add_argument("--session", default=None, help="default: most recently updated")
+    events_since.add_argument(
+        "--seq", type=int, default=0, metavar="SEQ",
+        help="events with event_seq > SEQ (default: 0 -- everything the log "
+             "still holds, which retention bounds)",
     )
-    replay.add_argument("--limit", type=int, default=200)
-    replay.add_argument("--json", action="store_true")
+    events_since.add_argument("--limit", type=int, default=200)
+    events_since.add_argument("--json", action="store_true")
 
     # B15. `workspace unload <id>` NEVER cancels a task: it releases
     # what no live task holds and reports the rest.
@@ -1999,6 +2090,18 @@ def build_parser() -> argparse.ArgumentParser:
     bench_unload.add_argument("--n", type=int, default=20, help="cycles (default: 20)")
     bench_unload.add_argument(
         "--path", default=".", help="a project root (default: cwd)",
+    )
+    bench_events = bench.add_parser(
+        "event-log",
+        help="B40: the cost of the event-log write, three arms over one "
+             "fixture (requires POINT_MOCK=1)",
+        parents=[common],
+    )
+    bench_events.add_argument(
+        "--script", default="mock_dense", metavar="NAME",
+        help="fixture to replay (default: mock_dense -- 2000 deltas at zero "
+             "delay, so the emit path is what is measured rather than the "
+             "provider's sleeps)",
     )
 
     seed = sub.add_parser(
@@ -2321,10 +2424,11 @@ def main(argv: Optional[list[str]] = None) -> int:
         ("session", "new"): cmd_session_new,
         ("session", "list"): cmd_session_list,
         ("session", "messages"): cmd_session_messages,
-        ("session", "replay"): cmd_session_replay,
+        ("session", "events-since"): cmd_session_events_since,
         # B15.
         ("workspace", "unload"): cmd_workspace_unload,
         ("bench", "unload-cycles"): cmd_bench_unload_cycles,
+        ("bench", "event-log"): cmd_bench_event_log,
         ("seed-session", None): cmd_seed_session,
         ("send", None): cmd_send,
         ("context", "report"): cmd_context_report,

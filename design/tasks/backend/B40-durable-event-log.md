@@ -277,6 +277,21 @@ performed against a mechanism that no longer exists — the exact drift
 
 ---
 
+---
+
+## Decisions taken during the build
+
+**Moved.** This episode is built and its gate is green, so the three
+decisions the sections above left open — the write strategy and its
+measurements, what `seq` means afterwards, and retention — are recorded
+where completion is claimed, with the numbers, the schema deviation and
+the two defects found while building:
+
+> `design/completed/backend/B40-durable-event-log.md`
+
+They are not duplicated here. This file describes intent; that one
+describes reality, and on any disagreement the code wins.
+
 ## Verification gate (PowerShell, scratch profile)
 
 ```powershell
@@ -288,7 +303,7 @@ try {
     $env:LOCALAPPDATA = $scratch
     $env:POINT_MOCK   = "1"
     cd D:\Projects\Point\backend
-    uv run python cli.py migrate
+    uv run python cli.py migrate          # expect: migrated ... -> 8
 
     # 1 + 2: the log fills, and replay reads it back with no gaps
     $sid = (uv run python cli.py session new "b40" --provider mock --model mock-slow) -replace '\s.*',''
@@ -296,10 +311,17 @@ try {
     sqlite3 "$env:LOCALAPPDATA\Point\runtime.db" "select type, session_seq from events order by session_seq;"
     uv run python cli.py session events-since --session $sid --seq 0
 
-    # 3: the measurement, both arms, same fixture
-    uv run python cli.py bench event-log --script mock_slow
+    # No TextDelta / ThinkingDelta / TaskToken rows: option (c), measured below
+    sqlite3 "$env:LOCALAPPDATA\Point\runtime.db" "select count(*) from events where type in ('TextDelta','ThinkingDelta','TaskToken');"
 
-    # B15 #4, re-run against the new mechanism
+    # 3: the measurement, all three arms, both fixtures
+    uv run python cli.py bench event-log                      # mock_dense: discriminating
+    uv run python cli.py bench event-log --script mock_slow    # realistic cadence
+
+    # 1, 2, 5, 6: the full episode check, including the tool pair and retention
+    uv run python tests\manual_b40_event_log.py
+
+    # B15 #4, re-run against the new mechanism (expect ALL CHECKS PASSED)
     uv run python tests\manual_b15_lifecycle.py
 }
 finally {
@@ -307,7 +329,24 @@ finally {
 }
 ```
 
----
+**4 — `SessionReplaySince` is gone.** A tree property, not a runtime
+one, so it is checked by grep rather than by the script above. **Four**
+hits survive, one per file, every one of them prose inside a comment
+explaining what replaced the command; no enum member, constant, handler
+or CLI subcommand remains. (An earlier draft of this line said "two" —
+counted from memory rather than from a run.)
+
+```powershell
+cd D:\Projects\Point
+Select-String -Path backend\runtime\events.py,backend\cli.py,frontend\internal\protocol\types.go,frontend\internal\protocol\client.go -Pattern "SessionReplaySince"
+```
+
+The Go side must also build and pass:
+
+```powershell
+cd D:\Projects\Point
+go build ./... ; if ($?) { go test ./frontend/internal/protocol/ }
+```
 
 ## Handoff
 

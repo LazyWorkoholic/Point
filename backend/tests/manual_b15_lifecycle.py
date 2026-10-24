@@ -353,34 +353,78 @@ async def main() -> int:
             "nothing for, which is not the same answer as a refusal",
         )
 
-        print("\n[4] replay from a seq cursor")
+        # B15's Done-when #4, RE-RUN against B40's event log.
+        #
+        # B15 verified this against `SessionReplaySince` and
+        # `messages.seq`, and recorded in its completed doc that it did
+        # -- and that it was an interim. B40 replaced the mechanism, so
+        # that evidence stopped describing the code, and B40's Done-when
+        # says to re-test rather than edit the doc. Run before this was
+        # rewritten, the block failed on four assertions (the reply never
+        # arrived at all, because `SessionReplaySince` is no longer a
+        # known event type, and `mechanism` was None) -- which is the
+        # signal the doc predicted and the reason this is a re-test.
+        #
+        # The ordering and no-gaps checks are kept intact, as B40
+        # requires. What is new is that the cursor is `event_seq` and the
+        # replay contains EVENTS -- so the last check here asserts the
+        # thing message-level replay structurally could not do.
+        print("\n[4] replay from an event cursor (B40; was B15's messages.seq)")
         mark = len(collector.seen)
         await runtime.receive({
             "v": ENVELOPE_VERSION, "id": str(uuid.uuid4()),
-            "type": "SessionReplaySince",
+            "type": "EventsSince",
             "payload": {"session": session.id, "since_seq": 1},
         })
-        envelope = await collector.wait_for({"SessionReplay"}, limit_s=10.0, after=mark)
-        check("a SessionReplay reply arrived", envelope is not None)
-        replay = envelope["payload"] if envelope else {"messages": [], "tasks": []}
+        envelope = await collector.wait_for({"SessionEvents"}, limit_s=10.0, after=mark)
+        check("a SessionEvents reply arrived", envelope is not None)
+        replay = envelope["payload"] if envelope else {"events": [], "tasks": []}
 
-        seqs = [m["seq"] for m in replay["messages"]]
-        all_seqs = [m.seq for m in rows]
+        seqs = [e["event_seq"] for e in replay["events"]]
+        logged = await runtime.events.max_seq(session.id)
         check(
-            "exactly the messages after the mark, in order",
-            seqs == sorted(seqs) and seqs == [s for s in all_seqs if s > 1],
-            f"replayed {seqs} from a session holding {all_seqs}",
+            "exactly the events after the cursor, in order",
+            bool(seqs) and seqs == sorted(seqs) and all(s > 1 for s in seqs),
+            f"replayed {seqs} from a session whose log reaches {logged}",
         )
         check(
-            "no gaps: consecutive seqs",
-            all(b - a == 1 for a, b in zip(seqs, seqs[1:])),
-            f"seqs={seqs}",
+            "no gaps: consecutive event_seqs",
+            # `bool(seqs)` matters. Before B40 this check read only the
+            # zip, which is vacuously true on an empty list -- so it
+            # PASSED in the pre-rewrite run above while the reply it was
+            # meant to be checking had not arrived at all. A no-gaps
+            # assertion that passes on no data is not an assertion.
+            bool(seqs) and all(b - a == 1 for a, b in zip(seqs, seqs[1:])),
+            f"event_seqs={seqs}",
         )
         check(
             "the mechanism is stated on the wire, not assumed",
-            replay.get("mechanism") == "messages.seq" and replay.get("replay") is True,
+            replay.get("mechanism") == "events.session_seq" and replay.get("replay") is True,
             f"mechanism={replay.get('mechanism')} replay={replay.get('replay')} "
-            "-- this is message-level replay, not B40's event log",
+            "-- B40's durable event cursor, not B15's messages.seq",
+        )
+        check(
+            "every replayed event is flagged as a replay, not live",
+            bool(replay["events"]) and all(e.get("replay") is True for e in replay["events"]),
+            f"{sum(1 for e in replay['events'] if e.get('replay'))} of "
+            f"{len(replay['events'])} flagged -- this is what stops Go taking "
+            "a replayed ToolCompleted for a tool completing now",
+        )
+        replayed_types = [e["type"] for e in replay["events"]]
+        check(
+            "the replay carries non-message events, which messages.seq could not",
+            any(t in {"TaskStarted", "TaskDone", "TaskFailed", "TaskCancelled",
+                      "UsageUpdated", "StatusChanged", "ToolStarted", "ToolCompleted"}
+                for t in replayed_types),
+            f"types={replayed_types} -- the whole point of B40 over B15's "
+            "interim: a lifecycle event is not a message and was unexpressible",
+        )
+        check(
+            "the token stream is NOT in the log (B40 section 2, option (c))",
+            not any(t in {"TextDelta", "ThinkingDelta", "TaskToken"}
+                    for t in replayed_types),
+            f"types={replayed_types} -- deltas are excluded by design; the "
+            "text rebuilds from `messages` or from B15's checkpoint",
         )
         check(
             "the task's state rides along so an UNKNOWN task can be resolved",

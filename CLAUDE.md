@@ -231,6 +231,12 @@ D:\Projects\Point\
 │   ├── runtime\                runtime, dispatcher, task, task_manager,
 │   │                           state, errors                        [B1 ✅]
 │   │                           events.py is envelope v1             [B6 ✅]
+│   │                             + `event_seq`, the durable per-session
+│   │                               event cursor, as a NEW field beside
+│   │                               `seq` rather than redefining it
+│   │                               (D100). `EventsSince`/`SessionEvents`
+│   │                               replace B15's SessionReplaySince,
+│   │                               which is DELETED                     [B40 ✅]
 │   │                           scheduler.py — QUEUED + lane caps    [B12 ✅]
 │   │                           lifecycle.py — ReleaseReport, the
 │   │                             per-resource-class refusal rule,
@@ -272,6 +278,17 @@ D:\Projects\Point\
 │   │                           tool_call_repository                 [B10 ✅]
 │   │                           proposal_repository — agent_proposals,
 │   │                             insert/count/fetch only            [B11 ✅]
+│   │                           event_repository.py — migration v8's
+│   │                             `events`, the durable event log every
+│   │                             session-scoped envelope leaving
+│   │                             `Runtime._emit` is written to, plus
+│   │                             `events_since` and retention. Holds
+│   │                             the policy for what is NOT logged:
+│   │                             the token stream (D99, measured, not
+│   │                             assumed), session-less envelopes
+│   │                             (D101) and the replay reply itself —
+│   │                             an envelope that CARRIES log contents
+│   │                             is not log content                    [B40 ✅]
 │   │                           message_checkpoint_repository.py —
 │   │                             migration v7's `message_checkpoints`,
 │   │                             the in-flight reply on disk (500ms
@@ -290,10 +307,14 @@ D:\Projects\Point\
 │   ├── streaming\              accumulator, adapter, events, manager [B5 ✅]
 │   └── tests\                  manual_*.py and manual_*.ps1 — one or more
 │                               per episode that needed a deterministic
-│                               check (B11, B12, B15, B19, B22, F8 …), plus
+│                               check (B11, B12, B15, B19, B22, B40, F8 …), plus
 │                               manual_provider_test.py [B4] and
 │                               manual_context_test.py [B8]
 │                               fixtures\ (mock_stream.json, mock_slow.json) [B6 ✅]
+│                               + mock_dense.json — 2000 deltas at ZERO
+│                                 delay. mock_slow is 6s of asyncio.sleep
+│                                 and cannot measure anything on the emit
+│                                 path; `bench event-log` defaults here   [B40 ✅]
 │                               + the seven B10 tool-loop scripts,
 │                                 replayed by `send --script <name>`  [B10 ✅]
 │

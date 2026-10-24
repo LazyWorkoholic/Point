@@ -462,6 +462,49 @@ F18 needs B18 and F5; must land before F12 (anchor lives in the Suspend blob).
       Anchor: **F16 (polish)** for option 3. Options 1 and 2 need the blob
       shape reopened, which is a decision above this episode.
 
+- [ ] **Live voice interaction — the frontend half.** Continuous, not
+      push-to-button. The backend half (VAD, streaming ASR, TTS,
+      barge-in, mid-task status) is the substantial part and is parked in
+      `../backend/INDEX.md` **as a multi-episode arc, not an item** —
+      read that entry first, including its unresolved local-vs-cloud ASR
+      tension, which blocks both halves.
+
+      What is actually this side's: a listening/speaking state that is
+      visible without being a modal mode (a user who cannot tell whether
+      Point is listening will not trust it); showing transcribed speech
+      as it arrives, including the correction a streaming ASR makes to
+      text already on screen, which the chat viewport currently has no
+      concept of; and barge-in as an interaction, where the existing
+      cancel affordance is a keypress and here the trigger is the user
+      starting to talk.
+      · hook: F5's streaming/queue/cancel path already handles "a reply
+      is arriving and may be interrupted", and `ProgressUpdated` cards
+      already render mid-task progress (F6's right pane) — a spoken
+      "what are you doing?" is a render of events that already exist, not
+      a new channel. Theme roles exist for a state indicator without new
+      colour config.
+      · anchor: post-v1, after the backend arc's ASR decision. **Also
+      gated on a question this side owns and should answer early:
+      whether audio touches the protocol channel at all.** Stdout is
+      JSON-lines, so it does not; whether capture/playback therefore
+      lives entirely in Go, and what that means over SSH, is a frontend
+      decision with backend consequences.
+      · what unparking takes: the backend arc planned first, plus a
+      decision on in-place transcript correction — a viewport that can
+      revise text it has already drawn is a real change to the entry
+      model, not a card type.
+
+- [ ] **Backend language direction: Go + Rust rather than Go + Go** —
+      **leading candidate under discussion, not a decision, and not for
+      this version.** Cross-cutting both tracks; the full entry with the
+      reasoning and what is still unestablished lives in
+      `../backend/INDEX.md`'s parking lot. Noted here so a frontend
+      reader finds it. Nothing in `frontend\` should be shaped around it:
+      the JSON-lines protocol boundary is language-agnostic by
+      construction, which is the only reason this is discussable without
+      being a rewrite.
+      · anchor: after v1 ships.
+
 
 ## Rejected
 

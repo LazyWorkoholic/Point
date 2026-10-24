@@ -23,13 +23,27 @@ const Version = 1
 //
 //	{ "v": 1, "id": "...", "type": "TaskToken", "corr_id": "...",
 //	  "session_id": "...", "task_id": "...", "connection_id": "...",
-//	  "trace_id": "...", "seq": 1, "ts": 1712.34, "payload": {} }
+//	  "trace_id": "...", "seq": 1, "event_seq": 42, "ts": 1712.34,
+//	  "payload": {} }
 //
 // The nullable string fields are plain strings rather than pointers: Python
 // writes JSON null for every one of them that is unset, and encoding/json
 // decodes null into a string as a no-op, so "" and null are the same absence.
 // Seq is a pointer because 0 is a value a sequence number could legitimately
 // take, and "absent" has to stay distinguishable from "the first one".
+// EventSeq is a pointer for the same reason, and it is a DIFFERENT quantity:
+// Seq is the backend's per-task stream counter (in-memory, null on every
+// lifecycle event), EventSeq is B40's durable per-session position in the
+// `events` table and the cursor CmdEventsSince is keyed on. B40 added it as a
+// new field rather than redefining Seq, so StreamAccumulator, F5's stream
+// ordering and F18's pagination all keep reading exactly what they read
+// before.
+//
+// EventSeq is null on any envelope the backend's log does not hold: one with
+// no session, and the three token-stream types (TaskToken, TextDelta,
+// ThinkingDelta) it excludes by design — the same three IsDroppable already
+// says may be discarded, because the text re-renders from `messages`. Mark the
+// non-null ones with MarkSeen; the null ones are not gaps.
 type Envelope struct {
 	V            int             `json:"v"`
 	ID           string          `json:"id"`
@@ -40,6 +54,7 @@ type Envelope struct {
 	ConnectionID string          `json:"connection_id"`
 	TraceID      string          `json:"trace_id"`
 	Seq          *int            `json:"seq"`
+	EventSeq     *int            `json:"event_seq"`
 	TS           float64         `json:"ts"`
 	Payload      json.RawMessage `json:"payload"`
 }
@@ -90,4 +105,14 @@ func (e Envelope) SeqOr(fallback int) int {
 		return fallback
 	}
 	return *e.Seq
+}
+
+// EventSeqOr returns B40's durable per-session event cursor, or the fallback
+// when this envelope carries none. Do not confuse it with SeqOr — see the
+// Envelope doc comment.
+func (e Envelope) EventSeqOr(fallback int) int {
+	if e.EventSeq == nil {
+		return fallback
+	}
+	return *e.EventSeq
 }

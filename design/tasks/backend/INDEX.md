@@ -37,7 +37,7 @@ fix this table.
 | B12 | Routing, Attachments, Caps | P1 | no | B11 | ✅ built |
 | B13 | Memory System | P2 | no | B12 + real usage | not started — `memory_records`/`memory_scopes` exist since schema v2 and NOTHING writes them; B11's `agent_proposals` is the insert-only stopgap |
 | B14 | Usage & Limits | P2 | no | B12 | not started — `usage_records` exists and is written per turn, but has no repository and no wire event |
-| B15 | Lifecycle & Resources | P2 | no | B12 | built, awaiting Aryan's gate run (Session 20) — **demo-critical**. Shipped `SessionReplaySince` as an explicit **interim** for its own `events_since` requirement: there is no event log in this schema, so replay is message-level over `messages.seq`. The real thing is **B40**, which replaces it |
+| B15 | Lifecycle & Resources | P2 | no | B12 | **done (Session 20)** — gate run and passed in full, including the by-hand `Ctrl+C` check, confirmed independently. Shipped `SessionReplaySince` as an explicit **interim** for its own `events_since` requirement, because this schema had no event log to serve one from. **B40 has now deleted that interim** and re-ran this episode's Done-when #4 against the real event log — see the AMENDMENT in `design/completed/backend/B15-lifecycle-resources.md`. (This row read "built, awaiting Aryan's gate run" until B40's session; it was stale, and fixing it is a one-line correction, not a re-test.) |
 | B16 | SSH Serving | P2 | no | B15, F12 | not started |
 | B17 | Hardening | P2 | no | all | not started |
 | B18 | Message Pagination | P2 | no | B6 | ✅ built |
@@ -60,7 +60,7 @@ fix this table.
 | B38 | Multi-turn explain: history, region re-read, token bound | P2 | no | B11, B24, B36 | not started — **spec only, the backend half of F22, and the larger half**. Three decisions, none of which exists today: (1) whether a follow-up replays the prior exchange as message history or as a summary; (2) whether `editor_context` is re-sent per turn — the region shown with answer 1 may not be the region on screen at question 3, which is the same pair-a-region-with-a-stale-read failure **B36** exists to prevent, one layer up; (3) the token bound and what happens at it. F15 already created the Editor-owned session these turns would accumulate in (lazily, because `SendMessage` requires one) and `chat\protocol.go` filters it out of Chat's list — so the session exists and nothing decides what goes in it. See `../frontend/F22-explain-as-conversation.md`. **Scheduled after v1 ships, time permitting — otherwise deferred to a later session.** |
 | B39 | A generation mode for the Filler (no region to rewrite) | P2 | no | B24, B11, B36 | not started — **spec only, the backend half of F23, and the larger half of that episode**. Fill assumes a region exists: `resolve_scope` finds an enclosing scope or falls back to ±20 lines, the prompt asks for a `replacement` for `start_line`-`end_line`, and B24 rejects a range outside the shown region. On a blank line with no enclosing scope none of that describes the request. Owns: a THIRD `EditorContext.mode` (not a flag on fill — a flag means auditing every existing branch, which is how B11's `AgentConfig.background` retrofit trap worked); what the model is shown and how it is marked read-only; a generation instruction block that does **not** copy the `"<path>"` placeholder line (its own tracked bug, in the parking lot below and in `../frontend/F16-polish.md`); and **validation as an insertion point plus a length bound rather than a range inside a shown region — which must NOT be done by loosening the existing rewrite check**. The `(mtime, size)` pair is captured the same way B36 does, from the same descriptor as the read. See `../frontend/F23-fill-on-a-blank-line.md`. **Scheduled after v1 ships, time permitting — otherwise deferred to a later session.** |
 
-| B40 | The Durable Event Log, and Real `events_since` | P2 | no | B15, B18, B22 | not started — **spec written during B15 (Session 20), before any of it is built**. B15's Build section asked for `session.events_since(session_id, seq)` and this schema has no event log to serve it from: no `events` table, nothing persists an `OutgoingEvent`, and the envelope's `seq` is an in-memory per-TASK counter (`StreamManager._sequences`) dropped at `close_stream()` and null on every lifecycle event — while `messages.seq` (v6/B18) is a different quantity, per-session message order. So B15 built the honest interim, **`SessionReplaySince`** (message-level, keyed on `messages.seq`, with `mechanism` stated on the wire), and this episode is the real thing: migration v8's `events` table, a write per envelope from `Runtime._emit` **on the streaming hot path through `SerializedConnection`** (whose cost this episode must measure, not assume), a durable per-session event cursor that is neither of the two existing `seq`s, retention, and the **deletion** of `SessionReplaySince` from both sides. **Completing it requires re-running B15's own Done-when #4 against the new mechanism — a real re-test of `tests\manual_b15_lifecycle.py`'s `[4]` block, not a doc edit** — because the thing that verification measured will no longer exist. See `B40-durable-event-log.md`, whose appendix also records four findings from B15 that its own Build section never asked for (v7's `message_checkpoints`, the signal handling, the `os._exit` at finalization, and provider-pool scoping) |
+| B40 | The Durable Event Log, and Real `events_since` | P2 | no | B15, B18, B22 | **built, awaiting Aryan's gate run** — migration **v8**'s `events` table, `database\event_repository.py`, a write per session-scoped envelope from `Runtime._emit`, the durable per-session `event_seq` cursor, `EventsSince` replacing B15's `SessionReplaySince` (**deleted** from `events.py`, `cli.py`, `types.go`, `client.go`), and retention. The three decisions the doc left open are recorded with their reasoning and numbers in `B40-durable-event-log.md`'s "Decisions taken during the build": **(1)** option **(c)** — lifecycle events logged, token deltas not — chosen on a measurement, because option (a) costs ~2ms/envelope and **15-20x** baseline wall-clock on a 2,000-delta turn while (c) is inside run-to-run noise (this needed a new fixture, `mock_dense.json`: the gate's original `mock_slow` is six seconds of `asyncio.sleep` and discriminates nothing); **(2)** **additive** `event_seq`, confirming the doc's lean, since four consumers already decode `seq`; **(3)** retention is **7 days OR 2,000 rows per session**, swept from the heartbeat, never renumbering. Also: `session_id` is **NOT NULL** (the doc's draft had it nullable, contradicting its own per-session cursor — session-less and connection-level envelopes are not logged at all), and the replay reply itself must not be logged or every replay copies a page of the log back into it. **B15's Done-when #4 was re-run, not doc-edited**: it failed on four assertions as predicted, was rewritten against the event cursor, and passes — see the AMENDMENT in `design/completed/backend/B15-lifecycle-resources.md` |
 
 **B1–B5 are frozen.** Additive changes only — new columns, new optional fields.
 Never refactors.
@@ -347,6 +347,125 @@ Format: `[ ] item — why parked · hook · anchor · what unparking takes`
       already has to be surfaced) or a frontend settings episode. See
       `completed/backend/B11-three-agents.md`'s "Documented, not resolved"
       section for the full account of what was tried.
+
+- [ ] **Live voice interaction — the backend half. THIS IS A MULTI-EPISODE
+      ARC, NOT AN ITEM.** Continuous listening, not push-to-button: you
+      talk, Point answers, and you can cut it off mid-sentence. Parked as
+      an arc rather than a parking-lot line because its scope is close to
+      *everything already built for this backend* — four new subsystems,
+      each with its own failure modes, provider abstraction and
+      verification story. Anyone who unparks this by writing one episode
+      doc has mis-scoped it. The pieces, and which are genuinely new
+      versus which reuse something that exists:
+
+      | piece | new or reuse |
+      |---|---|
+      | **VAD** (when does a turn start/end) | NEW. The hard part, and the thing "continuous" rests on — an endpointing mistake either truncates the user or never answers |
+      | **Streaming ASR** | NEW provider class. See the unresolved tension below |
+      | **TTS** | NEW provider class. Piper (local, bundled voices) vs. cloud |
+      | **Barge-in / interrupt** | **REUSE.** Speaking over Point is a cancel, and `CancelTask` → `task.cancel.accepted` → `TaskCancelled` already is that mechanism, with exactly-one-terminal-event already guaranteed. Do NOT invent a second cancel path for audio |
+      | **Mid-task status queries** ("what are you doing?") | **REUSE.** `ProgressUpdated` already carries the step counter and the tool notices (B10), and B15/D98 made the heartbeat unconditional so a silent tool call is already distinguishable from a hung one. The answer is a render of events that already exist |
+
+      **The unresolved tension, recorded as unresolved rather than
+      guessed:** local small-model ASR (whisper.cpp, Moonshine) versus
+      cloud ASR. Local keeps the local-first promise and costs nothing per
+      turn, but a small model's accuracy on accented speech, jargon and
+      code identifiers is exactly where it is weakest — and code
+      identifiers are most of what anyone would say to this tool. Cloud is
+      accurate and fast and breaks both the local-first premise and the
+      offline case. **This collides head-on with the low-end-device goal**:
+      the machines that most need Point to be light are the machines least
+      able to run an ASR model beside a code model beside the TUI. That
+      is a product decision with a measurement attached, not a
+      preference, and nothing should be built until it is made — pick
+      wrong and three of the four subsystems above are built against the
+      wrong constraint.
+      · hook: `providers\` already abstracts a provider class behind a
+      registry (B4/B6), which is where ASR and TTS would register rather
+      than becoming special cases; `CancelTask` and `ProgressUpdated` for
+      the two reuse rows above; B16's per-connection runtimes matter if
+      voice is ever served over SSH, where shipping audio over the
+      protocol channel is its own question (stdout is JSON-lines, so
+      audio is not going down it).
+      · anchor: post-v1, and **after the ASR decision above is settled
+      with numbers on a real low-end target machine**. Not before B16, if
+      it is ever to work remotely. The frontend half is parked separately
+      in `../frontend/INDEX.md`.
+      · what unparking takes: the local-vs-cloud ASR measurement first,
+      then an arc plan that splits VAD, ASR, TTS and the
+      interaction/barge-in wiring into separate episodes with separate
+      gates — plus a decision on whether audio crosses the protocol
+      channel at all or stays frontend-local.
+
+- [ ] **Dev-only eval harness for the agent loop** — scores the agent
+      against a fixed set of scenarios, so "did this episode's prompt
+      change make the Filler better or worse" has an answer that is not
+      one person's impression of five trials. **Never shipped to end
+      users**: a dev tool in this repo, like `bench` and the `manual_*`
+      scripts, not product surface and not a command a user can reach.
+      Parked because it is only worth building once there is a prompt or
+      model change whose effect needs tracking *across* episodes, and
+      because a scenario set written too early measures the agent the
+      author imagined.
+
+      The precedent that argues for it: B24 recorded 0/5 real-model
+      compliance as a finding, F15's gate measured 2/5 then 0/5 on the
+      Filler's placeholder bug (see the first parking-lot entry above),
+      and B11 has a whole "Documented, not resolved" section that is
+      really a missing eval harness. Three episodes have now hand-rolled
+      a five-trial comparison, and the fourth should not.
+      · hook: `cli.py bench` is already the home for measurement
+      harnesses (B15, B40) and would gain a subcommand rather than a new
+      entry point; `send --script <name>` + `tests\fixtures\` is already
+      a deterministic replay mechanism; B40's `events` table now gives a
+      per-session record of what the agent actually did, which is a
+      natural thing for a scorer to read.
+      · anchor: the first episode that changes a prompt or a default model
+      and needs to show it did not regress — plausibly B13 (memory) or
+      B14 (usage & limits), both of which change what reaches the model.
+      · what unparking takes: a scenario set with expected outcomes
+      (which is the real work and the real risk), a scoring rule that is
+      not "a model grades a model" unless that is stated and its own
+      error measured, and a decision on whether runs are deterministic
+      (mock fixtures, regression tracking) or live (real models, model
+      comparison) — they are different tools and conflating them gives
+      numbers that cannot be compared across either axis.
+
+- [ ] **Backend language direction: Go + Rust rather than Go + Go —
+      LEADING CANDIDATE UNDER DISCUSSION, NOT A DECISION.** Recorded here
+      so the reasoning is not re-derived from memory later, and
+      deliberately *not* written as a decision in `decisions.md`, because
+      it is not one. **Explicitly not for this version**; Point v1 is Go +
+      Python as built, and nothing in this repo should be shaped around
+      this.
+
+      Reasoning so far, which is about skill direction rather than about
+      Point's architecture — worth being honest that this is the actual
+      driver:
+      1. Rust teaches something **complementary** to a separate,
+         unrelated C++ track, rather than duplicating it. Two systems
+         languages that overlap heavily would be one skill learned twice.
+      2. It tracks better against the specific companies named as
+         targets.
+
+      What is NOT yet established, and would have to be before this
+      becomes a decision: whether any part of Point actually wants Rust
+      on technical grounds (the runtime is I/O-bound and the measured
+      costs in this repo have been lock contention and SQLite commits,
+      neither of which a language change addresses — see D99's numbers);
+      what it would cost to cross a third language boundary when the
+      Go↔Python one is already the integration surface every episode
+      touches; and whether a rewrite target or a new component is meant.
+      · hook: nothing in the code. The JSON-lines protocol boundary
+      (`runtime\events.py` ↔ `frontend\internal\protocol\`) is
+      language-agnostic by construction, which is the one thing that
+      makes this discussable at all rather than a rewrite.
+      · anchor: **after v1 ships.** Cross-cutting both tracks — also
+      noted in `../frontend/INDEX.md`'s parking lot so a frontend reader
+      does not find it only here.
+      · what unparking takes: a concrete component and a technical reason
+      for it, not a language preference; otherwise this stays a
+      skill-direction note and Point stays Go + Python.
 
 ## Rejected outright
 
