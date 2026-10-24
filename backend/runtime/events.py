@@ -240,6 +240,16 @@ class OutgoingEventType(str, Enum):
     STATUS_CHANGED = "StatusChanged"
     PROGRESS_UPDATED = "ProgressUpdated"
     USAGE_UPDATED = "UsageUpdated"
+    # B14: session totals + the daily cap's remaining headroom, pushed
+    # after a turn's assistant message is persisted (same trigger as
+    # CONTEXT_REPORT below). Deliberately NOT a reuse of USAGE_UPDATED
+    # above, for the same reason PROJECT_FILE_WRITTEN below is not a
+    # reuse of PROJECT_FILE: USAGE_UPDATED is a per-chunk passthrough of
+    # one provider turn's own usage delta, mid-stream; this is a
+    # push of the running totals after the fact, with a different
+    # payload shape, and overloading one wire type would make every
+    # decoder branch on which keys actually arrived.
+    USAGE_TOTALS_UPDATED = "UsageTotalsUpdated"
     # Tool system (B10). `task.progress` in the episode's prose is this
     # enum's existing PROGRESS_UPDATED -- the step counter and the
     # rate-limit notice both ride it, rather than a third progress

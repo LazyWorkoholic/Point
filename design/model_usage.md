@@ -50,7 +50,7 @@ SESSION  EPISODE                                                     MODEL      
 20       (B15, as first estimated)                                   Opus high                               superseded
 20       B15 lifecycle + crash recovery                              Opus 5                                  done
 20b      B40 durable event log                                       Opus medium                             done
-21       B14 usage + limits                                          Sonnet medium                           not started
+21       B14 usage + limits                                          Sonnet medium                           done
 22       F14 editor terminal                                         Sonnet high                             not started
 22b      F20 live stale detection                                    Opus medium                             not started
 23       B13 memory system                                           Opus high                               not started

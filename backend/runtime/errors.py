@@ -238,3 +238,44 @@ class AttachmentNotFoundError(RuntimeException):
     or one belonging to a different session."""
 
     code = "attachment_not_found"
+
+
+class UsageCapExceededError(RuntimeException):
+    """Raised by managers.usage.UsageManager.check_cap() when today's
+    recorded spend has already reached `limits.daily_token_cap` (B14).
+
+    Raised from AgentExecutor.run() BEFORE context.build(), before the
+    user message is persisted, and before a task exists -- the same
+    place ToolsUnsupportedError is raised for the same reason: refusing
+    here means no provider call goes out and nothing enters history for
+    a turn that was never going to be allowed to run.
+
+    This is a single global, no-identity cap -- there is no per-user
+    attribution in this codebase yet (that is B16's job, once SSH
+    serving gives a request an actual identity). It is not a stand-in
+    for that cap: it is the shape the no-identity case keeps, and B16
+    adds a user filter on top of the same `usage_records` query rather
+    than replacing this.
+
+    It is also a WEAKER guarantee than "never cross the cap": the
+    actual cost of a call is only known after the provider responds
+    (see managers\\usage.py's module docstring), so this can only check
+    the running total already on disk, not the size of the request
+    about to be sent. It blocks the NEXT request once a completed turn's
+    usage has already pushed the total to or past the cap -- it cannot
+    stop the request that crosses it from being sent, because that
+    request's cost is not knowable until it finishes.
+
+    Both numbers ride as attributes, exactly like ContextOverflowError.
+    """
+
+    code = "usage_cap_exceeded"
+
+    def __init__(self, used_tokens: int, cap_tokens: int) -> None:
+        self.used_tokens = used_tokens
+        self.cap_tokens = cap_tokens
+        super().__init__(
+            f"usage_cap_exceeded: today's usage ({used_tokens} tokens) has "
+            f"reached the daily cap ({cap_tokens} tokens) -- refusing further "
+            f"requests until local midnight"
+        )

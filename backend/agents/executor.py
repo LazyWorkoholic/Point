@@ -63,6 +63,7 @@ from managers.project import Project
 from managers.project_manager import ProjectManager
 from managers.session import Session
 from managers.session_manager import SessionManager
+from managers.usage import UsageManager
 from providers import retry
 from providers.models import Effort, GenerationRequest, ToolCall
 from providers.registry import ProviderRegistry
@@ -354,6 +355,7 @@ class AgentExecutor:
         tools: ToolRegistry,
         tool_recorder: Optional[Callable[[Any], Awaitable[None]]] = None,
         proposal_repo: Optional[ProposalRepository] = None,
+        usage: Optional[UsageManager] = None,
     ) -> None:
         self._sessions = sessions
         self._memory = memory
@@ -365,6 +367,10 @@ class AgentExecutor:
         self._projects = projects
         self._tools = tools
         self._tool_recorder = tool_recorder
+        # B14's one spending gate. None-tolerant like proposal_repo above
+        # (an executor built without one just never caps anything, the
+        # same way an older test constructs this class today).
+        self._usage = usage
         # B11's proposal stopgap (managers\memory.py's Proposal, NOT
         # B13's memory_records). None-tolerant: an executor built without
         # one (e.g. an older test) just never writes proposals, the same
@@ -408,6 +414,16 @@ class AgentExecutor:
         resolved_provider = self._resolve_provider_name(provider_name)
         limits = resolve_bounds(bounds, agent)
         granted = self._tools.list_for(agent)
+
+        # B14: the spending cap, checked before ANYTHING else in this
+        # method -- before context is built, before the user message is
+        # persisted, before a task exists. `echo` is exempt the same way
+        # it is exempt from the provider lane below: a dev/test path
+        # with no real provider call to protect anyone's wallet from.
+        # See managers\usage.py's module docstring for exactly what
+        # guarantee this check does and does not make.
+        if self._usage is not None and provider_name != "echo":
+            await self._usage.check_cap()
 
         # Session title generation (B11): one cheap, best-effort call on
         # the FIRST exchange only. Fired here, not from the sink, because

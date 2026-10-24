@@ -983,6 +983,60 @@ async def cmd_attachments_list(runtime: Runtime, args: argparse.Namespace) -> in
     return EXIT_OK
 
 
+def _format_usage_totals(totals: dict) -> str:
+    cost = totals["cost_micros"]
+    cost_str = f"${cost / 1_000_000:.6f}" if cost is not None else "(no price for one or more rows)"
+    return (
+        f"input={totals['input_tokens']} output={totals['output_tokens']} "
+        f"cost={cost_str} requests={totals['requests']}"
+    )
+
+
+async def cmd_usage_session(runtime: Runtime, args: argparse.Namespace) -> int:
+    """B14: `usage session` reads `runtime.usage` directly, in-process --
+    like `context report`'s default path, not a wire round trip, since
+    this episode added no GetUsage request/reply pair (only the
+    `usage.updated` PUSH event is wired; see events.py's
+    USAGE_TOTALS_UPDATED)."""
+    session_id = await _session_for(runtime, args)
+    if session_id is None:
+        return EXIT_FAILED
+    totals = await runtime.usage.session_totals(session_id)
+    print(f"session {session_id}")
+    print(f"  {_format_usage_totals(totals)}")
+    return EXIT_OK
+
+
+async def cmd_usage_today(runtime: Runtime, args: argparse.Namespace) -> int:
+    """Today's running total (server-local midnight to now) against
+    `limits.daily_token_cap`, if one is configured."""
+    totals = await runtime.usage.today_totals()
+    print(f"today: {_format_usage_totals(totals)}")
+    cap = await runtime.usage.remaining_cap()
+    if cap is None:
+        print("no daily cap configured (limits.daily_token_cap)")
+    else:
+        print(f"cap: {cap['used']}/{cap['cap']} tokens used, {cap['remaining']} remaining")
+    return EXIT_OK
+
+
+async def cmd_usage_by_agent(runtime: Runtime, args: argparse.Namespace) -> int:
+    """All-time totals grouped by agent_id."""
+    rows = await runtime.usage.by_agent()
+    if not rows:
+        print("(no usage recorded yet)")
+        return EXIT_OK
+    for row in rows:
+        agent_id = row["agent_id"] or "(none)"
+        cost = row["cost_micros"]
+        cost_str = f"${cost / 1_000_000:.6f}" if cost is not None else "(no price for one or more rows)"
+        print(
+            f"{agent_id:<20} input={row['input_tokens']} output={row['output_tokens']} "
+            f"cost={cost_str} requests={row['requests']}"
+        )
+    return EXIT_OK
+
+
 async def cmd_task_cancel(runtime: Runtime, args: argparse.Namespace) -> int:
     """Cancel one task, or the most recent still-active one with
     `--last`.
@@ -2244,6 +2298,26 @@ def build_parser() -> argparse.ArgumentParser:
     )
     attachments_list.add_argument("--session", default=None)
 
+    # Usage & limits (B14).
+    usage_sub = sub.add_parser(
+        "usage", help="per-request cost and the daily spending cap", parents=[common]
+    ).add_subparsers(dest="usage_command", required=True)
+    usage_session = usage_sub.add_parser(
+        "session", help="token/cost totals for one session", parents=[common]
+    )
+    usage_session.add_argument("--session", default=None, help="session id")
+    usage_session.add_argument(
+        "--last", action="store_true",
+        help="the most recently updated session (default when --session is omitted)",
+    )
+    usage_sub.add_parser(
+        "today", help="today's running total against the daily cap (limits.daily_token_cap)",
+        parents=[common],
+    )
+    usage_sub.add_parser(
+        "by-agent", help="all-time token/cost totals grouped by agent", parents=[common],
+    )
+
     # B11's agent_proposals stopgap -- not B13's eventual full `memory`
     # surface (accept/reject/edit/bind/unbind/forget/search).
     memory_sub = sub.add_parser(
@@ -2449,6 +2523,9 @@ def main(argv: Optional[list[str]] = None) -> int:
         ("detach", None): cmd_detach,
         ("set-mode", None): cmd_set_mode,
         ("attachments", "list"): cmd_attachments_list,
+        ("usage", "session"): cmd_usage_session,
+        ("usage", "today"): cmd_usage_today,
+        ("usage", "by-agent"): cmd_usage_by_agent,
         ("task", "cancel"): cmd_task_cancel,
         ("behaviour", "set"): cmd_behaviour_set,
         ("behaviour", "clear"): cmd_behaviour_clear,

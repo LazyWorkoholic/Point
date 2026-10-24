@@ -36,7 +36,7 @@ fix this table.
 | B11 | The Three Agents | P1 | no | B10 | ✅ built |
 | B12 | Routing, Attachments, Caps | P1 | no | B11 | ✅ built |
 | B13 | Memory System | P2 | no | B12 + real usage | not started — `memory_records`/`memory_scopes` exist since schema v2 and NOTHING writes them; B11's `agent_proposals` is the insert-only stopgap |
-| B14 | Usage & Limits | P2 | no | B12 | not started — `usage_records` exists and is written per turn, but has no repository and no wire event |
+| B14 | Usage & Limits | P2 | no | B12 | **✅ built** — capture, pricing, and a single global daily cap (no guest/owner identity -- dropped per Aryan's decision, since that design is B16's and this backend has none yet). See `design/completed/backend/B14-usage-limits.md`. |
 | B15 | Lifecycle & Resources | P2 | no | B12 | **done (Session 20)** — gate run and passed in full, including the by-hand `Ctrl+C` check, confirmed independently. Shipped `SessionReplaySince` as an explicit **interim** for its own `events_since` requirement, because this schema had no event log to serve one from. **B40 has now deleted that interim** and re-ran this episode's Done-when #4 against the real event log — see the AMENDMENT in `design/completed/backend/B15-lifecycle-resources.md`. (This row read "built, awaiting Aryan's gate run" until B40's session; it was stale, and fixing it is a one-line correction, not a re-test.) |
 | B16 | SSH Serving | P2 | no | B15, F12 | not started |
 | B17 | Hardening | P2 | no | all | not started |

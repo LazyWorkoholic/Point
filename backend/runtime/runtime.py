@@ -22,16 +22,18 @@ from database.migrations import SCHEMA_VERSION
 from database.proposal_repository import ProposalRepository
 from database.task_repository import TaskRepository
 from database.tool_call_repository import ToolCallRepository
+from database.usage_repository import UsageRepository
 from logging_setup import get_logger
 from managers.agent import AgentConfig
 from managers.attachment import MODE_FULL
 from managers.attachment_manager import AttachmentManager
 from managers import context
-from managers.context import SessionMemoryService
+from managers.context import SessionMemoryService, estimate_tokens
 from managers.invocation import parse_invocation
+from managers.usage import UsageManager
 from managers.editor_context import EditorContext
 from managers.fill_proposal import FillParseFailure, parse_fill_proposal
-from managers.message import MessageRole, Outcome
+from managers.message import Message, MessageRole, Outcome
 from managers.project import Project
 from managers.project_manager import ProjectManager
 from managers.session import Session
@@ -226,6 +228,13 @@ class Runtime:
         # migration v4's agent_proposals table) -- NOT B13's
         # memory_records/memory_scopes. See decisions.md D97.
         self.proposals = ProposalRepository(db_conn)
+        # B14: usage_records existed since schema v2 but nothing wrote
+        # it (see INDEX.md). UsageManager is the one place pricing
+        # (config `[pricing]`) and the daily cap (config `[limits]`)
+        # are decided; UsageRepository is just storage, same split as
+        # AttachmentManager/AttachmentRepository above.
+        self.usage_repo = UsageRepository(db_conn)
+        self.usage = UsageManager(self.usage_repo)
         self.agent_executor = AgentExecutor(
             self.sessions, self.memory, self.tasks, self.providers,
             self.streams, self.stream_adapter, self._resolve_provider_name,
@@ -233,6 +242,7 @@ class Runtime:
             tools=self.tools,
             tool_recorder=self.tool_calls.record,
             proposal_repo=self.proposals,
+            usage=self.usage,
         )
 
         # request id -> the envelope metadata that came in with it, so
@@ -1531,6 +1541,77 @@ class Runtime:
             payload=report.to_dict(),
         ))
 
+    # -- usage capture and the daily cap (B14) -----------------------------
+
+    async def _record_usage(self, task: Task, msg: Message) -> None:
+        """One `usage_records` row per persisted reply, deriving its
+        numbers from the SAME `msg.usage` that `messages.input_tokens`/
+        `output_tokens`/`total_tokens` are built from a few lines above
+        this call -- so this row and F9a's result card (which sums
+        those message columns) can never disagree about one turn's
+        tokens.
+
+        Best-effort, same reasoning as `_maybe_checkpoint`'s docstring:
+        this runs on the same await chain that is about to announce a
+        terminal event for a turn that has ALREADY been persisted and
+        ALREADY ran its real cost -- a usage-recording failure must not
+        retroactively turn that into anything else, just a missing row.
+        """
+        try:
+            invocation = msg.invocation
+            provider = invocation.provider if invocation else None
+            model = invocation.model if invocation else None
+            agent_id = invocation.agent if invocation else None
+            input_tokens = msg.usage.input_tokens
+            output_tokens = msg.usage.output_tokens
+            reply_text = msg.content.text or ""
+            estimated = False
+            # A completed reply with text in it spent at least one real
+            # output token, so `output_tokens == 0` here can only mean
+            # the provider never reported usage at all -- not that
+            # nothing was spent. Falls back to the same len(text)//4
+            # estimator managers\context.py already uses for the same
+            # reason. (Every real provider in this repo reports usage --
+            # see providers\*\provider.py -- so this path is for the
+            # Ollama case the episode's own verification names: some
+            # responses omit `eval_count`.)
+            #
+            # Exempt `echo`: there, `output_tokens == 0` is not an
+            # omission, it is the true answer -- no provider was ever
+            # called, so 0 is real and `messages.output_tokens` (which
+            # F9a's card sums) is also genuinely 0. Estimating here
+            # would make this row disagree with that column for the
+            # one case where disagreeing is easiest to spot.
+            if output_tokens == 0 and reply_text and provider != "echo":
+                output_tokens = estimate_tokens(reply_text)
+                estimated = True
+            await self.usage.record(
+                session_id=msg.session_id, task_id=task.id, agent_id=agent_id,
+                provider=provider, model=model,
+                input_tokens=input_tokens, output_tokens=output_tokens,
+                estimated=estimated,
+            )
+        except Exception:  # noqa: BLE001
+            _log.exception("Task %s: usage record failed to write", task.id)
+
+    async def _push_usage_totals(self, session_id: str) -> None:
+        """Pushed at the same turn boundary as `_push_context_report`
+        (right after it, both gated on `persisted`), so the status
+        panel is push-driven rather than polling for its totals.
+        Best-effort for the same reason that method is."""
+        try:
+            session_totals = await self.usage.session_totals(session_id)
+            cap = await self.usage.remaining_cap()
+        except Exception:  # noqa: BLE001
+            _log.exception("B14: could not build usage totals for session %s", session_id)
+            return
+        await self._emit(OutgoingEvent(
+            type=OutgoingEventType.USAGE_TOTALS_UPDATED,
+            request_id=None,
+            session_id=session_id,
+            payload={"session": session_totals, "cap": cap},
+        ))
+
     async def _handle_resolve_attachment(self, event: IncomingEvent) -> None:
         """Guard and price a path WITHOUT attaching it.
 
@@ -2009,6 +2090,7 @@ class Runtime:
                         msg = await self.agent_executor.apply_response_middleware(msg)
                         await self.sessions.append_message(msg)
                         persisted = True
+                        await self._record_usage(task, msg)
                     except Exception:  # noqa: BLE001
                         _log.exception(
                             "Task %s: failed to persist its %r reply -- "
@@ -2044,6 +2126,7 @@ class Runtime:
                         msg = await self.agent_executor.apply_response_middleware(msg)
                         await self.sessions.append_message(msg)
                         persisted = True
+                        await self._record_usage(task, msg)
                     except Exception:  # noqa: BLE001
                         _log.exception(
                             "Task %s: failed to persist its echoed reply -- "
@@ -2113,6 +2196,7 @@ class Runtime:
             # numbers only move once history actually gained a message.
             if persisted:
                 await self._push_context_report(session_id)
+                await self._push_usage_totals(session_id)
 
         return sink
 
