@@ -196,12 +196,22 @@ D:\Projects\Point\
 ├── backend\                    Python — run from inside this folder
 │   ├── main.py                 transport only: stdin reader thread,
 │   │                           outbox writer, teardown              [B6 ✅]
+│   │                           + the third exit door (a `Shutdown`
+│   │                             COMMAND), signal handlers for
+│   │                             SIGINT/SIGBREAK/SIGTERM with
+│   │                             "second signal exits now", and
+│   │                             `exit_now()` — which skips
+│   │                             interpreter finalization because the
+│   │                             DAEMON stdin thread holds the
+│   │                             `sys.stdin.buffer` lock on every exit
+│   │                             path except EOF, and finalization
+│   │                             aborts the process trying to take it [B15 ✅]
 │   ├── bootstrap.py            resolve_db_path, run_migrations,
 │   │                           build_runtime, shutdown_runtime      [B6 ✅]
 │   ├── cli.py                  doctor · migrate · session · send ·
 │   │                           tasks · project · attach · detach ·
 │   │                           set-mode · attachments · context ·
-│   │                           agents                               [B6, grown since]
+│   │                           agents · workspace · bench           [B6, grown since]
 │   ├── appconfig.py            paths, config.toml, key resolution   [B6 ✅]
 │   ├── logging_setup.py        rotating file + stderr, redaction    [B6 ✅]
 │   ├── lockfile.py             single-instance lock                 [B6 ✅]
@@ -222,6 +232,11 @@ D:\Projects\Point\
 │   │                           state, errors                        [B1 ✅]
 │   │                           events.py is envelope v1             [B6 ✅]
 │   │                           scheduler.py — QUEUED + lane caps    [B12 ✅]
+│   │                           lifecycle.py — ReleaseReport, the
+│   │                             per-resource-class refusal rule,
+│   │                             WorkspaceContext/ProjectContext.
+│   │                             Holds no DB handle and knows nothing
+│   │                             about workspaces as a UI concept    [B15 ✅]
 │   ├── managers\               session, session_manager             [B2 ✅]
 │   │                           message, message_history,
 │   │                           message_translator                   [B3 ✅]
@@ -257,6 +272,15 @@ D:\Projects\Point\
 │   │                           tool_call_repository                 [B10 ✅]
 │   │                           proposal_repository — agent_proposals,
 │   │                             insert/count/fetch only            [B11 ✅]
+│   │                           message_checkpoint_repository.py —
+│   │                             migration v7's `message_checkpoints`,
+│   │                             the in-flight reply on disk (500ms
+│   │                             cadence) plus the startup promotion
+│   │                             that turns a survivor into an
+│   │                             `interrupted` message row. A SEPARATE
+│   │                             table, not a flag on `messages`:
+│   │                             a live partial inside `messages`
+│   │                             would enter the next prompt         [B15 ✅]
 │   ├── providers\              base, bootstrap, errors, models, registry,
 │   │                           __init__.py                          [B6 ✅]
 │   │                           retry.py — backoff + jitter +
@@ -266,7 +290,7 @@ D:\Projects\Point\
 │   ├── streaming\              accumulator, adapter, events, manager [B5 ✅]
 │   └── tests\                  manual_*.py and manual_*.ps1 — one or more
 │                               per episode that needed a deterministic
-│                               check (B11, B12, B19, B22, F8 …), plus
+│                               check (B11, B12, B15, B19, B22, F8 …), plus
 │                               manual_provider_test.py [B4] and
 │                               manual_context_test.py [B8]
 │                               fixtures\ (mock_stream.json, mock_slow.json) [B6 ✅]
@@ -305,6 +329,15 @@ D:\Projects\Point\
 │       │                       open and F15 can call it             [F9b ✅]
 │       ├── protocol\           client, transport, envelope, spawn*, types,
 │       │                       id — the backend client                [F2 ✅]
+│       │                       B15 filled F2's replay seam: a
+│       │                         per-session `lastSeq` high-water mark
+│       │                         (fed by `MarkSeen`, since `messages.seq`
+│       │                         lives in a payload and this package
+│       │                         reads only types and routing fields),
+│       │                         `RouteReplay` so a replayed message can
+│       │                         never be taken for a new one, and
+│       │                         `busyGrace` DELETED — the backend's ping
+│       │                         is unconditional now (D98)             [B15 ✅]
 │       ├── layout\             Compute, breakpoints, rects, CardSlot  [F1 ✅]
 │       ├── theme\              theme.go + palettes.go (four palettes) [F1 ✅]
 │       ├── actions\            the action registry                   [F1 ✅]
@@ -335,8 +368,17 @@ model; there is no `managers\tool.py` counterpart because `Tool` and
 added it.** The tree worked as a namespace package regardless, so this was
 cleanup, not a bug fix.
 
-There is **no file-write event anywhere in the backend** — no
-`WriteProjectFile`, no counterpart to `ReadProjectFile`. That is not an
-omission to be filled in passing: it is the first hard rule above, enforced
-structurally. An agent-proposed change reaches disk only through a buffer the
-user saves.
+There is **no file-write TOOL anywhere in the backend**, and there must not
+be one. That is the first hard rule above, enforced structurally rather than
+by a check inside something: an agent-proposed change reaches disk only
+through a buffer the user saves.
+
+This paragraph used to say there was no file-write *event* either — "no
+`WriteProjectFile`, no counterpart to `ReadProjectFile`" — and **B32 built
+exactly that** (`WRITE_PROJECT_FILE` in `backend\runtime\events.py`,
+`_handle_write_project_file`, `ProjectManager.write_file`), as the editor's
+save path. Noticed during B15 and corrected here, which is the fourth time
+this section has drifted and the reason its own note says the tree wins. The
+distinction that actually matters, and which `events.py`'s own comment
+states: a runtime event handler the USER's save goes through is not a tool an
+AGENT can call, and the rule is about the second.

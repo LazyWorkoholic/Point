@@ -278,6 +278,29 @@ class ProjectManager:
         matched = [f for f in cache.files if f.startswith(prefix)] if prefix else cache.files
         return matched[:limit]
 
+    def release_index(self, project_id: str) -> int:
+        r"""Drop one project's cached file index (B15). Returns how many
+        file entries were dropped, 0 if nothing was cached.
+
+        A count rather than a bool because the bounded-growth harness
+        reads it: "released: true" twenty times in a row says nothing
+        about whether the cache came back to the same size, and
+        `ReleaseReport` is not allowed to claim anything it has not
+        counted.
+
+        Nothing here decides WHETHER it may be dropped. That is
+        `runtime\lifecycle.py`'s refusal rule, which this is only ever
+        called by once it has allowed it -- a manager that enforced its
+        own policy would be a second copy of the rule.
+        """
+        cache = self._index_cache.pop(project_id, None)
+        return len(cache.files) if cache is not None else 0
+
+    def index_sizes(self) -> dict[str, int]:
+        """Per-project cached entry counts, for the bench harness and
+        `doctor`-style introspection. Read-only."""
+        return {pid: len(entry.files) for pid, entry in self._index_cache.items()}
+
     @staticmethod
     def _build_index(project: Project) -> list[str]:
         root = Path(project.root_path)

@@ -4,7 +4,7 @@ Requires OPENAI_API_KEY in the environment.
 
 from __future__ import annotations
 
-from typing import AsyncIterator
+from typing import AsyncIterator, Optional
 
 import openai
 
@@ -76,10 +76,30 @@ class OpenAIProvider(BaseProvider):
 
     def __init__(self, config) -> None:
         super().__init__(config)
-        self._client = openai.AsyncOpenAI(
-            api_key=config.api_key, base_url=config.base_url, timeout=config.timeout
-        )
+        # Lazy for the same reason AnthropicProvider's is (B15): close()
+        # drops the pool, `_client` rebuilds it, and no call site
+        # changes.
+        self._pool: Optional[openai.AsyncOpenAI] = None
         self._translator = OpenAIMessageTranslator()
+
+    @property
+    def _client(self) -> "openai.AsyncOpenAI":
+        if self._pool is None:
+            self._pool = openai.AsyncOpenAI(
+                api_key=self.config.api_key,
+                base_url=self.config.base_url,
+                timeout=self.config.timeout,
+            )
+        return self._pool
+
+    async def close(self) -> int:
+        """Close the SDK client and its httpx pool (B15). Re-created on
+        the next call -- see AnthropicProvider.close()."""
+        if self._pool is None:
+            return 0
+        pool, self._pool = self._pool, None
+        await pool.close()
+        return 1
 
     async def generate(self, request: GenerationRequest) -> GenerationResponse:
         try:

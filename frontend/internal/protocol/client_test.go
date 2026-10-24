@@ -873,3 +873,232 @@ func TestNextYieldsMessagesThenClosed(t *testing.T) {
 		t.Fatal("Next did not report the client as closed")
 	}
 }
+
+// ---------------------------------------------------------------------------
+// B15: the replay rung, the high-water mark, and the deleted busyGrace
+// ---------------------------------------------------------------------------
+
+// A replayed message must never look like a new one. It carries a session_id
+// and a corr_id, so without its own route it would arrive as RouteSession or
+// RouteCorrelation and a consumer that appended it would duplicate history.
+func TestSessionReplayGetsItsOwnRoute(t *testing.T) {
+	c, f, get, done := connected(t)
+	defer done()
+
+	replies, err := c.Request(Envelope{ID: "req-r", Type: CmdSessionReplaySince}, time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	f.out <- Envelope{
+		V: Version, ID: "rep", Type: EvSessionReplay, CorrID: "req-r",
+		SessionID: "s1",
+		Payload:   json.RawMessage(`{"session":"s1","since_seq":0,"replay":true,"messages":[],"tasks":[]}`),
+	}
+
+	msg := waitFor(t, get, func(m tea.Msg) bool {
+		e, ok := m.(EnvelopeMsg)
+		return ok && e.Envelope.ID == "rep"
+	}, "replay envelope").(EnvelopeMsg)
+	if msg.Route != RouteReplay {
+		t.Errorf("replay routed as %q, want %q", msg.Route, RouteReplay)
+	}
+
+	// A caller that asked explicitly still gets its reply: the replay
+	// route is additional information, not a consumed delivery.
+	select {
+	case reply := <-replies:
+		if reply.ID != "rep" {
+			t.Errorf("waiter got %q", reply.ID)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("replay reply never reached its waiter")
+	}
+}
+
+// The mark is monotonic and per session, and a session becomes known from its
+// session_id alone — no payload is read to learn one exists.
+func TestReplayMarksAreMonotonicAndLearnedFromRouting(t *testing.T) {
+	c, f, get, done := connected(t)
+	defer done()
+
+	f.out <- Envelope{
+		V: Version, ID: "m1", Type: EvSessionRenamed, SessionID: "s1",
+		Payload: json.RawMessage(`{}`),
+	}
+	waitFor(t, get, func(m tea.Msg) bool {
+		e, ok := m.(EnvelopeMsg)
+		return ok && e.Envelope.ID == "m1"
+	}, "session envelope")
+
+	if marks := c.ReplayMarks(); marks["s1"] != 0 {
+		t.Fatalf("a session seen but never rendered should mark 0, got %v", marks)
+	}
+
+	c.MarkSeen("s1", 12)
+	c.MarkSeen("s1", 7) // late, out of order: must not walk backwards
+	c.MarkSeen("s1", 0) // meaningless; ignored
+	c.MarkSeen("", 99)  // no session; ignored
+
+	marks := c.ReplayMarks()
+	if marks["s1"] != 12 {
+		t.Errorf("mark = %d, want 12 (monotonic)", marks["s1"])
+	}
+	if _, present := marks[""]; present {
+		t.Error("an empty session id was recorded")
+	}
+
+	// The copy is a copy.
+	marks["s1"] = 999
+	if c.ReplayMarks()["s1"] != 12 {
+		t.Error("ReplayMarks handed out its own map")
+	}
+}
+
+// The seam is filled: a reconnect asks for replay from the mark, for every
+// session it has seen, and still interrupts what did not survive.
+func TestReconnectRequestsReplayFromTheMark(t *testing.T) {
+	var mu sync.Mutex
+	backends := []*fakeBackend{newFake(), newFake()}
+	n := 0
+
+	c := NewClient(fastOptions(func() (Backend, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		b := backends[n]
+		n++
+		return b, nil
+	}))
+	get, stop := collect(t, c)
+	c.Start()
+	defer func() { _ = c.Close(); stop() }()
+
+	backends[0].out <- helloEnvelope(Version)
+	waitFor(t, get, is[ConnectedMsg], "first ConnectedMsg")
+
+	backends[0].out <- Envelope{
+		V: Version, ID: "s", Type: EvSessionRenamed, SessionID: "sess-1",
+		Payload: json.RawMessage(`{}`),
+	}
+	waitFor(t, get, func(m tea.Msg) bool {
+		e, ok := m.(EnvelopeMsg)
+		return ok && e.Envelope.ID == "s"
+	}, "session traffic")
+	c.MarkSeen("sess-1", 41)
+
+	backends[0].out <- taskEnvelope(EvTaskStarted, "task-1")
+	waitFor(t, get, func(m tea.Msg) bool {
+		e, ok := m.(EnvelopeMsg)
+		return ok && e.Envelope.Type == EvTaskStarted
+	}, "TaskStarted")
+
+	backends[0].die(errors.New("signal: killed"))
+	waitFor(t, get, is[BackendLostMsg], "BackendLostMsg")
+
+	backends[1].out <- helloEnvelope(Version)
+	waitFor(t, get, func(m tea.Msg) bool {
+		cm, ok := m.(ConnectedMsg)
+		return ok && cm.Restarted
+	}, "reconnect")
+
+	// The last rung still runs: a reconnect is a new process, so the old
+	// process's tasks are gone whatever replay reports.
+	waitFor(t, get, is[TasksInterruptedMsg], "TasksInterruptedMsg")
+
+	var replay *Envelope
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		for _, env := range backends[1].sent() {
+			if env.Type == CmdSessionReplaySince {
+				e := env
+				replay = &e
+				break
+			}
+		}
+		if replay != nil {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if replay == nil {
+		t.Fatal("reconnect sent no SessionReplaySince -- the seam is still a no-op")
+	}
+	if replay.SessionID != "sess-1" {
+		t.Errorf("replay session = %q, want sess-1", replay.SessionID)
+	}
+	var p struct {
+		Session  string `json:"session"`
+		SinceSeq int    `json:"since_seq"`
+		Limit    int    `json:"limit"`
+	}
+	if err := replay.UnmarshalPayload(&p); err != nil {
+		t.Fatalf("replay payload: %v", err)
+	}
+	if p.Session != "sess-1" || p.SinceSeq != 41 {
+		t.Errorf("replay payload = %+v, want session sess-1 since_seq 41", p)
+	}
+	if p.Limit != replayLimit {
+		t.Errorf("replay limit = %d, want %d", p.Limit, replayLimit)
+	}
+}
+
+// busyGrace is gone (B15/D98): one watchdog budget, whatever the backend is
+// doing. A task in flight no longer buys 60s of forgiven silence, because the
+// backend's ping is now unconditional.
+func TestSilenceIsDetectedWithATaskInFlight(t *testing.T) {
+	var mu sync.Mutex
+	var made []*fakeBackend
+
+	c := NewClient(fastOptions(func() (Backend, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		b := newFake()
+		made = append(made, b)
+		return b, nil
+	}))
+	get, stop := collect(t, c)
+	c.Start()
+	defer func() { _ = c.Close(); stop() }()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		mu.Lock()
+		n := len(made)
+		mu.Unlock()
+		if n > 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("never dialled")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	mu.Lock()
+	first := made[0]
+	mu.Unlock()
+
+	first.out <- helloEnvelope(Version)
+	waitFor(t, get, is[ConnectedMsg], "connect")
+
+	// A task starts, then the backend goes silent and the process lives:
+	// the exact shape busyGrace used to forgive for a full minute.
+	first.out <- taskEnvelope(EvTaskStarted, "task-busy")
+	waitFor(t, get, func(m tea.Msg) bool {
+		e, ok := m.(EnvelopeMsg)
+		return ok && e.Envelope.Type == EvTaskStarted
+	}, "TaskStarted")
+
+	start := time.Now()
+	lost := waitFor(t, get, is[BackendLostMsg], "BackendLostMsg").(BackendLostMsg)
+	if !strings.Contains(lost.Reason, "no word") {
+		t.Errorf("reason = %q, want the silence path", lost.Reason)
+	}
+	// fastOptions' watchdog is milliseconds. With busyGrace this test
+	// would have waited a minute and the harness would have given up.
+	if elapsed := time.Since(start); elapsed > 5*time.Second {
+		t.Errorf("took %s to notice silence during a task", elapsed)
+	}
+	if len(lost.UnknownTasks) != 1 || lost.UnknownTasks[0] != "task-busy" {
+		t.Errorf("unknown tasks = %v, want [task-busy]", lost.UnknownTasks)
+	}
+}

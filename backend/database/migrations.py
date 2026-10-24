@@ -29,7 +29,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional, Union
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 
 # Applied to every connection, here and in database/connection.py.
 #   WAL          -- 12 makes shared-WAL the basis of SSH topology B, and
@@ -406,6 +406,59 @@ CREATE INDEX IF NOT EXISTS idx_messages_session_seq ON messages(session_id, seq)
 """
 
 
+# ---------------------------------------------------------------------------
+# v7 -- B15's partial-reply checkpoint.
+#
+# The crash this exists for: in-flight assistant text lives ONLY in
+# `StreamAccumulator` (an in-memory list of string parts) and reaches
+# `messages` exactly once, from `finalize()`/`finalize_interrupted()` in
+# the terminal branch of `Runtime._make_stream_sink`. A `Stop-Process
+# -Force` runs no handler, so no terminal event ever fires and the reply
+# is simply gone -- while `recover_orphaned_tasks` buries the `tasks` row
+# and never looks at `messages` at all. B15's Done-when #3 ("its partial
+# message survives with interrupted=True") is unreachable without a row
+# on disk written BEFORE the process dies.
+#
+# A SEPARATE TABLE, not a flag on `messages`, and that is the whole
+# design decision here. A partial row inside `messages` would be visible
+# to every existing reader the moment it was written: `fetch_messages`
+# (GetSession), `fetch_messages_keyset` (B18), the context builder's
+# history window, and B21's orphan filter. The context builder is the
+# one that actually breaks -- a second send while the first still
+# streams builds its prompt from history, so a live partial would enter
+# the next prompt as if it were a finished reply. Filtering it back out
+# of four queries is four chances to forget one; keeping it out of
+# `messages` until it is real is none.
+#
+# `message_id` is the row's identity, not `id`: it is the SAME
+# message_id the sink will eventually persist the real `messages` row
+# under, so promotion is an insert of a row that was always going to
+# exist under that id, and a checkpoint can never produce a duplicate
+# transcript entry.
+#
+# No `seq`. A checkpoint is not in the transcript yet; `seq` is assigned
+# by `insert_message`'s own `MAX(seq) + 1` at promotion, which is what
+# keeps the promoted row ordered correctly against whatever else was
+# written while the process was down.
+# ---------------------------------------------------------------------------
+
+_V7 = """
+CREATE TABLE IF NOT EXISTS message_checkpoints (
+    message_id   TEXT PRIMARY KEY,
+    session_id   TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+    task_id      TEXT NOT NULL,
+    content      TEXT NOT NULL,
+    invocation   TEXT,
+    input_tokens  INTEGER NOT NULL DEFAULT 0,
+    output_tokens INTEGER NOT NULL DEFAULT 0,
+    created_at   REAL NOT NULL,
+    updated_at   REAL NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_message_checkpoints_task ON message_checkpoints(task_id);
+"""
+
+
 @dataclass(frozen=True)
 class Migration:
     version: int
@@ -420,6 +473,7 @@ MIGRATIONS: tuple[Migration, ...] = (
     Migration(4, "agent_proposals (B11 stopgap, not memory_records)", _V4),
     Migration(5, "message terminal outcome: interrupted, outcome, error_code", _V5),
     Migration(6, "message seq (keyset pagination cursor) + (session_id, seq) index", _V6),
+    Migration(7, "message_checkpoints (B15 partial-reply checkpoint)", _V7),
 )
 
 

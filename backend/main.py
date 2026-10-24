@@ -24,6 +24,9 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
+import os
+import signal
 import sys
 import threading
 
@@ -224,24 +227,139 @@ async def _drain(runtime: Runtime, in_flight: set[asyncio.Task]) -> None:
         await asyncio.sleep(0.01)
 
 
+def install_signal_handlers(runtime: Runtime, loop: asyncio.AbstractEventLoop) -> None:
+    r"""`Ctrl+C` / `Ctrl+Break` / SIGTERM quiesce; a second one exits now
+    (B15).
+
+    Before this, `Ctrl+C` worked by accident of control flow: SIGINT
+    raised KeyboardInterrupt wherever the main thread happened to be,
+    `asyncio.run` unwound, and `main()`'s `finally` did the teardown.
+    That is fine when the interrupt lands on an await and much less fine
+    when it lands inside a blocking C call, and it gave `Ctrl+Break` --
+    SIGBREAK, whose DEFAULT ACTION on Windows is to terminate the
+    process immediately -- no path at all. Measured: a slow stream
+    interrupted with CTRL_BREAK_EVENT died in 0.02s with the partial
+    reply still only in memory and nothing but the user's row on disk.
+
+    Now every signal takes the same door the `Shutdown` COMMAND takes:
+    set `shutdown_requested`, let `main()` drain the outbox, and let the
+    `finally` cancel tasks, persist their partials, release contexts and
+    close the database. One code path, which is the only reason
+    "Ctrl+C reaches the same end state as Shutdown" is a claim worth
+    making.
+
+    No ack is emitted here, deliberately. project_idea.md §4's rule is
+    one ack per COMMAND; a signal is not a command and nobody is waiting
+    on a correlation id.
+
+    A SECOND signal exits immediately, per B15's Build section --
+    `os._exit`, because the point of a second Ctrl+C is that the user is
+    done waiting for a graceful anything.
+    """
+    pressed = {"count": 0}
+
+    def handler(signum, _frame) -> None:
+        pressed["count"] += 1
+        if pressed["count"] > 1:
+            _log.warning("Second signal (%s): exiting immediately", signum)
+            sys.stderr.flush()
+            os._exit(130)
+        _log.info("Signal %s: quiescing", signum)
+        # Signal handlers run on the main thread, possibly between two
+        # bytecodes of a coroutine: hand the event to the loop rather
+        # than touching asyncio state from here.
+        loop.call_soon_threadsafe(runtime.shutdown_requested.set)
+
+    for name in ("SIGINT", "SIGBREAK", "SIGTERM"):
+        sig = getattr(signal, name, None)
+        if sig is None:
+            continue  # SIGBREAK is Windows-only; SIGTERM is not on every host
+        try:
+            signal.signal(sig, handler)
+        except (ValueError, OSError) as exc:
+            # Not the main thread, or the platform refuses: not fatal,
+            # and worth a line rather than a silent loss of Ctrl+C.
+            _log.warning("Could not install a handler for %s: %s", name, exc)
+
+
+def exit_now(code: int = 0) -> None:
+    r"""Leave the process without running interpreter finalization.
+
+    This is not impatience, it is the stdin reader thread. It is a
+    DAEMON (so a blocking `readline` cannot hang the exit -- see
+    `read_stdin_loop`), and on every exit path except stdin EOF it is
+    still blocked inside that read, holding the lock on
+    `sys.stdin.buffer`. Interpreter finalization then tries to close
+    that buffered reader, cannot take the lock, and aborts the process:
+
+        Fatal Python error: _enter_buffered_busy: could not acquire lock
+        for <_io.BufferedReader name='<stdin>'> at interpreter shutdown,
+        possibly due to daemon threads
+
+    Measured on this machine, on the `Shutdown` path, with exit code
+    0xC0000005. It is new with B15 only because B15 gave the process an
+    exit path that does not begin with stdin closing; the hazard was
+    always there.
+
+    Everything that must survive has already happened before this is
+    called: `shutdown_runtime` closed the database and released the
+    single-instance lock, the outbox was drained to stdout, and the two
+    lines below flush what the C level still holds. What finalization
+    would add is garbage collection of a process that is about to stop
+    existing.
+    """
+    sys.stdout.flush()
+    sys.stderr.flush()
+    logging.shutdown()
+    os._exit(code)
+
+
+async def wait_for_shutdown(runtime: Runtime) -> None:
+    """Third exit door, added by B15: a `Shutdown` COMMAND.
+
+    The other two are pipes closing -- EOF on stdin, or a dead stdout --
+    and neither of them happens when Go asks the backend to stop
+    politely. Before B15 `Shutdown` set the runtime to STOPPED and left
+    these loops running, so the process stayed alive rejecting every
+    subsequent event: a brick that never exits.
+
+    `Runtime._handle_shutdown` sets this event AFTER its
+    `shutdown.complete` ack is on the outbox, so the ack is already
+    queued when this returns and `_drain` below flushes it before the
+    writer is cancelled. That ordering is the whole requirement: the ack
+    is the last thing Go ever reads from this process.
+    """
+    await runtime.shutdown_requested.wait()
+
+
 async def main(verbose: bool = False) -> None:
     runtime = await build_runtime(verbose=verbose)
+    install_signal_handlers(runtime, asyncio.get_running_loop())
     reader = asyncio.create_task(read_stdin_loop(runtime), name="stdin-reader")
     writer = asyncio.create_task(write_stdout_loop(runtime), name="stdout-writer")
+    stopper = asyncio.create_task(wait_for_shutdown(runtime), name="shutdown-waiter")
     try:
         # Either end of the pipe closing ends the process. Waiting only on
         # the reader would leave a backend talking to a stdout nobody is
         # holding; waiting on both is the whole "Go is gone" condition.
-        done, _ = await asyncio.wait({reader, writer}, return_when=asyncio.FIRST_COMPLETED)
+        # B15 adds the third: a `Shutdown` command, which is Go asking
+        # rather than Go vanishing.
+        done, _ = await asyncio.wait(
+            {reader, writer, stopper}, return_when=asyncio.FIRST_COMPLETED
+        )
         if reader in done and not reader.cancelled():
             await _drain(runtime, reader.result())
+        elif stopper in done:
+            # The handler has already torn the runtime down; all that is
+            # left is to get its ack onto the wire.
+            await _drain(runtime, set())
     finally:
         # Whatever happened above, teardown runs. shutdown_runtime is what
         # closes the database and releases the lock, and there is no state
         # this process can be in where skipping that is the better option.
-        for task in (reader, writer):
+        for task in (reader, writer, stopper):
             task.cancel()
-        await asyncio.gather(reader, writer, return_exceptions=True)
+        await asyncio.gather(reader, writer, stopper, return_exceptions=True)
         await shutdown_runtime(runtime)
 
 
@@ -254,4 +372,10 @@ if __name__ == "__main__":
         print(str(exc), file=sys.stderr)
         sys.exit(1)
     except KeyboardInterrupt:
-        pass  # clean exit, no traceback
+        # Still caught: `install_signal_handlers` replaces the default
+        # SIGINT handler, but it cannot cover the window before it is
+        # installed (`build_runtime` runs migrations, which can take a
+        # moment on a cold profile). An interrupt there has nothing to
+        # quiesce and should not print a traceback.
+        pass
+    exit_now(0)

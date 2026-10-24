@@ -16,6 +16,7 @@ import appconfig_overrides
 from agents.executor import AgentExecutor, BoundsOverride
 from agents.registry import AgentRegistry
 from database.connection import open_database
+from database.message_checkpoint_repository import MessageCheckpointRepository
 from database.migrations import SCHEMA_VERSION
 from database.proposal_repository import ProposalRepository
 from database.task_repository import TaskRepository
@@ -50,6 +51,12 @@ from runtime.events import (
     OutgoingEvent,
     OutgoingEventType,
 )
+from runtime.lifecycle import (
+    LiveReferenceRegistry,
+    ProjectContext,
+    ReleaseReport,
+    WorkspaceContext,
+)
 from runtime.scheduler import turn_lane, turn_queue_depth
 from runtime.state import RuntimeState, RuntimeStatus
 from runtime.task import Task
@@ -74,6 +81,30 @@ _log = get_logger("runtime")
 _CORRELATION_LIMIT = 1000
 
 HEARTBEAT_INTERVAL_S = 5.0
+
+# B15: how often an in-flight assistant reply is written to
+# `message_checkpoints` while text is arriving.
+#
+# Time-based, not per-delta, and that is the whole decision. A local
+# model streams tens of deltas a second; a write per delta would put
+# tens of serialized SQLite round-trips a second on the token path for a
+# row that is overwritten immediately and read only after a crash. 500ms
+# bounds the worst-case loss to half a second of text, which is a
+# sentence fragment, while costing two writes a second during a stream
+# that is already producing far more events than that on the wire.
+#
+# The first delta checkpoints immediately rather than waiting out the
+# first interval: a task killed 200ms in would otherwise leave nothing
+# at all, which is exactly the hole this closes.
+CHECKPOINT_INTERVAL_S = 0.5
+
+# B15: how long `Shutdown` and `close()` wait for cancelled tasks to
+# finish unwinding before giving up on them. A cancelled task mid network
+# I/O needs several loop turns to propagate CancelledError up through
+# httpx -> httpcore -> anyio and then run the sink's own
+# persist-the-partial branch; bounded so a task whose cleanup is stuck
+# cannot hang the process forever (the lock outlives a hung process).
+TEARDOWN_TIMEOUT_S = 5.0
 
 # B25: a non-healthy health() result, turned into the ProviderError
 # subclass that best describes why -- so a bad SetProviderApiKey key
@@ -141,6 +172,11 @@ class Runtime:
         self.state = RuntimeState()
         self.db = db_conn
         self.task_repo = TaskRepository(db_conn)
+        # B15: the partial reply on disk, written every
+        # CHECKPOINT_INTERVAL_S while text arrives and deleted the moment
+        # the real `messages` row exists. Nothing that reads history can
+        # see it -- see migration v7 for why it is a separate table.
+        self.checkpoints = MessageCheckpointRepository(db_conn)
         # The recorder is how a Task's state transitions reach the `tasks`
         # table. TaskManager still owns the live objects.
         self.tasks = TaskManager(recorder=self._record_task)
@@ -195,6 +231,21 @@ class Runtime:
         self._correlation: OrderedDict[str, dict[str, Optional[str]]] = OrderedDict()
         self._heartbeat: Optional[asyncio.Task] = None
 
+        # B15. The registry is DERIVED from TaskManager, not maintained
+        # beside it: `_tasks` already is the live set, and a second copy
+        # updated by hand on every transition is a second copy that can
+        # disagree. See runtime\lifecycle.py for the per-resource-class
+        # refusal rule and why `is_active()` is the wrong input for it.
+        self.live_refs = LiveReferenceRegistry(self.tasks.list_all)
+        # monotonic deadline per task: when its next checkpoint is due.
+        self._checkpoint_at: dict[str, float] = {}
+        # Set by `Shutdown` once its ack is on the outbox. `main.py`
+        # waits on it alongside the pipes, because `Shutdown` quiesces
+        # from the PROTOCOL side and stdin is still open -- nothing else
+        # would ever end the process.
+        self.shutdown_requested: asyncio.Event = asyncio.Event()
+        self._torn_down = False
+
     _PROVIDER_ALIASES = {"claude": "anthropic", "gpt": "openai", "chatgpt": "openai"}
 
     def _resolve_provider_name(self, name: str) -> str:
@@ -217,7 +268,23 @@ class Runtime:
 
     async def close(self) -> None:
         """Cancel what is running, stop the heartbeat, close the
-        database. Idempotent."""
+        database. Idempotent.
+
+        B15 made this and the `Shutdown` handler the same code path
+        rather than two that drift: `Shutdown` is this sequence entered
+        from the protocol side instead of from the OS, plus one ack.
+        Both go through `_teardown()`, and the `_torn_down` guard is why
+        `shutdown_runtime()` running after a `Shutdown` is a no-op
+        instead of a second attempt to close a closed database.
+        """
+        await self._teardown()
+
+    async def _teardown(self) -> None:
+        """Quiesce, release, close -- once. See close() and
+        _handle_shutdown()."""
+        if self._torn_down:
+            return
+        self._torn_down = True
         self.state.status = RuntimeStatus.STOPPING
         if self._heartbeat is not None:
             self._heartbeat.cancel()
@@ -258,7 +325,8 @@ class Runtime:
         if active:
             try:
                 await asyncio.wait_for(
-                    asyncio.gather(*(task.wait() for task in active)), timeout=5.0,
+                    asyncio.gather(*(task.wait() for task in active)),
+                    timeout=TEARDOWN_TIMEOUT_S,
                 )
             except asyncio.TimeoutError:
                 _log.warning(
@@ -275,11 +343,88 @@ class Runtime:
         # short wait in practice.
         await self.tasks.scheduler.drain()
 
+        # B15: release contexts before the database goes. Nothing is
+        # running by this point, so every refusal rule in
+        # runtime\lifecycle.py passes trivially -- which is the honest
+        # order: release what is free, having first made it free.
+        report = await self.release_all()
+        _log.info("Teardown release: %s", report.describe())
+
         try:
             await self.db.close()
         except Exception as exc:  # noqa: BLE001
             _log.warning("Error closing database: %s", exc)
         self.state.status = RuntimeStatus.STOPPED
+
+    # -- release (B15) ----------------------------------------------------
+
+    async def _close_provider_pool(self, name: str) -> int:
+        """One provider's pool, closed through the provider's own
+        `close()` so an adapter that holds nothing reports 0 rather than
+        pretending. Never raises into the report: a vendor SDK that
+        throws on close must not take the rest of an unload with it."""
+        try:
+            provider = self.providers.get(name)
+        except RuntimeException:
+            return 0
+        return await provider.close()
+
+    async def _sessions_for_workspace(self, workspace_id: str) -> list[Session]:
+        """Which sessions a workspace label covers.
+
+        `sessions.workspace` is the only place a workspace id appears
+        anywhere in the backend, and it is a nullable grouping label --
+        nothing is keyed by it. Resolving it here is what lets Go keep
+        asking in the vocabulary it has ("unload chat") without the
+        backend inventing a workspace registry it has no other use for.
+
+        Archived sessions are included deliberately: an archived
+        session's project index is exactly the kind of thing an unload
+        should be free to drop.
+        """
+        sessions = await self.sessions.list_all(include_archived=True)
+        return [s for s in sessions if (s.workspace or "") == workspace_id]
+
+    def _workspace_context(
+        self, workspace_id: str, sessions: list[Session],
+    ) -> WorkspaceContext:
+        return WorkspaceContext(
+            workspace_id,
+            projects=self.projects,
+            registry=self.live_refs,
+            session_ids=[s.id for s in sessions],
+            project_ids=[s.project_id for s in sessions if s.project_id],
+            provider_names=self.providers.list(),
+            close_provider=self._close_provider_pool,
+        )
+
+    def project_context(self, project_id: str, session_ids: list[str]) -> ProjectContext:
+        """B15's `ProjectContext`, reachable on its own as well as
+        through a workspace: B16 gives each SSH connection its own
+        runtime with this same lifecycle, and a per-project release it
+        can call directly is what that needs."""
+        return ProjectContext(project_id, self.projects, self.live_refs, session_ids)
+
+    async def release_all(self) -> ReleaseReport:
+        """Every project index and every provider pool, subject to the
+        same refusal rule as a workspace unload. Used by teardown, and
+        by `bench unload-cycles` as the "unload everything" half of a
+        cycle."""
+        sessions = await self.sessions.list_all(include_archived=True)
+        context = WorkspaceContext(
+            "*",
+            projects=self.projects,
+            registry=self.live_refs,
+            session_ids=[s.id for s in sessions],
+            project_ids=[s.project_id for s in sessions if s.project_id],
+            provider_names=self.providers.list(),
+            close_provider=self._close_provider_pool,
+            # Explicit: "release everything" means the pools too, even
+            # on a profile with no sessions at all, which is the one
+            # case the per-workspace default declines.
+            include_provider_pools=True,
+        )
+        return await context.close()
 
     def _register_handlers(self) -> None:
         self.dispatcher.register(IncomingEventType.SEND_MESSAGE, self._handle_send_message)
@@ -320,6 +465,8 @@ class Runtime:
         self.dispatcher.register(IncomingEventType.LIST_DIRECTORY, self._handle_list_directory)
         self.dispatcher.register(IncomingEventType.SET_BEHAVIOUR_OVERRIDE, self._handle_set_behaviour_override)
         self.dispatcher.register(IncomingEventType.GET_DOCTOR_REPORT, self._handle_get_doctor_report)
+        self.dispatcher.register(IncomingEventType.WORKSPACE_UNLOAD, self._handle_workspace_unload)
+        self.dispatcher.register(IncomingEventType.SESSION_REPLAY_SINCE, self._handle_session_replay_since)
 
     async def receive(self, raw: dict[str, Any]) -> None:
         try:
@@ -1551,11 +1698,171 @@ class Runtime:
             return MODE_FULL
         return agent.default_attach_mode or MODE_FULL
 
+    # -- lifecycle handlers (B15) ------------------------------------------
+
+    async def _handle_workspace_unload(self, event: IncomingEvent) -> None:
+        """`workspace.unload(id)` from Go. **Never cancels a task.**
+
+        Unloading a view is a UI event and the task is in this process's
+        lifetime, not the view's -- so this releases what is free and
+        reports what it is not allowed to touch. B15's Do-NOT list and
+        Done-when #1 are the same statement from two directions: the
+        task keeps streaming, its result is retrievable afterwards, and
+        the reply says which resources its liveness protected.
+
+        A workspace id matching no session is not an error. It is a view
+        Go unloaded that this backend never held anything for, and an
+        empty `released` with an empty `refused` says exactly that --
+        distinguishable from a refusal, which is the whole reason this
+        reply is three lists rather than a boolean.
+        """
+        workspace_id = event.payload.get("workspace") or event.payload.get("workspace_id")
+        if not workspace_id:
+            raise InvalidEventError("WorkspaceUnload requires 'workspace'")
+
+        sessions = await self._sessions_for_workspace(workspace_id)
+        report = await self._workspace_context(workspace_id, sessions).close()
+        _log.info("WorkspaceUnload %s: %s", workspace_id, report.describe())
+        await self._emit(OutgoingEvent(
+            type=OutgoingEventType.WORKSPACE_UNLOADED,
+            request_id=event.request_id,
+            payload={
+                "workspace": workspace_id,
+                "sessions": [s.id for s in sessions],
+                **report.to_dict(),
+            },
+        ))
+
+    async def _handle_session_replay_since(self, event: IncomingEvent) -> None:
+        r"""The replay rung of F2's recovery ladder (B15), served at
+        MESSAGE level.
+
+        **Read `events.py`'s note on SESSION_REPLAY_SINCE before
+        changing this.** It is not `session.events_since`: there is no
+        event log in this schema, nothing persists an `OutgoingEvent`,
+        and the envelope `seq` a replay would have to be keyed on is an
+        in-memory per-task counter that does not outlive the task. What
+        IS durable and ordered per session is `messages.seq` (B18), so
+        that is what this is keyed on, and the payload says so in
+        `mechanism` rather than leaving a client to assume otherwise.
+
+        What Go gets back is what it needs to rebuild a transcript it
+        was disconnected from: the messages after its high-water mark,
+        oldest first, plus the current state of that session's tasks so
+        a task it marked UNKNOWN can be resolved to what actually
+        happened -- including a `backend_died` row written by crash
+        recovery before this process accepted a single event.
+
+        `since_seq` of 0 (or absent) means "everything", which is the
+        honest answer for a client that has no mark yet. It is bounded
+        by `limit` like every other history query here, and
+        `has_more` tells a caller to come back with a higher mark
+        rather than silently truncating.
+        """
+        p = event.payload
+        session_id = p.get("session") or p.get("session_id")
+        if not session_id:
+            raise InvalidEventError("SessionReplaySince requires 'session'")
+
+        since_seq = _parse_optional_int(p.get("since_seq"), "SessionReplaySince", "since_seq") or 0
+        if since_seq < 0:
+            raise InvalidEventError("SessionReplaySince 'since_seq' must not be negative")
+        limit = _parse_optional_positive_int(p.get("limit"), "SessionReplaySince", "limit") or 200
+
+        messages, _has_before, has_more = await self.sessions.get_messages_page(
+            session_id, before=None, after=since_seq, limit=limit,
+        )
+
+        # Live objects first, durable rows second -- the same rule
+        # `_handle_list_tasks` states, for the same reason. A task that
+        # is still running after a RECONNECT (the backend did not die;
+        # the pipe did) must report `running`, not whatever its row last
+        # said.
+        live = {t.id: t for t in self.tasks.list_all() if t.session_id == session_id}
+        tasks = [
+            {
+                "id": t.id,
+                "state": t.state.value,
+                "kind": t.kind,
+                "agent": t.agent_id,
+                "error_code": t.result.code if t.result else None,
+                "live": True,
+            }
+            for t in live.values()
+        ]
+        for row in await self.task_repo.list_recent(limit=limit, session_id=session_id):
+            if row["id"] in live:
+                continue
+            tasks.append({
+                "id": row["id"],
+                "state": row["status"],
+                "kind": row["kind"],
+                "agent": row["agent_id"],
+                "error_code": row["error_code"],
+                "live": False,
+            })
+
+        await self._emit(OutgoingEvent(
+            type=OutgoingEventType.SESSION_REPLAY,
+            request_id=event.request_id,
+            session_id=session_id,
+            payload={
+                "session": session_id,
+                "since_seq": since_seq,
+                "mechanism": "messages.seq",
+                "replay": True,
+                "messages": [m.to_dict() for m in messages],
+                "tasks": tasks,
+                "has_more": has_more,
+            },
+        ))
+
     async def _handle_shutdown(self, event: IncomingEvent) -> None:
-        self.state.status = RuntimeStatus.STOPPING
-        for task in self.tasks.list_active():
-            task.cancel()
-        self.state.status = RuntimeStatus.STOPPED
+        """`Shutdown` QUIESCES; it does not just flip a flag (B15).
+
+        What it did before this episode: set STOPPING, cancel active
+        tasks, set STOPPED. No ack -- which broke project_idea.md §4's
+        "every COMMAND gets exactly one ack". No process exit -- the
+        loops kept running. And `receive()` gates on
+        `is_accepting_events()`, so every later event was rejected: the
+        runtime became a brick that never exited.
+
+        What it does now, in this order:
+
+          1. STOPPING -- stop accepting new work. `Shutdown` itself
+             stays accepted, so a second one is a no-op ack rather than
+             an error.
+          2. Cancel running tasks and let their sinks persist partials,
+             exactly as a `CancelTask` does, bounded by a timeout. This
+             is `_teardown()`, the same code path `Ctrl+C` takes, which
+             is why Done-when #7 can say "the same end state as
+             Ctrl+C" and mean it.
+          3. Release contexts, close the database cleanly (also
+             `_teardown()`).
+          4. Ack -- one terminal `shutdown.complete`, put on the outbox
+             before anything stops the writer. `main.py` drains the
+             outbox before it cancels the writer, which is what makes
+             this the last thing Go ever reads.
+          5. STOPPED, and `shutdown_requested` lets `main.py` exit
+             through its normal teardown.
+
+        A second `Shutdown` arrives after `_torn_down` is set, so step 2
+        and 3 are no-ops and it gets its own ack with
+        `already_stopping: true`. Two acks for two commands; still
+        exactly one per command.
+        """
+        already = self._torn_down
+        await self._teardown()
+        await self._emit(OutgoingEvent(
+            type=OutgoingEventType.SHUTDOWN_COMPLETE,
+            request_id=event.request_id,
+            payload={
+                "already_stopping": already,
+                "status": self.state.status.value,
+                "uptime_s": time.time() - self.state.started_at,
+            },
+        ))
+        self.shutdown_requested.set()
 
     # -- event plumbing -----------------------------------------------
 
@@ -1612,6 +1919,17 @@ class Runtime:
                             type=out_type, request_id=request_id, task_id=task.id,
                             session_id=session_id, seq=raw.get("sequence"), payload=raw,
                         ))
+                    # B15: the partial reply reaches disk here, and
+                    # nowhere else, while the task is alive. Only on a
+                    # text delta: `StreamAccumulator.apply` appends TEXT
+                    # deltas to `text` and nothing else does, so a
+                    # progress or tool event has no new content to
+                    # checkpoint. The accumulator is fed by
+                    # `AgentExecutor` BEFORE it yields the chunk, so
+                    # `accumulator.text` here already includes this
+                    # delta.
+                    if raw.get("type") == StreamEventType.TEXT_DELTA.value:
+                        await self._maybe_checkpoint(task, session_id, message_id)
                 else:
                     echo_collected.append(chunk.get("text", ""))
                     await self._emit(OutgoingEvent(
@@ -1681,6 +1999,17 @@ class Runtime:
                             "Task %s: failed to persist its %r reply -- "
                             "the terminal event still goes out", task.id, kind,
                         )
+                # B15: the checkpoint has done its job once the real row
+                # is on disk. Cleared AFTER the insert, never before --
+                # a crash in the gap between the two leaves a checkpoint
+                # that startup promotion turns into an `interrupted`
+                # row, which is wrong-but-honest; the other order leaves
+                # nothing at all, which is the hole this whole mechanism
+                # exists to close. A persist that FAILED above
+                # deliberately keeps its checkpoint: it is then the only
+                # copy of that text, and the next startup recovers it.
+                if persisted or msg is None:
+                    await self._clear_checkpoint(task.id)
                 self.streams.close_stream(task.id)
             else:
                 if kind == "done" and echo_collected:
@@ -1705,6 +2034,13 @@ class Runtime:
                             "Task %s: failed to persist its echoed reply -- "
                             "the terminal event still goes out", task.id,
                         )
+                # The echo path never registers a stream, so it never
+                # checkpointed either (no stream, no deltas, nothing to
+                # checkpoint). Cleared anyway: this is one DELETE by
+                # task id, and "the path that cannot have left a row
+                # does not clean up after itself" is an invariant that
+                # only has to be wrong once.
+                await self._clear_checkpoint(task.id)
                 # The echo path never registers a stream, but it does draw
                 # sequence numbers for its envelopes. Drop the counter or
                 # it outlives the task it belonged to.
@@ -1764,6 +2100,63 @@ class Runtime:
                 await self._push_context_report(session_id)
 
         return sink
+
+    # -- partial-reply checkpoints (B15) ----------------------------------
+
+    async def _maybe_checkpoint(
+        self, task: Task, session_id: str, message_id: str,
+    ) -> None:
+        """Write the in-flight reply to `message_checkpoints`, at most
+        once per CHECKPOINT_INTERVAL_S.
+
+        The first delta writes immediately and then arms the timer: a
+        task killed 200ms into its stream would otherwise leave nothing
+        at all, which is the exact failure Done-when #3 tests.
+
+        A checkpoint failure is logged and swallowed. This runs on the
+        token path, and a database hiccup must not be able to kill a
+        reply the user is watching arrive -- the checkpoint is insurance
+        against a crash, not part of the delivery.
+        """
+        now = time.monotonic()
+        due = self._checkpoint_at.get(task.id)
+        if due is not None and now < due:
+            return
+        self._checkpoint_at[task.id] = now + CHECKPOINT_INTERVAL_S
+
+        if not self.streams.has_stream(task.id):
+            return
+        accumulator = self.streams.get_accumulator(task.id)
+        text = accumulator.text
+        if not text:
+            return
+        invocation = self.streams.invocation_for(task.id)
+        try:
+            await self.checkpoints.write(
+                message_id=message_id,
+                session_id=session_id,
+                task_id=task.id,
+                content=text,
+                invocation=invocation.to_dict() if invocation else None,
+                input_tokens=accumulator.usage.input_tokens,
+                output_tokens=accumulator.usage.output_tokens,
+            )
+        except Exception:  # noqa: BLE001
+            _log.exception(
+                "Task %s: checkpoint write failed -- the stream continues, "
+                "but a crash from here would lose the partial reply", task.id,
+            )
+
+    async def _clear_checkpoint(self, task_id: str) -> None:
+        self._checkpoint_at.pop(task_id, None)
+        try:
+            await self.checkpoints.clear_for_task(task_id)
+        except Exception:  # noqa: BLE001
+            # A checkpoint left behind is promoted at the next startup
+            # into an `interrupted` row for a task that actually
+            # finished -- wrong, but visible and bounded, where a raise
+            # here would come out of the terminal-event path.
+            _log.exception("Task %s: could not clear its checkpoint", task_id)
 
     async def _push_fill_proposal(
         self,
@@ -1863,9 +2256,13 @@ class Runtime:
         ))
 
     def start_heartbeat(self, interval: float = HEARTBEAT_INTERVAL_S) -> None:
-        """ping every 5s while idle (project_idea.md §4 rule 6). Two
-        missed pings is how Go catches a *hung* backend -- the failure
-        mode process-exit detection misses entirely.
+        """ping every 5s (project_idea.md §4 rule 6). Two missed pings is
+        how Go catches a *hung* backend -- the failure mode process-exit
+        detection misses entirely.
+
+        "while idle" is gone as of B15/D98: a silent task is not proof of
+        life, and the ping is now emitted whatever the backend is doing.
+        See `_heartbeat_loop`.
 
         The same loop runs the in-memory task sweep, which is what makes
         TaskManager.sweep_finished's docstring true for the first time.
@@ -1874,17 +2271,43 @@ class Runtime:
             self._heartbeat = asyncio.create_task(self._heartbeat_loop(interval), name="heartbeat")
 
     async def _heartbeat_loop(self, interval: float) -> None:
+        """B15 (decisions.md **D98**): the ping is UNCONDITIONAL.
+
+        It used to be skipped whenever `self.tasks.active_count() > 0`,
+        on the reasoning in `start_heartbeat`'s own docstring -- "tokens
+        are already proving liveness". That is true of a streaming reply
+        and false of a tool call. B10's `web_search` against a slow
+        endpoint emits `ToolStarted` and then nothing at all until
+        `ToolCompleted`; a large `read_file` behaves the same. Inside
+        that window the backend produced no tokens AND no pings, so the
+        wire was indistinguishable from a deadlocked process -- during
+        precisely the operation most likely to deadlock, the one waiting
+        on something external.
+
+        Go carried the workaround for this backend decision: `busyGrace`
+        in `frontend\\internal\\protocol\\client.go` stretched the
+        watchdog by 60s whenever it believed a task was in flight, so a
+        genuine hang mid-task took ~72s to detect instead of ~12s. B15
+        deletes `busyGrace`, which it can only do because of this
+        change.
+
+        `active_tasks` stays in the payload and now carries the real
+        count rather than a hardcoded 0 -- a ping during a task is the
+        new case, and reporting 0 through it would be a fresh lie in
+        place of the one just removed.
+        """
         while True:
             await asyncio.sleep(interval)
             self.tasks.sweep_finished()
             if not self.state.is_accepting_events():
                 continue
-            if self.tasks.active_count() > 0:
-                continue  # not idle: tokens are already proving liveness
             await self._emit(OutgoingEvent(
                 type=OutgoingEventType.PING,
                 request_id=None,
-                payload={"active_tasks": 0, "uptime_s": time.time() - self.state.started_at},
+                payload={
+                    "active_tasks": self.tasks.active_count(),
+                    "uptime_s": time.time() - self.state.started_at,
+                },
             ))
 
     # -- durable task mirror ----------------------------------------------

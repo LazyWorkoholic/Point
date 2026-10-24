@@ -20,6 +20,10 @@ verified without Go (B6 14).
     uv run python cli.py attachments list
     uv run python cli.py agents list [--wire]
     uv run python cli.py project browse <path> [--project ID] [--cwd DIR]
+    uv run python cli.py workspace unload chat [--json]
+    uv run python cli.py bench unload-cycles --n 20 [--path DIR]
+    uv run python cli.py session replay [--session ID] [--since-seq N] [--json]
+    uv run python cli.py send "write a long essay" --shutdown-after 2
 
 Run from inside `backend\`, like everything else here.
 
@@ -113,6 +117,10 @@ _EXPECTED_REPLY: dict[str, set[str]] = {
     "ListDirectory": {"DirectoryList"},
     "GetDoctorReport": {"DoctorReport"},
     "SetBehaviourOverride": {"BehaviourOverrideSet"},
+    # B15.
+    "WorkspaceUnload": {"WorkspaceUnloaded"},
+    "SessionReplaySince": {"SessionReplay"},
+    "Shutdown": {"shutdown.complete"},
 }
 
 _TASK_TERMINAL = {"TaskDone", "TaskFailed", "TaskCancelled"}
@@ -375,6 +383,7 @@ async def cmd_session_new(runtime: Runtime, args: argparse.Namespace) -> int:
         runtime, "CreateSession", verbose=args.verbose,
         title=args.title, provider=provider, model=model,
         project_id=project_id,
+        workspace=args.workspace,
         settings={"agent_id": args.agent} if args.agent else None,
     )
     _print_errors(envelopes)
@@ -383,9 +392,11 @@ async def cmd_session_new(runtime: Runtime, args: argparse.Namespace) -> int:
     session = envelopes[-1]["payload"]["session"]
     agent_note = f"  agent={args.agent}" if args.agent else ""
     project_note = f"  project={project_id}" if project_id else ""
+    workspace_note = f"  workspace={args.workspace}" if args.workspace else ""
     print(
         f"{session['id']}  {session['title']}  "
-        f"[{session['provider']}/{session['model']}]{agent_note}{project_note}"
+        f"[{session['provider']}/{session['model']}]"
+        f"{agent_note}{project_note}{workspace_note}"
     )
     return EXIT_OK
 
@@ -505,7 +516,9 @@ async def cmd_send(runtime: Runtime, args: argparse.Namespace) -> int:
         session_id = created[-1]["payload"]["session"]["id"]
         print(f"[session {session_id}  {provider}/{model}]")
 
-    state: dict[str, Any] = {"task_id": None, "cancel_scheduled": False}
+    state: dict[str, Any] = {
+        "task_id": None, "cancel_scheduled": False, "shutdown_scheduled": False,
+    }
 
     def on_event(envelope: dict[str, Any]) -> None:
         kind = envelope["type"]
@@ -522,6 +535,11 @@ async def cmd_send(runtime: Runtime, args: argparse.Namespace) -> int:
                 state["cancel_scheduled"] = True
                 asyncio.get_running_loop().create_task(
                     _cancel_after(runtime, envelope["task_id"], args.cancel_after)
+                )
+            if getattr(args, "shutdown_after", None) and not state["shutdown_scheduled"]:
+                state["shutdown_scheduled"] = True
+                asyncio.get_running_loop().create_task(
+                    _shutdown_after(runtime, args.shutdown_after)
                 )
         elif kind == "TextDelta":
             sys.stdout.write(payload.get("data", {}).get("text", ""))
@@ -613,8 +631,68 @@ async def cmd_send(runtime: Runtime, args: argparse.Namespace) -> int:
             if proposal_envelope is not None else "[no proposal]"
         )
 
+    # B15: `--shutdown-after` sent a `Shutdown` mid-stream. The ack is
+    # caused by a DIFFERENT request than this send, so `call()`'s own
+    # match() never sees it -- the same reason B24's FillProposal needs
+    # its own peek below. One bounded drain, only when asked for.
+    #
+    # Note what this check can and cannot prove. It proves the ack
+    # arrives, exactly once, and that the partial was persisted (check
+    # the row afterwards). It CANNOT prove the process exits, because
+    # the CLI exits when this command returns whether `Shutdown` worked
+    # or not -- `_with_runtime` tears the runtime down in a `finally`.
+    # For that, see `tests\manual_b15_shutdown_wire.ps1`, which pipes
+    # JSON lines into a real `main.py` and waits on the process.
+    if getattr(args, "shutdown_after", None):
+        ack = await _drain_for_shutdown_ack(runtime)
+        if ack is None:
+            print("\n[no shutdown.complete ack arrived]", file=sys.stderr)
+            return EXIT_FAILED
+        print(f"\n[shutdown.complete already_stopping={ack['payload']['already_stopping']} "
+              f"status={ack['payload']['status']}]")
+
     _print_errors(envelopes)
     return EXIT_FAILED if _failed(envelopes) else EXIT_OK
+
+
+async def _shutdown_after(runtime: Runtime, delay: float) -> None:
+    """B15: a `Shutdown` COMMAND mid-stream, from the protocol side.
+
+    Deliberately `receive()` rather than calling `runtime.close()`: the
+    point of Done-when #7 is the handler's own behaviour -- one ack,
+    partial persisted, same end state as `Ctrl+C` -- and reaching in
+    past the dispatcher would test something else entirely.
+    """
+    await asyncio.sleep(delay)
+    await runtime.receive({
+        "v": ENVELOPE_VERSION, "id": str(uuid.uuid4()), "type": "Shutdown", "payload": {},
+    })
+
+
+_SHUTDOWN_ACK_GRACE_S = 10.0
+
+
+async def _drain_for_shutdown_ack(
+    runtime: Runtime, grace: float = _SHUTDOWN_ACK_GRACE_S,
+) -> Optional[dict[str, Any]]:
+    """Peek the outbox for the one `shutdown.complete`. Generous grace:
+    the handler cancels tasks and waits out their cleanup (up to
+    TEARDOWN_TIMEOUT_S) before acking, so the ack genuinely can be
+    seconds behind the terminal event that stopped the send draining.
+    """
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + grace
+    while True:
+        remaining = deadline - loop.time()
+        if remaining <= 0:
+            return None
+        try:
+            event = await asyncio.wait_for(runtime.outbox.get(), timeout=remaining)
+        except asyncio.TimeoutError:
+            return None
+        envelope = event.to_dict()
+        if envelope["type"] == "shutdown.complete":
+            return envelope
 
 
 # B24: a 2s grace is generous -- `_push_fill_proposal` runs synchronously
@@ -978,6 +1056,218 @@ async def cmd_tasks_list(runtime: Runtime, args: argparse.Namespace) -> int:
 # ---------------------------------------------------------------------------
 # Proposals (B11) -- NOT B13's full `memory` surface
 # ---------------------------------------------------------------------------
+
+async def cmd_workspace_unload(runtime: Runtime, args: argparse.Namespace) -> int:
+    """`workspace unload <id>` (B15). Never cancels a task -- what it
+    prints is which resources a live task's existence protected."""
+    envelopes = await call(
+        runtime, "WorkspaceUnload", verbose=args.verbose, workspace=args.workspace,
+    )
+    _print_errors(envelopes)
+    if _failed(envelopes) or not envelopes:
+        return EXIT_FAILED
+    report = envelopes[-1]["payload"]
+    if args.json:
+        print(json.dumps(report, indent=2))
+        return EXIT_OK
+
+    print(f"workspace {report['workspace']}  "
+          f"{len(report['sessions'])} session(s) in scope")
+    for item in report["released"]:
+        print(f"  released  {item['resource']:<28} {item['items']:>6} item(s)  "
+              f"[{item['class']}] {item['detail']}")
+    for item in report["refused"]:
+        holders = ", ".join(f"{h['task'][:8]} {h['state']}" for h in item["holders"])
+        print(f"  REFUSED   {item['resource']:<28} held by {holders or '(releaser failed)'}")
+    for item in report["absent"]:
+        print(f"  absent    {item['resource']:<28} {item['reason']}")
+    if not (report["released"] or report["refused"]):
+        print("  nothing to release -- this backend held nothing for that workspace")
+    # No RSS line, deliberately: CPython does not return arenas to the
+    # OS reliably, and B15's Do-NOT list forbids claiming freed memory
+    # in logs, UI or docs. `items` is a count of objects dropped.
+    print(f"\n{report['items_dropped']} item(s) dropped, "
+          f"fully_released={report['fully_released']}")
+    return EXIT_OK
+
+
+async def cmd_bench_unload_cycles(runtime: Runtime, args: argparse.Namespace) -> int:
+    r"""`bench unload-cycles --n 20` (B15).
+
+    Load and unload a workspace context N times and report object counts
+    and cache sizes per cycle.
+
+    **Bounded growth, never freed RSS.** CPython does not reliably
+    return arenas to the OS, so a "watch memory drop" demo would
+    embarrass you: a flat object count across cycles is the measurable,
+    truthful claim and the only one made here. `tracemalloc` reports
+    allocations Python itself is tracking -- which is the number that
+    moves if this leaks -- and the word RSS does not appear in the
+    output.
+
+    "Load" is a real `list_files` against a real project, because that
+    is what populates `ProjectManager._index_cache`; a synthetic dict
+    would measure this harness instead of the thing under test.
+    """
+    import gc
+    import tracemalloc
+
+    project = await runtime.projects.resolve(path=args.path)
+    if project is None:
+        print(
+            f"error: no project at {args.path} -- run `cli.py project init "
+            f"--path {args.path}` first, or pass --path to a project root",
+            file=sys.stderr,
+        )
+        return EXIT_FAILED
+
+    session_ids = [
+        s.id for s in await runtime.sessions.list_all(include_archived=True)
+        if s.project_id == project.id
+    ]
+
+    tracemalloc.start()
+    gc.collect()
+    baseline_objects = len(gc.get_objects())
+    baseline_traced, _ = tracemalloc.get_traced_memory()
+
+    print(f"project {project.id[:8]}  root {project.root_path}")
+    print(f"baseline: {baseline_objects} tracked objects, "
+          f"{baseline_traced / 1024:.1f} KiB traced by tracemalloc\n")
+    print(f"{'cycle':>5}  {'indexed':>7}  {'dropped':>7}  {'objects':>8}  "
+          f"{'d-objects':>9}  {'retained KiB':>12}  refused")
+
+    rows: list[tuple[int, int, int, int, float, int]] = []
+    for cycle in range(1, args.n + 1):
+        # Measured per cycle, not cumulatively: `retained` is what this
+        # cycle's load-and-release left behind, which is the thing the
+        # episode actually claims returns to baseline. The cumulative
+        # traced figure is dominated by the harness itself -- one row
+        # per cycle, plus log records, plus tracemalloc's own traceback
+        # tables, which it allocates in chunks -- and reading a small
+        # steady climb in THAT as a leak in the cache under test is how
+        # a bounded-growth harness ends up measuring itself.
+        gc.collect()
+        before, _ = tracemalloc.get_traced_memory()
+        files = await runtime.projects.list_files(project, limit=10_000, refresh=True)
+        indexed = len(files)
+        report = await runtime.project_context(project.id, session_ids).close()
+        gc.collect()
+        after, _ = tracemalloc.get_traced_memory()
+        objects = len(gc.get_objects())
+        retained = (after - before) / 1024
+        rows.append((cycle, indexed, report.items_dropped, objects,
+                     retained, len(report.refused)))
+        print(f"{cycle:>5}  {indexed:>7}  {report.items_dropped:>7}  {objects:>8}  "
+              f"{objects - baseline_objects:>+9}  {retained:>+12.1f}  "
+              f"{len(report.refused)}")
+
+    tracemalloc.stop()
+
+    counts = {r[1] for r in rows}
+    dropped = {r[2] for r in rows}
+    first_objects, last_objects = rows[0][3], rows[-1][3]
+    objects = [r[3] for r in rows]
+    retained = [r[4] for r in rows]
+    print()
+    print(f"index size across cycles: {sorted(counts)} "
+          f"({'stable' if len(counts) == 1 else 'VARIED'})")
+    print(f"items dropped per cycle:  {sorted(dropped)} "
+          f"({'stable' if len(dropped) == 1 else 'VARIED'})")
+    print(f"objects: cycle 1 {first_objects} -> cycle {rows[-1][0]} {last_objects} "
+          f"({last_objects - first_objects:+d}), "
+          f"{'MONOTONIC CLIMB' if _climbing(objects) else 'not monotonic'}")
+
+    # Median, not mean, and the count of quiet cycles beside it: this
+    # distribution is two one-off steps and a flat floor, and a mean
+    # reports that as a steady 50 KiB per cycle, which is the one
+    # reading that is definitely wrong. A one-off step is an allocator
+    # taking a bigger chunk (reproducible at the SAME cycle number
+    # across runs, which is what a threshold looks like and what
+    # accumulation does not); the floor is what the cache actually
+    # leaves behind.
+    ordered = sorted(retained)
+    median = ordered[len(ordered) // 2]
+    quiet = sum(1 for value in retained if abs(value) < 1.0)
+    print(f"retained per cycle: median {median:+.1f} KiB, "
+          f"{quiet}/{len(retained)} cycles under 1 KiB, "
+          f"worst {max(retained, key=abs):+.1f} KiB, "
+          f"{'CLIMBING' if _climbing(retained) else 'not monotonic'}")
+    print(
+        "\nRSS is not reported and must not be: CPython does not return arenas\n"
+        "to the OS, so a flat object count and a retained figure that does not\n"
+        "climb are the real claims. A monotonic climb in either column is a\n"
+        "leak; RSS not shrinking is not."
+    )
+    # Named, because this is the number a future reader will stop on and
+    # suspect a leak. Attributed with tracemalloc snapshots during B15's
+    # gate work: ONE allocation of ~939 KiB from `sys.intern()` inside
+    # pathlib's path parsing, reached from `_build_index`'s `base / name`
+    # -- CPython's global interned-string table doubling. One block, not
+    # 939 KiB of accumulating data, and the object count stays flat
+    # straight through it.
+    #
+    # It lands on the same cycle run after run (cycle 11, five for five)
+    # because the same file set interns the same strings every cycle, so
+    # the doubling threshold is crossed after the same amount of work --
+    # deterministic in the CUMULATIVE interned-string count, not a
+    # property of "cycle 11". Raising tracemalloc's traceback depth
+    # moved it to cycle 12, which is what confirmed that.
+    print(
+        "\nThe one large retained figure (~939 KiB, same cycle every run) is\n"
+        "CPython's interned-string table doubling once -- `sys.intern()` inside\n"
+        "pathlib's path parsing, via _build_index's `base / name`. One block,\n"
+        "attributed by tracemalloc, outside this cache; its position is\n"
+        "deterministic in the cumulative interned-string count rather than\n"
+        "special to a cycle number. Not a leak, and deliberately not warmed\n"
+        "away: a harness that hides a real one-time cost is less useful."
+    )
+    return EXIT_OK
+
+
+def _climbing(values: list) -> bool:
+    """Strictly increasing every step -- the only shape that is a leak
+    rather than noise or a one-time allocation."""
+    return len(values) > 1 and all(b > a for a, b in zip(values, values[1:]))
+
+
+async def cmd_session_replay(runtime: Runtime, args: argparse.Namespace) -> int:
+    """`session replay --session ID --since-seq N` (B15) -- the CLI view
+    of what F2's reconnect asks for. Message-level, keyed on
+    `messages.seq`; see B40 for the real event log."""
+    session_id = await _session_for(runtime, args)
+    if not session_id:
+        return EXIT_FAILED
+    envelopes = await call(
+        runtime, "SessionReplaySince", verbose=args.verbose,
+        session=session_id, since_seq=args.since_seq, limit=args.limit,
+    )
+    _print_errors(envelopes)
+    if _failed(envelopes) or not envelopes:
+        return EXIT_FAILED
+    payload = envelopes[-1]["payload"]
+    if args.json:
+        print(json.dumps(payload, indent=2))
+        return EXIT_OK
+    print(f"session {payload['session']}  since_seq {payload['since_seq']}  "
+          f"mechanism {payload['mechanism']}  has_more {payload['has_more']}")
+    for message in payload["messages"]:
+        content = message.get("content", {})
+        text = (content.get("text") or "").replace("\n", " ")
+        flags = []
+        if message.get("interrupted"):
+            flags.append("interrupted")
+        if message.get("error_code"):
+            flags.append(message["error_code"])
+        suffix = f"  [{', '.join(flags)}]" if flags else ""
+        print(f"  seq {message.get('seq'):>4}  {message.get('role'):<9} "
+              f"{text[:70]!r}{suffix}")
+    for task in payload["tasks"]:
+        print(f"  task {task['id'][:8]}  {task['state']:<10} "
+              f"{task.get('error_code') or '-':<14} live={task['live']}")
+    print(f"\n{len(payload['messages'])} message(s), {len(payload['tasks'])} task(s)")
+    return EXIT_OK
+
 
 async def cmd_memory_list(runtime: Runtime, args: argparse.Namespace) -> int:
     """Lists `agent_proposals` (B11's stopgap). There is no
@@ -1634,6 +1924,13 @@ def build_parser() -> argparse.ArgumentParser:
     new.add_argument("--model", default=None)
     new.add_argument("--agent", default=None, help="agent id (default: general)")
     new.add_argument(
+        "--workspace", default=None,
+        help="B15: the workspace grouping label (e.g. chat, editor). "
+             "`CreateSession` has accepted this since B2 and nothing exposed "
+             "it; `workspace unload <id>` is what needed a way to set it from "
+             "a check. NULL (the default) belongs to no workspace",
+    )
+    new.add_argument(
         "--project", dest="project_id", default=None,
         help="project id (from `project init`) -- the root file tools are guarded against",
     )
@@ -1665,6 +1962,45 @@ def build_parser() -> argparse.ArgumentParser:
         help="page size; neither --before nor --after given means the newest --limit (default: 50)",
     )
 
+    replay = session.add_parser(
+        "replay",
+        help="B15: the messages and task states after a seq cursor (what F2's "
+             "reconnect asks for)",
+        parents=[common],
+    )
+    replay.add_argument("--session", default=None, help="default: most recently updated")
+    replay.add_argument(
+        "--since-seq", type=int, default=0, metavar="SEQ",
+        help="messages with seq > SEQ (default: 0 -- everything)",
+    )
+    replay.add_argument("--limit", type=int, default=200)
+    replay.add_argument("--json", action="store_true")
+
+    # B15. `workspace unload <id>` NEVER cancels a task: it releases
+    # what no live task holds and reports the rest.
+    workspace = sub.add_parser(
+        "workspace", help="workspace lifecycle (B15)", parents=[common]
+    ).add_subparsers(dest="workspace_command", required=True)
+    ws_unload = workspace.add_parser(
+        "unload", help="release what this workspace's resources allow", parents=[common]
+    )
+    ws_unload.add_argument("workspace", help="workspace id, e.g. chat or editor")
+    ws_unload.add_argument("--json", action="store_true")
+
+    bench = sub.add_parser(
+        "bench", help="measurement harnesses (B15)", parents=[common]
+    ).add_subparsers(dest="bench_command", required=True)
+    bench_unload = bench.add_parser(
+        "unload-cycles",
+        help="load and unload a project context N times; reports object counts "
+             "and cache sizes, never RSS",
+        parents=[common],
+    )
+    bench_unload.add_argument("--n", type=int, default=20, help="cycles (default: 20)")
+    bench_unload.add_argument(
+        "--path", default=".", help="a project root (default: cwd)",
+    )
+
     seed = sub.add_parser(
         "seed-session", help="generate a synthetic session for scrollback/render testing",
         parents=[common],
@@ -1681,6 +2017,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="explicit agent override; wins over an @agent parsed from the text",
     )
     send.add_argument("--cancel-after", type=float, default=None, metavar="SECONDS")
+    send.add_argument(
+        "--shutdown-after", type=float, default=None, metavar="SECONDS",
+        help="B15: send a Shutdown COMMAND this many seconds into the stream, "
+             "then wait for its one shutdown.complete ack. Proves the ack and "
+             "the persisted partial; it cannot prove the process exits (the "
+             "CLI exits anyway) -- tests\\manual_b15_shutdown_wire.ps1 does that",
+    )
     send.add_argument("--timeout", type=float, default=180.0)
     send.add_argument(
         "--script", default=None, metavar="NAME",
@@ -1978,6 +2321,10 @@ def main(argv: Optional[list[str]] = None) -> int:
         ("session", "new"): cmd_session_new,
         ("session", "list"): cmd_session_list,
         ("session", "messages"): cmd_session_messages,
+        ("session", "replay"): cmd_session_replay,
+        # B15.
+        ("workspace", "unload"): cmd_workspace_unload,
+        ("bench", "unload-cycles"): cmd_bench_unload_cycles,
         ("seed-session", None): cmd_seed_session,
         ("send", None): cmd_send,
         ("context", "report"): cmd_context_report,

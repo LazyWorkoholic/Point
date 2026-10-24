@@ -43,6 +43,31 @@ class BaseProvider(ABC):
     def __init__(self, config: ProviderConfig) -> None:
         self.config = config
 
+
+    async def close(self) -> int:
+        """Release whatever this provider is holding open, and report how
+        many things were dropped (B15).
+
+        **A no-op by default, and that is the honest default.** Three of
+        the five adapters have nothing to close: `ollama` and
+        `openrouter` build a fresh `httpx.AsyncClient` per call inside
+        `async with`, so the pool is gone before the call returns, and
+        `gemini` configures a module-level key and builds a
+        `GenerativeModel` per call. Only `anthropic` and `openai` hold a
+        long-lived SDK client, and only they override this.
+
+        The contract that makes closing safe: a provider must stay
+        usable afterwards. An adapter that closes a pooled client
+        re-creates it on the next call, because `ProviderRegistry` keeps
+        handing out the same instance and a closed-and-not-reopened one
+        would turn an unload into a broken next send.
+
+        Returns a count, not a bool, so `ReleaseReport` can say how many
+        pools were actually dropped -- and says nothing about bytes of
+        memory, which CPython does not return to the OS reliably anyway.
+        """
+        return 0
+
     @abstractmethod
     async def generate(self, request: GenerationRequest) -> GenerationResponse:
         """Non-streaming call: full request in, full response out."""

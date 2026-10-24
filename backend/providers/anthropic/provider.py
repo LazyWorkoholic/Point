@@ -6,7 +6,7 @@ providers/bootstrap.py simply never registers this provider.
 
 from __future__ import annotations
 
-from typing import AsyncIterator
+from typing import AsyncIterator, Optional
 
 import anthropic
 
@@ -54,8 +54,32 @@ class AnthropicProvider(BaseProvider):
 
     def __init__(self, config) -> None:
         super().__init__(config)
-        self._client = anthropic.AsyncAnthropic(api_key=config.api_key, timeout=config.timeout)
+        # Built on first use rather than in __init__, so close() (B15)
+        # can drop the pool and the next call can rebuild it. Every call
+        # site still reads `self._client` and is unchanged -- the
+        # property below is the whole of the difference.
+        self._pool: Optional[anthropic.AsyncAnthropic] = None
         self._translator = AnthropicMessageTranslator()
+
+    @property
+    def _client(self) -> "anthropic.AsyncAnthropic":
+        if self._pool is None:
+            self._pool = anthropic.AsyncAnthropic(
+                api_key=self.config.api_key, timeout=self.config.timeout
+            )
+        return self._pool
+
+    async def close(self) -> int:
+        """Close the SDK client and its underlying httpx connection
+        pool (B15). Re-created on the next call by `_client` above --
+        `ProviderRegistry` keeps handing out this same instance, so an
+        adapter that closed and stayed closed would turn a workspace
+        unload into a broken next send."""
+        if self._pool is None:
+            return 0
+        pool, self._pool = self._pool, None
+        await pool.close()
+        return 1
 
     async def generate(self, request: GenerationRequest) -> GenerationResponse:
         try:

@@ -1,6 +1,7 @@
 package protocol
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -39,14 +40,30 @@ const (
 	// failureWindow is the "two failures inside 60s" rule.
 	failureWindow = 60 * time.Second
 
-	// busyGrace is the watchdog's allowance while tasks are running.
+	// busyGrace is GONE as of B15, and it is worth knowing why rather
+	// than wondering where it went.
 	//
-	// The backend suppresses its ping whenever active_count() > 0, on the
-	// reasoning that tokens already prove liveness. That holds for a
-	// streaming reply and does NOT hold for a slow tool call, which is
-	// silent by nature — so with work in flight the deadline is stretched
-	// rather than measured against a heartbeat the backend is not sending.
-	busyGrace = 60 * time.Second
+	// It was a 60s stretch of the watchdog deadline whenever this client
+	// believed a task was in flight, because the backend suppressed its
+	// ping while `active_count() > 0` — on the reasoning that tokens
+	// already prove liveness. That holds for a streaming reply and fails
+	// for a slow tool call, which is silent by nature: between
+	// ToolStarted and ToolCompleted the backend sent no tokens AND no
+	// pings, so a working tool call and a deadlocked process looked
+	// identical. Stretching the deadline was the only safe response, and
+	// it meant a genuine hang mid-task took ~72s to notice instead of
+	// ~12s.
+	//
+	// B15 made the backend's ping unconditional (decisions.md D98), so
+	// the heartbeat is now a real heartbeat and the watchdog measures
+	// against it in every state. The budget below is the honest one for
+	// both idle and busy.
+
+	// replayLimit caps one CmdSessionReplaySince request. A session with
+	// more history than this replays its newest page and reports
+	// has_more; the mark advances as the consumer renders, so the next
+	// request continues rather than repeating.
+	replayLimit = 200
 )
 
 // Backend is what the client drives. StdioTransport implements it; tests
@@ -95,6 +112,13 @@ const (
 	RouteSession     RouteKind = "session_id"
 	RouteConnection  RouteKind = "connection"
 	RouteUnroutable  RouteKind = "unroutable"
+	// RouteReplay is B15's replay reply, and it is a separate route for
+	// one reason: a replayed message must never be handled by the code
+	// that handles a new one. It carries a session_id and would
+	// otherwise arrive as RouteSession, indistinguishable from live
+	// traffic, and a consumer that appended it would duplicate every
+	// message it already had.
+	RouteReplay RouteKind = "replay"
 )
 
 type (
@@ -175,6 +199,19 @@ type Client struct {
 	pending  map[string]*waiter
 	inflight map[string]struct{}
 
+	// lastSeq is the per-session replay high-water mark (B15): the
+	// highest `messages.seq` a consumer has told us it has rendered.
+	//
+	// A session appears here with 0 the first time any envelope carrying
+	// its session_id arrives, so a reconnect knows WHICH sessions to
+	// replay without this package reading a single payload — session_id
+	// is a routing field, which is the only thing this package
+	// interprets (see the package comment). The mark itself can only come
+	// from whoever decodes message payloads, through MarkSeen; 0 means
+	// "replay everything you have", which is correct for a session this
+	// client has seen traffic for but never rendered history of.
+	lastSeq map[string]int
+
 	// failures is the automatic-retry budget: the "two inside 60s" window.
 	// It is deliberately NOT the number a user sees.
 	failures []time.Time
@@ -225,7 +262,43 @@ func NewClient(opts Options) *Client {
 		state:    StateStarting,
 		pending:  make(map[string]*waiter),
 		inflight: make(map[string]struct{}),
+		lastSeq:  make(map[string]int),
 	}
+}
+
+// MarkSeen records that the consumer has rendered `seq` for this session —
+// B15's replay high-water mark.
+//
+// It is the consumer's to report and not this package's to derive: `seq` here
+// is `messages.seq`, which lives in a message payload, and this package reads
+// types and correlation fields only (see the package comment). Monotonic, so a
+// late or out-of-order call cannot walk the mark backwards and cause a replay
+// to re-deliver what has already been shown.
+//
+// A session with no mark replays from 0 on reconnect, which is the honest
+// default: this client knows it has seen traffic for that session and knows
+// nothing about what the UI holds.
+func (c *Client) MarkSeen(sessionID string, seq int) {
+	if sessionID == "" || seq <= 0 {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if seq > c.lastSeq[sessionID] {
+		c.lastSeq[sessionID] = seq
+	}
+}
+
+// ReplayMarks is the per-session high-water marks, copied. Exposed for the
+// status surfaces and for tests; nothing in the ladder reads it from outside.
+func (c *Client) ReplayMarks() map[string]int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	marks := make(map[string]int, len(c.lastSeq))
+	for session, seq := range c.lastSeq {
+		marks[session] = seq
+	}
+	return marks
 }
 
 // Start launches the supervisor goroutine.
@@ -598,10 +671,11 @@ func (c *Client) run(b Backend) string {
 			// Two missed pings, OR process exit. The second is the case above;
 			// this is the first, and it is what catches a HUNG backend, which
 			// process-exit detection misses entirely.
+			// One budget, whatever the backend is doing: B15's
+			// unconditional ping (D98) is what makes that correct. There
+			// is no longer a state in which silence is expected, so
+			// there is no longer a reason to forgive it.
 			budget := time.Duration(c.opts.MissedPings)*c.opts.PingInterval + c.opts.PingInterval
-			if len(c.InFlight()) > 0 {
-				budget += busyGrace
-			}
 			if time.Since(last) > budget {
 				return fmt.Sprintf("no word from the backend for %s", time.Since(last).Round(time.Second))
 			}
@@ -609,21 +683,64 @@ func (c *Client) run(b Backend) string {
 	}
 }
 
-// afterReconnect is the replay rung of F2's ladder.
+// afterReconnect is the replay rung of F2's ladder, filled in by B15.
 //
-// F2 specifies `session.events_since(session, last_seq)` here. That command
-// does not exist: IncomingEventType in backend\runtime\events.py has no member
-// for it and there is no handler, so there is nothing for Go to call. Building
-// one from a frontend episode would mean inventing backend surface a later
-// episode then has to reconcile with — so this is deliberately the seam and
-// not the feature.
+// It was a logged no-op until this episode, because F2 specified
+// `session.events_since(session, last_seq)` and no such command existed —
+// inventing backend surface from a frontend episode is what CLAUDE.md
+// forbids. B15 built the command (as CmdSessionReplaySince, message-level
+// over `messages.seq`; see types.go for why the name differs) and this is
+// where it gets called.
 //
-// Without replay, a task that was in flight cannot be recovered, only
-// reported. That is the conservative half of the ladder and it is what runs.
+// Fire-and-forget on purpose. This runs on the supervisor goroutine BEFORE
+// run() starts reading, so a Request here would wait for a reply nobody is
+// yet collecting; the replies arrive through the normal reader loop and
+// deliver() routes them as RouteReplay, which is what a consumer merges by
+// `seq`.
+//
+// markInterrupted still runs, and still runs here rather than after the
+// replies. A reconnect means a NEW backend process — `restarted` is
+// `connects > 1`, and a connect is a handshake with a freshly dialled child —
+// so every task from the old process is dead whatever the replay says. What
+// replay adds is not "maybe it survived": it is the persisted partial text
+// and the authoritative FAILED/backend_died state for the task, which is the
+// difference between a transcript that says "interrupted" and one that shows
+// what was actually written before the crash.
 func (c *Client) afterReconnect() {
-	c.log.Warn("reconnected without replay",
-		"reason", "no session.events_since command exists in the backend",
-		"effect", "tasks that were in flight are marked interrupted rather than resumed")
+	marks := c.ReplayMarks()
+	sessions := make([]string, 0, len(marks))
+	for session := range marks {
+		sessions = append(sessions, session)
+	}
+	sort.Strings(sessions)
+
+	for _, session := range sessions {
+		payload, err := json.Marshal(map[string]any{
+			"session":   session,
+			"since_seq": marks[session],
+			"limit":     replayLimit,
+		})
+		if err != nil { // a map of strings and ints cannot fail to marshal
+			continue
+		}
+		env := Envelope{
+			ID:        newID(),
+			Type:      CmdSessionReplaySince,
+			SessionID: session,
+			Payload:   payload,
+		}
+		if err := c.Send(env); err != nil {
+			c.log.Warn("replay request failed",
+				"session", session, "since_seq", marks[session], "err", err)
+			continue
+		}
+		c.log.Info("replay requested", "session", session, "since_seq", marks[session])
+	}
+	if len(sessions) == 0 {
+		// Not a failure: this client has seen no session traffic yet, so
+		// there is nothing a replay could rebuild.
+		c.log.Info("reconnected with nothing to replay", "sessions", 0)
+	}
 	c.markInterrupted()
 }
 
@@ -698,6 +815,7 @@ func (c *Client) sleep(d time.Duration) bool {
 // the model, because the model still has to render what a request produced.
 func (c *Client) deliver(env Envelope) {
 	c.trackTask(env)
+	c.trackSession(env)
 
 	if env.Type == EvProtocolError {
 		var p struct {
@@ -712,6 +830,15 @@ func (c *Client) deliver(env Envelope) {
 
 	route := RouteUnroutable
 	switch {
+	case env.Type == EvSessionReplay:
+		// Before the correlation case, not after: a replay reply carries
+		// the corr_id of whatever asked for it and a session_id, so it
+		// would otherwise arrive as RouteCorrelation or RouteSession and
+		// be indistinguishable from live traffic. A waiter still gets it
+		// — a consumer that asked explicitly is not punished for it —
+		// but the route the model sees says replay.
+		_ = c.routeToWaiter(env)
+		route = RouteReplay
 	case env.CorrID != "" && c.routeToWaiter(env):
 		route = RouteCorrelation
 	case env.TaskID != "":
@@ -769,6 +896,24 @@ func (c *Client) trackTask(env Envelope) {
 		c.inflight[env.TaskID] = struct{}{}
 	case IsTerminal(env.Type):
 		delete(c.inflight, env.TaskID)
+	}
+}
+
+// trackSession notes that this connection has seen traffic for a session, so a
+// reconnect knows which sessions to replay (B15).
+//
+// It reads session_id and nothing else — a routing field, which is all this
+// package interprets. The mark stays 0 until a consumer reports otherwise
+// through MarkSeen; this only answers "which sessions exist as far as this
+// client is concerned", which is a question no payload is needed for.
+func (c *Client) trackSession(env Envelope) {
+	if env.SessionID == "" {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if _, known := c.lastSeq[env.SessionID]; !known {
+		c.lastSeq[env.SessionID] = 0
 	}
 }
 
