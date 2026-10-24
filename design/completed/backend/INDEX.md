@@ -24,7 +24,8 @@ it passed.
 | B10 | Tool System | ✅ built + manually verified | `B10-tool-system.md` |
 | B11 | The Three Agents | ✅ built + manually verified | `B11-three-agents.md` |
 | B12 | Routing, Attachments, Concurrency Caps | ✅ built + manually verified | `B12-routing-attachments.md` |
-| B13–B17 | — | not started | — |
+| B13, B14, B16, B17 | — | not started | — |
+| B15 | Lifecycle and Resource Management | ✅ built + gate green (9/9 steps; Ctrl+C keypress confirmed separately by Aryan) | `B15-lifecycle-resources.md` |
 | B18 | Message Pagination (keyset scrollback) | ✅ built + manually verified | `B18-message-pagination.md` |
 | B19 | Silence-Based Agent Timeout | ✅ built + manually verified | `B19-silence-based-timeout.md` |
 | B20 | `context.report` on the Wire | ✅ built + manually verified | `B20-context-report.md` |

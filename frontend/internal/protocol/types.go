@@ -67,6 +67,26 @@ const (
 	// rather than invented twice.
 	CmdSetBehaviourOverride = "SetBehaviourOverride"
 	CmdGetDoctorReport      = "GetDoctorReport"
+	// B15: the backend-side unload of one workspace, keyed by the
+	// workspace id this side names ("chat", "editor"). It NEVER cancels a
+	// task — unloading a view is a UI event and the task is in the
+	// backend's lifetime, not the view's. The reply says which resources
+	// a live task's existence protected.
+	CmdWorkspaceUnload = "WorkspaceUnload"
+	// CmdSessionReplaySince is the replay rung of F2's ladder, finally
+	// callable — and NOT named `session.events_since`, which is what F2
+	// specified and what this file's own TODO used to point at.
+	//
+	// There is no event log in the backend's schema: nothing persists an
+	// OutgoingEvent, and the envelope `seq` is an in-memory per-TASK
+	// counter the backend drops when the task ends. What is durable and
+	// ordered per session is `messages.seq` (B18), so replay is keyed on
+	// that and the reply says `mechanism: "messages.seq"` out loud. The
+	// real event log is B15's deferred half, B40, which replaces this
+	// command — see design\tasks\backend\B40-durable-event-log.md.
+	//
+	// Payload: {session, since_seq, limit}. since_seq 0 means everything.
+	CmdSessionReplaySince = "SessionReplaySince"
 )
 
 // Events — Python to Go (OutgoingEventType).
@@ -168,6 +188,26 @@ const (
 	// DoctorReport's payload is build_doctor_report()'s dict verbatim.
 	EvBehaviourOverrideSet = "BehaviourOverrideSet"
 	EvDoctorReport         = "DoctorReport"
+
+	// B15: the reply to CmdWorkspaceUnload — a ReleaseReport. Three
+	// lists, not a bool: `released` (dropped, each with a count),
+	// `refused` (a RUNNING or QUEUED task holds it, with which tasks and
+	// their states) and `absent` (something B15 named that the backend
+	// does not have, e.g. symbol caches, which do not exist). Nothing in
+	// it claims freed memory, and nothing in this client should either.
+	EvWorkspaceUnloaded = "WorkspaceUnloaded"
+	// EvSessionReplay is the reply to CmdSessionReplaySince: {session,
+	// since_seq, mechanism, replay, messages, tasks, has_more}.
+	//
+	// It is routed as RouteReplay, never RouteSession, so a consumer can
+	// never mistake a replayed message for a new one. Messages carry
+	// their `seq` and their id; merge by those rather than appending, and
+	// a replay that overlaps what is already rendered costs nothing.
+	EvSessionReplay = "SessionReplay"
+	// EvShutdownComplete is the ONE terminal ack for CmdShutdown, and the
+	// last envelope this client ever reads from that backend process.
+	// Before B15 the backend acked nothing and did not exit.
+	EvShutdownComplete = "shutdown.complete"
 )
 
 // Client-side pseudo-events. These never appear on the wire; the client

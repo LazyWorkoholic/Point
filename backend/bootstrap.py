@@ -25,6 +25,7 @@ from pathlib import Path
 from typing import Optional
 
 import appconfig
+from database.message_checkpoint_repository import promote_orphaned_checkpoints
 from database.migrations import SCHEMA_VERSION, current_version, run_migrations  # noqa: F401
 from database.task_repository import recover_orphaned_tasks
 from lockfile import AlreadyRunningError, SingleInstanceLock  # noqa: F401
@@ -99,10 +100,25 @@ async def build_runtime(
     # would bury tasks that are very much alive.
     if single_instance or holder is None:
         buried = recover_orphaned_tasks(db_path)
+        # B15: the other half of the same event. `recover_orphaned_tasks`
+        # buries the `tasks` row; this turns whatever text that run had
+        # already produced into a real `messages` row marked
+        # `interrupted` with `error_code = backend_died`. Both halves or
+        # neither: a reader who sees one without the other has a task
+        # that failed for no visible reason, or an interrupted reply
+        # belonging to a task still claiming to run.
+        #
+        # Order matters only in one direction -- tasks first, so a
+        # promoted message is never the only evidence of a crash.
+        promoted = promote_orphaned_checkpoints(db_path)
         # A non-zero count means the last run died with work in flight.
         # That is worth stderr, not just the file.
-        log_at = _log.warning if buried else _log.info
-        log_at("Crash recovery: %d orphaned task(s) marked failed/backend_died", buried)
+        log_at = _log.warning if buried or promoted else _log.info
+        log_at(
+            "Crash recovery: %d orphaned task(s) marked failed/backend_died, "
+            "%d partial repl%s promoted from checkpoints",
+            buried, promoted, "y" if promoted == 1 else "ies",
+        )
     else:
         _log.debug("Crash recovery skipped: backend already running (pid %s)", holder)
 

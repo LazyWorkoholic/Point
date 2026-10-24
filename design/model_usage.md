@@ -633,6 +633,128 @@ SESSION  EPISODE                          MODEL         WHY
                                                         to F16-polish.md, which is
                                                         that rule applied rather than
                                                         quoted.
+20       B15 lifecycle + crash recovery   Opus 5        STOPPED BEFORE CODE, as the
+                                                        block asks: three Build-section
+                                                        items assume things this repo
+                                                        does not have. No event log
+                                                        anywhere, so `events_since` had
+                                                        neither a store nor a
+                                                        meaningful `seq` (the
+                                                        envelope's is in-memory and
+                                                        per-task); in-flight assistant
+                                                        text reaches `messages` only
+                                                        from the terminal-event sink,
+                                                        so a SIGKILL left Done-when
+                                                        #3's "partial survives" with
+                                                        nothing on disk to survive;
+                                                        and `WorkspaceContext` had
+                                                        nothing to own -- of its three
+                                                        named drops, buffers live in
+                                                        Go, symbol caches do not
+                                                        exist, and the file index is
+                                                        keyed by PROJECT. Resolved
+                                                        with Aryan, then built:
+                                                        migration v7's
+                                                        `message_checkpoints` (500ms
+                                                        cadence, promoted at startup),
+                                                        `SessionReplaySince` as a
+                                                        STATED interim with B40
+                                                        written for the real log, a
+                                                        per-resource-class refusal
+                                                        rule (QUEUED and RUNNING are
+                                                        not one holder), and the
+                                                        unconditional ping (D98) with
+                                                        `busyGrace` deleted.
+                                                        -- EARNED THE OPUS AT THE
+                                                        GATE, not in the build. Two
+                                                        real bugs, both invisible
+                                                        without a real OS process:
+                                                        the new Shutdown exit path
+                                                        aborted at interpreter
+                                                        finalization (0xC0000005 --
+                                                        the daemon stdin thread holds
+                                                        the `sys.stdin.buffer` lock on
+                                                        every exit path except EOF),
+                                                        and Ctrl+Break killed the
+                                                        process in 0.02s with the
+                                                        partial still only in memory,
+                                                        because SIGBREAK's default
+                                                        action on Windows terminates
+                                                        outright. Signal handling was
+                                                        IN the Build section and did
+                                                        not exist at all. The pattern
+                                                        again, as in 16c: drive the
+                                                        REAL thing -- an actual
+                                                        main.py over actual pipes --
+                                                        rather than reasoning from a
+                                                        mental model of it.
+                                                        -- AND A SECOND GATE ROUND
+                                                        after Aryan re-ran it, which
+                                                        is where the row earns the
+                                                        rest of its number. Both
+                                                        failures were in the HARNESS,
+                                                        not the product, and the
+                                                        cheap read of each was wrong:
+                                                        a blind `Start-Sleep 2` before
+                                                        the kill had ~0.35s of margin
+                                                        (first checkpoint lands at
+                                                        +0.90s idle, +1.42-1.65s
+                                                        loaded -- MEASURED, 4 and 2
+                                                        trials -- and step 3 runs
+                                                        straight after a 20-cycle
+                                                        benchmark), fixed by waiting
+                                                        on the precondition rather
+                                                        than extending the guess; and
+                                                        a `[bool]` parameter crashed
+                                                        on `AutomationNull -like`
+                                                        returning Object[] instead of
+                                                        a Boolean, which fired only
+                                                        when a check was about to
+                                                        fail and so MASKED the first.
+                                                        Third time this project has
+                                                        paid for PowerShell
+                                                        fragility, hence a shared
+                                                        gatelib.ps1 instead of a
+                                                        fourth point fix.
+                                                        -- THE ONE THAT MATTERED MOST
+                                                        was refusing to write the
+                                                        wording that had been asked
+                                                        for. The bench's +938.8 KiB
+                                                        outlier was to be recorded as
+                                                        "jitter at varying cycles";
+                                                        three more runs said cycle 11,
+                                                        five for five, to the tenth of
+                                                        a KiB. Instrumented instead of
+                                                        described: ONE block from
+                                                        `sys.intern()` in pathlib's
+                                                        path parsing -- CPython's
+                                                        interned-string table doubling
+                                                        once -- with the position
+                                                        deterministic in cumulative
+                                                        interning, confirmed by it
+                                                        MOVING to cycle 12 under a
+                                                        deeper traceback depth. A
+                                                        measurement nobody asked for
+                                                        is what kept a completion doc
+                                                        from claiming the opposite of
+                                                        what the numbers said.
+20b      B40 durable event log            Opus medium   SPEC ONLY, written during
+                                                        session 20 before any of it
+                                                        exists. Not for the table
+                                                        (four columns and an index)
+                                                        but for the two decisions
+                                                        under it: what a write per
+                                                        envelope costs on the token
+                                                        path through B22's
+                                                        SerializedConnection, and what
+                                                        `seq` means once it has to be
+                                                        durable and per-session. The
+                                                        second is a wire-contract
+                                                        change to a field F2, F5, F18
+                                                        and B24 all already decode,
+                                                        which is the shape B6 and B32
+                                                        both rated Opus-tier. Owes a
+                                                        MEASUREMENT, not a preference.
 23       B13 memory system                Opus high     the design you deferred on
                                                         purpose — decide well
 23b      F9c result card attach + save   Sonnet high   two axes over B13's and the

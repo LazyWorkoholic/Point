@@ -3097,9 +3097,18 @@ accordingly -- it currently says this is scheduled here.
 
 ---
 
-# SESSION 20 — B15 Lifecycle and Crash Recovery
+# SESSION 20 — B15 Lifecycle and Crash Recovery  ✅ DONE (gate green 9/9, 2026-10-24)
 
 **Goal:** demo-critical despite being P2. Do this before the other P2 work.
+
+**Outcome:** built and verified — see
+`design/completed/backend/B15-lifecycle-resources.md`. Stopped before code
+first, as the block asks: three Build-section items assumed things this repo
+does not have (no event log for `events_since`; no partial on disk for
+Done-when #3; nothing for `WorkspaceContext` to own). `SessionReplaySince`
+shipped as a **stated interim** and the real event log became **B40**
+(Session 20b). The gate also found two harness bugs and one product gap
+the Build section had asked for and nobody had built (signal handling).
 
 **Paste:**
 ```
@@ -3138,6 +3147,77 @@ Also record the exact recovery sequence — what marks a task failed, what
 gets persisted, in what order. B16 gives each SSH connection its own
 runtime with this same lifecycle, and needs it to already be correct
 before it adds a second dimension (connections) on top.
+```
+
+**Then:** commit · `/clear`
+
+---
+
+# SESSION 20b — B40 The Durable Event Log (not started)
+
+**Goal:** replace the interim B15 shipped. B15's Build section asked for
+`session.events_since(session_id, seq)`; this repo has no event log, so B15
+built **`SessionReplaySince`** — message-level replay keyed on `messages.seq`,
+with `mechanism` stated on the wire so nothing has to guess which `seq` it
+holds. This session builds the real one and deletes the interim.
+
+**Read the task doc first.** `design/tasks/backend/B40-durable-event-log.md`
+was written during Session 20, before any of this was built, while the reasons
+were in front of someone. Its Build section names the two real decisions (the
+cost of a write per envelope on the token path through `SerializedConnection`,
+and what `seq` means once it is durable and per-session) and its appendix
+records four things B15 built that B15's own Build section never asked for.
+
+**Paste:**
+```
+Read CLAUDE.md, design/tasks/backend/B40-durable-event-log.md, and
+design/completed/backend/B15-lifecycle-resources.md (what B15 actually
+built, not what its task doc planned).
+
+Build the event log and the real events_since, and DELETE
+SessionReplaySince from both sides -- events.py, cli.py, types.go,
+client.go, and Client.afterReconnect. Two replay commands with two
+different cursors is the second-copy-that-can-disagree this repo
+removes on sight.
+
+Two things are measurements, not judgements, and the episode owes
+numbers for both: what a write per envelope costs on the streaming
+path through SerializedConnection (same fixture, both arms), and
+whether token deltas are persisted at all -- IsDroppable in
+frontend\internal\protocol\types.go already says those three types may
+be discarded under backpressure, which is an argument for not storing
+them that the doc states and does not settle.
+
+The new cursor is NEITHER of the two `seq`s that already exist. Decide
+explicitly whether it rides as a new envelope field or changes what
+`seq` means, and say which -- four consumers decode that field today.
+
+B15's Done-when #4 was verified against the mechanism you are
+replacing. RE-RUN it: tests\manual_b15_lifecycle.py's [4] block, which
+will fail its `mechanism` assertion by design, then update it to assert
+the event cursor with the no-gaps and ordering checks intact. A doc
+edit alone would leave the repo claiming a verification performed
+against code that no longer exists.
+
+Stop at the verification gate with PowerShell checks (plus `go test
+./frontend/...` for the Go side).
+
+If anything in this episode's Build section is ambiguous or seems to
+assume something not true of this repo, stop and tell me before writing
+code.
+```
+
+**Record:**
+```
+Write design/completed/backend/B40-durable-event-log.md following the
+format in design/completed/backend/INDEX.md. Include the measured cost
+with its fixture and numbers, the `seq` decision and why, and the
+retention policy. Add a row to design/tasks/backend/INDEX.md.
+
+Also amend design/completed/backend/B15-lifecycle-resources.md: its
+SessionReplaySince section describes a command that no longer exists,
+and its Done-when #4 evidence now describes this episode's mechanism.
+State plainly that #4 was re-verified here, with the new output.
 ```
 
 **Then:** commit · `/clear`

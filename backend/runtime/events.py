@@ -113,6 +113,32 @@ class IncomingEventType(str, Enum):
     SET_BEHAVIOUR_OVERRIDE = "SetBehaviourOverride"
     # B26: the About tab's `point doctor` action, as data instead of stdout.
     GET_DOCTOR_REPORT = "GetDoctorReport"
+    # B15: the backend-side unload of one workspace. Keyed by the
+    # WORKSPACE id Go names ("chat", "editor"), which the backend
+    # resolves to sessions and those to project ids -- nothing in the
+    # backend is keyed by a workspace label, and this episode did not
+    # make anything so. Never cancels a task: unloading a view is a UI
+    # event, and the refusal rule in `runtime\lifecycle.py` is what
+    # makes that safe rather than a hope.
+    WORKSPACE_UNLOAD = "WorkspaceUnload"
+    # B15: the replay rung of F2's recovery ladder, as much of it as
+    # this repo can honestly serve.
+    #
+    # **NOT `session.events_since`, and the difference is the point.**
+    # B15's Build section asks for `events_since(session_id, seq)`, and
+    # there is no event log to read it from: no `events` table in the
+    # schema, nothing persists an `OutgoingEvent`, and the envelope's
+    # `seq` is an in-memory per-TASK counter (`StreamManager._sequences`)
+    # dropped by `close_stream()` and null on every lifecycle event.
+    # `messages.seq` (migration v6, B18) is a different quantity
+    # entirely: per-session insertion order, durable, indexed.
+    #
+    # So this serves MESSAGE-level replay keyed on `messages.seq`, which
+    # is what F2 actually needs to rebuild a transcript, and it is named
+    # for what it does. The real event log is B40
+    # (`design\tasks\backend\B40-durable-event-log.md`), which replaces
+    # this command and must re-run B15's Done-when #4 when it lands.
+    SESSION_REPLAY_SINCE = "SessionReplaySince"
 
 
 @dataclass(frozen=True)
@@ -251,6 +277,24 @@ class OutgoingEventType(str, Enum):
     BEHAVIOUR_OVERRIDE_SET = "BehaviourOverrideSet"
     # B26: reply to GetDoctorReport. build_doctor_report()'s dict verbatim.
     DOCTOR_REPORT = "DoctorReport"
+    # B15: the reply to WorkspaceUnload -- `ReleaseReport.to_dict()`
+    # verbatim. Three lists, not a bool: `released` (dropped, with a
+    # count), `refused` (a running or queued task holds it, with which
+    # tasks and their states) and `absent` (a resource B15 names that
+    # this backend does not have). Nothing in it claims freed memory.
+    WORKSPACE_UNLOADED = "WorkspaceUnloaded"
+    # B15: the reply to SessionReplaySince. `{session, since_seq,
+    # messages, tasks, replay: true, mechanism: "messages.seq"}`.
+    # `replay: true` is what lets Go route these through the same
+    # `deliver()` path as live events without mistaking a replayed
+    # message for a new one.
+    SESSION_REPLAY = "SessionReplay"
+    # B15: the ONE terminal ack for a `Shutdown` command, emitted and
+    # flushed before the outbox writer stops. This is the last envelope
+    # Go ever reads from this process. Before B15 the handler acked
+    # nothing, did not stop the process, and left the runtime rejecting
+    # every later event -- see `_handle_shutdown`.
+    SHUTDOWN_COMPLETE = "shutdown.complete"
     # Connection-level, caused by no request: corr_id is null on both.
     HELLO = "hello"
     PING = "ping"

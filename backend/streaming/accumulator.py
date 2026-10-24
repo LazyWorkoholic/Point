@@ -61,6 +61,14 @@ class StreamAccumulator:
     def text(self) -> str:
         return "".join(self._text_parts)
 
+    @property
+    def usage(self) -> TokenUsage:
+        """The usage summed so far. Exposed for B15's partial-reply
+        checkpoint, which has to write the tokens spent alongside the
+        text it is preserving -- a promoted row that says 0 tokens for
+        four paragraphs is a row B14 will later add up wrongly."""
+        return self._usage
+
     def finalize(
         self, invocation: Optional[InvocationMetadata] = None
     ) -> Optional[Message]:
