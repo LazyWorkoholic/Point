@@ -2352,7 +2352,7 @@ the next reader of it is not misled the same way.
 
 ---
 
-# SESSION 18d — F9b Diff Card (F9 resumed)  🟡 BUILT, #7 DEFERRED
+# SESSION 18d — F9b Diff Card (F9 resumed)  ✅ DONE — #7 closed by F15, F9a hazard 1 by F9d
 
 > **This session was `18b` until F13 split.** It moved to `18d` so F13's
 > two halves could be `18a`/`18b` and match their doc letters. Nothing
@@ -3153,7 +3153,7 @@ before it adds a second dimension (connections) on top.
 
 ---
 
-# SESSION 20b — B40 The Durable Event Log (not started)
+# SESSION 20b — B40 The Durable Event Log ✅ done
 
 **Goal:** replace the interim B15 shipped. B15's Build section asked for
 `session.events_since(session_id, seq)`; this repo has no event log, so B15

@@ -378,6 +378,35 @@ assert the event cursor with its ordering and no-gaps checks intact, and
 B40's completed doc must state that B15 #4 was re-verified, with the new
 output.
 
+> ### AMENDMENT (B40 build, 2026-10-24) — #4's mechanism is gone
+>
+> **B40 is built and this happened as predicted.** `SessionReplaySince`
+> is deleted from `events.py`, `cli.py`, `types.go` and `client.go`;
+> `EventsSince` over migration v8's `events` table replaces it, keyed on
+> a durable per-session `event_seq`.
+>
+> Run unchanged against the new code, `manual_b15_lifecycle.py`'s `[4]`
+> block failed on four assertions — the reply never arrived at all
+> (`SessionReplaySince` is no longer a known event type) and `mechanism`
+> came back `None`. **Every other block in the file passed**, which is
+> what localised the change to #4. The block was then rewritten to
+> assert `mechanism == "events.session_seq"` and the event cursor, with
+> the ordering and no-gaps checks intact, and the whole file passes.
+>
+> One pre-existing weakness in the old block is worth recording: its
+> no-gaps check was `all(b - a == 1 for a, b in zip(seqs, seqs[1:]))`,
+> which is **vacuously true on an empty list** — so it PASSED in the
+> failing run, beside three siblings reporting that the reply had not
+> arrived. The rewrite guards it with `bool(seqs)`. A no-gaps assertion
+> that passes on no data was not asserting anything.
+>
+> **This doc's Done-when #4 above is superseded, not re-claimed here.**
+> The current evidence lives in
+> `design/completed/backend/B40-durable-event-log.md` once Aryan's B40
+> gate run confirms it. Nothing else in this episode is affected:
+> `message_checkpoints` was not touched (B40's Do-NOT list forbids it),
+> so Done-when #3 stands as recorded.
+
 ### The frontend half
 
 `afterReconnect` now sends `CmdSessionReplaySince` for every session the
@@ -555,7 +584,8 @@ Done-when by Done-when:
    order, with no gaps.** PASS **against `SessionReplaySince` and
    `messages.seq`** — exactly the messages after the mark, consecutive
    seqs, `mechanism` stated on the wire, task states included.
-   **B40 must re-run this.**
+   **SUPERSEDED BY B40 — see the amendment below.** The mechanism this
+   verification measured no longer exists.
 5. **20 load/unload cycles: object counts and cache sizes return to
    baseline; RSS may not drop.** PASS — see "Bounded growth" above.
 6. **`Ctrl+C` during a stream leaves a consistent DB, a persisted
