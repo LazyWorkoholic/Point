@@ -433,6 +433,12 @@ func (r *Root) unloadWorkspace(id WorkspaceID) (tea.Cmd, bool) {
 	if lh, ok := ws.(LockHolder); ok {
 		lh.ReleaseLocks()
 	}
+	// F14: see ProcessStopper's own doc -- a Tier 0 child outlives the
+	// workspace unless something kills it here, same timing as the lock
+	// release just above.
+	if ps, ok := ws.(ProcessStopper); ok {
+		ps.StopRunningProcess()
+	}
 
 	blob, err := ws.Suspend()
 	if err != nil {

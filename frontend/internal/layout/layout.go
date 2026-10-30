@@ -120,6 +120,28 @@ const (
 
 	// A bordered box is two border rows plus at least one content row.
 	MinBoxHeight = 3
+
+	// TermSmallHeight is the editor terminal's `small` mode, and it is NOT
+	// MinBoxHeight -- which is what F14 shipped with first, and it was
+	// wrong in use.
+	//
+	// MinBoxHeight is 3: two borders and ONE content row. F14's pane pins
+	// its input prompt to the bottom row, so a 3-row box has the prompt
+	// and nothing else -- you cannot see a single line of what the command
+	// you just ran actually printed. LAYOUT.md and F14 both say "small
+	// (3-4 rows), scrollable", and 6 reads that as 3-4 rows OF TERMINAL
+	// (here: four content rows, three of output plus the prompt) rather
+	// than a 3-row box with one usable row, because "scrollable" is
+	// meaningless for a single row and because the whole point of the mode
+	// is to watch output without leaving the code.
+	//
+	// This does make the box taller than LAYOUT.md's own Editor sketch
+	// draws it (that sketch shows a 3-row box with one `$ pytest -q`
+	// line). Recorded as a deliberate divergence from the sketch, the same
+	// way F13's Cards() diverged from the right-pane sketch, and for the
+	// same kind of reason: the sketch's proportions do not survive the
+	// pane actually having a job to do.
+	TermSmallHeight = 6
 )
 
 // Margins and gaps, exactly as LAYOUT.md specifies them. Vertical gaps between
@@ -252,11 +274,11 @@ func secondaryHeight(s State, bodyHeight int) int {
 			return bodyHeight
 		case TermOverlay:
 			want = bodyHeight / 2
-			if want < MinBoxHeight {
-				want = MinBoxHeight
+			if want < TermSmallHeight {
+				want = TermSmallHeight
 			}
 		default:
-			want = MinBoxHeight
+			want = TermSmallHeight
 		}
 	}
 

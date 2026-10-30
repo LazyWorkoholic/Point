@@ -30,6 +30,7 @@ func (w *Workspace) View(l layout.Layout) string {
 	w.textArea = layout.Rect{}
 	w.tabStrip = layout.Rect{}
 	w.tabSpans = nil
+	w.termRect = layout.Rect{}
 
 	// F15: the explain panel SPLITS the Code File pane rather than
 	// overlaying it -- see explainpanel.go for why an app.Overlay was the
@@ -532,22 +533,7 @@ func (w *Workspace) emptyState(width, rows int) []string {
 	return lines
 }
 
-// terminalBox is F14's rect, drawn as a titled box with one dim line.
-//
-// Compute hands the Editor a Secondary rect unconditionally (its
-// secondaryHeight branch returns MinBoxHeight for TermSmall), so the three
-// rows exist whether or not anything fills them. Drawing the box and
-// naming the episode is Placeholder's own precedent for the Query Area in
-// F1 -- an empty bordered box with no explanation reads as a bug, and
-// leaving the rect blank reads as a rendering failure. Reclaiming the rows
-// would be a layout change, which is not this episode's.
-func (w *Workspace) terminalBox(r layout.Rect) string {
-	if r.IsZero() {
-		return ""
-	}
-	body := []string{w.theme.Style(theme.TextDim).Render("the terminal arrives in F14")}
-	return paneBox(w.edge(false), w.label(false), r, "Terminal", body, 1)
-}
+// terminalBox is now terminal.go's -- F14 fills what was a placeholder here.
 
 func (w *Workspace) treeCard(r layout.Rect) []string {
 	w.treeRect = r

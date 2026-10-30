@@ -111,6 +111,10 @@ type Root struct {
 	// cannot be flattened to a single value at startup.
 	cfg config.Config
 
+	// restoreTerminal is Options.RestoreTerminal -- see that field for
+	// the one failure it exists for. Nil is normal.
+	restoreTerminal func() error
+
 	// SaveWorkspaceStateFn writes state.json's two Root-owned fields.
 	// Defaults to config.SaveWorkspaceState; a test substitutes a
 	// recorder, for the reason chat's own saveStateFn exists — the real
@@ -334,6 +338,22 @@ type Options struct {
 	State  config.State
 	Env    Environment
 
+	// RestoreTerminal is tea.Program.RestoreTerminal, handed in by
+	// main.go because only main.go holds the Program.
+	//
+	// It exists for exactly one case, and that case is unrecoverable
+	// without it: tea.ExecProcess's own ReleaseTerminal can FAIL (a
+	// Windows console whose saved input mode SetConsoleMode refuses --
+	// see cmd\point\consolemode.go), and bubbletea then returns from
+	// exec early, before starting the child and before its own
+	// RestoreTerminal. That leaves the input reader cancelled and the
+	// renderer stopped: the program is running and can never receive
+	// another key. Calling this puts both back.
+	//
+	// Optional -- nil in every test and on any path that has no Program
+	// -- so a nil check is the contract, not an oversight.
+	RestoreTerminal func() error
+
 	// MouseEnabled is the mouse option main.go actually gave
 	// tea.NewProgram (state.json's UI override already applied there) --
 	// see Root.mouseEnabled's own doc for why this package cannot ask
@@ -386,14 +406,15 @@ func New(opts Options) (*Root, error) {
 			warned:       make(map[WorkspaceID]bool),
 			dirtyNoticed: make(map[WorkspaceID]bool),
 		},
-		lastWorkspace: opts.State.LastWorkspace,
-		cfg:           opts.Config,
-		theme:         opts.Theme,
-		client:        opts.Client,
-		log:           opts.Log,
-		env:           opts.Env,
-		conn:          connection{state: protocol.StateStarting},
-		rightPaneOpen: true,
+		lastWorkspace:   opts.State.LastWorkspace,
+		cfg:             opts.Config,
+		theme:           opts.Theme,
+		client:          opts.Client,
+		log:             opts.Log,
+		env:             opts.Env,
+		restoreTerminal: opts.RestoreTerminal,
+		conn:            connection{state: protocol.StateStarting},
+		rightPaneOpen:   true,
 		// F10: nil exactly when nothing has been chosen through Point's own
 		// UI yet (config\state.go's Provider doc). needsProviderSetup is
 		// read exactly once, on the first WindowSizeMsg -- see that case.
@@ -527,6 +548,28 @@ func (r *Root) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	// "the overlay shows nothing until the first task completes".
 	r.refreshTasksIfVisible()
 	r.refreshContextIfShown(msg)
+	// The layout is DERIVED state and it has to be derived here, for the
+	// exact reason the three refreshes around it are.
+	//
+	// F14 shipped broken on this and the symptom was reported as three
+	// separate bugs. r.layout was recomputed only on a real resize
+	// (View's own `r.layout.W != r.w` check), on ui.redraw, on the
+	// right-pane toggle, on an overlay change and on a workspace
+	// load/unload -- but NOT when anything a workspace feeds into
+	// layout.State changed. F14 is the first episode where a workspace
+	// feeds it anything: TerminalMode. So pressing the mode key did
+	// nothing visible, and the change then appeared at the next unrelated
+	// event -- switching workspace, or alt-tabbing (which delivers a
+	// WindowSizeMsg) -- which read as "the terminal resizes itself at
+	// random" and left no way to shrink it back, because the key that
+	// shrinks it was equally invisible.
+	//
+	// Compute is pure arithmetic over a handful of ints (that is
+	// LAYOUT.md's whole premise), so deriving it on every message costs
+	// nothing measurable and cannot miss a path -- including the paths
+	// with no tea.Cmd to hang it off, which is the same argument the
+	// status expiry below is built on.
+	r.recompute()
 	// Asked here for the same "ask once, afterwards" reason the animation
 	// and the two refreshes above are: the tray opens, closes, and is
 	// swapped for a result card and back from several different messages,
@@ -672,6 +715,54 @@ func (r *Root) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case tea.MouseMsg:
 		return r.dispatchMouse(m)
+
+	case OpenHatchMsg:
+		// The terminal pane's own `!` prefix, routed through a message
+		// rather than a raw tea.ExecProcess Cmd -- see hatch.go's header.
+		return r, r.openHatch(m.Command)
+
+	case hatchDoneMsg:
+		// F14's ExecProcess hatch. On the ordinary path tea.ExecProcess's
+		// own exec() has already called RestoreTerminal and
+		// resetLinesRendered before this message is delivered, which is
+		// most of "full repaint" for free; the ClearScreen is belt and
+		// suspenders, the same thing ui.redraw does for the same reason.
+		//
+		// refreshTasks() is Done-when 5's "subtle tray marker rather than
+		// a missed toast": there is no toast mechanism in this app to
+		// divert from, and refreshTasks is already gated on a task
+		// surface being ON SCREEN, so this is a no-op unless the tray or
+		// the right pane was open -- exactly the cases where a marker
+		// would be seen.
+		r.refreshTasks()
+
+		// An ERROR here is not cosmetic and must never be reported as
+		// "back from the shell", which is what this did first.
+		//
+		// bubbletea's exec() has two failure shapes and they need
+		// different handling. If ReleaseTerminal failed, it returned
+		// BEFORE starting the child and before RestoreTerminal -- so the
+		// input reader is cancelled, the renderer is stopped and the alt
+		// screen is already gone. The program is alive and cannot
+		// receive another keystroke, which to the user is
+		// indistinguishable from a crash. Recovering needs the Program
+		// itself, which only main.go holds, hence RestoreTerminal in
+		// Options: without it there is no way back from here at all.
+		if m.err != nil {
+			r.log.Warn("hatch failed", "err", m.err)
+			restored := ""
+			if r.restoreTerminal != nil {
+				if err := r.restoreTerminal(); err != nil {
+					r.log.Warn("could not restore the terminal after a failed hatch", "err", err)
+					restored = " — and the terminal could not be reinitialised; quit with F3 / ctrl+q"
+				} else {
+					restored = " — the terminal has been reinitialised"
+				}
+			}
+			return r, tea.Batch(tea.ClearScreen,
+				status("the shell could not open: "+m.err.Error()+restored))
+		}
+		return r, tea.Batch(tea.ClearScreen, status("back from the shell"))
 
 	case trayTickMsg:
 		// The Running row's m:ss clock. Mirrors animTickMsg exactly — a
@@ -996,6 +1087,28 @@ func (r *Root) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			r.conn.banner = "backend client stopped"
 		}
 		return r, nil
+	}
+
+	// A message that names its own workspace goes THERE, active or not --
+	// see WorkspaceAddressed for the F14 loop this exists for. Re-resolved
+	// from the map, like backgroundWorkspaceMsg's own delivery, so one
+	// addressed to a workspace that has since been unloaded is dropped
+	// rather than reviving it.
+	if addr, ok := msg.(WorkspaceAddressed); ok {
+		id := addr.TargetWorkspace()
+		ws, loaded := r.workspaces[id]
+		if !loaded {
+			return r, nil
+		}
+		updated, cmd := ws.Update(msg)
+		r.workspaces[id] = updated
+		if id == r.active {
+			return r, cmd
+		}
+		// Backgrounded: the same default-deny filter every other
+		// background command goes through, so the loop keeps turning
+		// without the workspace being able to take the status line.
+		return r, r.backgroundCmd(id, cmd)
 	}
 
 	ws, cmd := r.current().Update(msg)
@@ -1615,9 +1728,19 @@ func (r *Root) recompute() {
 		RightPaneOpen: r.rightPaneOpen,
 		HeaderAllowed: true,
 		OverlayOpen:   r.overlay != nil,
-		TerminalMode:  layout.TermSmall,
+		TerminalMode:  terminalModeOf(r.current()),
 		RightCards:    r.current().Cards(),
 	})
+}
+
+// terminalModeOf reads F14's TerminalModeAware off the active workspace,
+// falling back to TermSmall for every workspace that is not the Editor --
+// the same fallback recompute hardcoded before F14 existed.
+func terminalModeOf(ws Workspace) layout.TermMode {
+	if tm, ok := ws.(TerminalModeAware); ok {
+		return tm.TerminalMode()
+	}
+	return layout.TermSmall
 }
 
 // overlayFits is the ONE fit check for an overlay against the current

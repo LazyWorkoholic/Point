@@ -38,6 +38,13 @@ type Options struct {
 	// default.
 	AutosaveDelay time.Duration
 
+	// Shell is F14's config.ShellPowerShell / config.ShellCmd -- a VALUE
+	// taken at construction, the same way Autosave is, rather than a live
+	// config.Config this workspace would otherwise have to hold and
+	// re-read. Empty means PowerShell, matching config.TerminalShell's
+	// own normalisation.
+	Shell string
+
 	// Provider is F10's stored provider default, the same value chat
 	// forwards on ITS CreateSession (chat\protocol.go's onSessionList).
 	//
@@ -58,16 +65,19 @@ type Options struct {
 	Provider *config.ProviderDefault
 }
 
-// focusTarget is which of the Editor's two panes has the keyboard.
+// focusTarget is which of the Editor's three panes has the keyboard.
 //
-// Two, not three: the Terminal is F14's. The split exists because the tree
-// needs Enter and the arrow keys, and the buffer needs every key there is,
-// so one of them has to be able to say "not me".
+// Three, now that F14 exists: the Code File buffer, the File Tree, and the
+// Terminal. The split exists because the tree needs Enter and the arrow
+// keys, the buffer needs every key there is, and the terminal needs its
+// own line editing (history, a typed line that may be stdin rather than a
+// new command) -- so each of them has to be able to say "not me".
 type focusTarget int
 
 const (
 	focusBuffer focusTarget = iota
 	focusTree
+	focusTerminal
 )
 
 // Workspace is the Editor.
@@ -86,6 +96,18 @@ type Workspace struct {
 
 	tree      *fileTree
 	tabScroll int
+
+	// term is F14's terminal pane: Tier 0's command runner and command
+	// history, plus the ExecProcess hatch's `!` prefix. Never nil after
+	// New -- see newTerminalPane's own doc for why a single long-lived
+	// pane outlives any one command it runs.
+	term *terminalPane
+	// shell is Options.Shell, read by terminalShell() in terminal.go.
+	shell string
+	// termRect is the terminal box's geometry, recorded during View for
+	// mouse.go to hit-test against -- the same contract treeRect and
+	// textArea already follow.
+	termRect layout.Rect
 
 	// projectID and projectRoot are this workspace's own resolution, not a
 	// session's -- see protocol.go. Empty means no .point\ was found, which
@@ -293,6 +315,8 @@ func New(opts Options) *Workspace {
 		provider:      opts.Provider,
 		tree:          newFileTree(),
 		pending:       make(map[string]pendingReq),
+		term:          newTerminalPane(),
+		shell:         opts.Shell,
 	}
 	if w.autosaveMode == "" {
 		w.autosaveMode = config.AutosaveAfterDelay
@@ -307,6 +331,23 @@ func New(opts Options) *Workspace {
 
 func (w *Workspace) ID() layout.WorkspaceID { return layout.WorkspaceEditor }
 
+// TerminalMode is app.TerminalModeAware, read by Root's recompute instead
+// of the hardcoded TermSmall it used before F14. See terminal.go's
+// effectiveTerminalMode for why this is not simply w.term.mode: the
+// remembered mode and what is actually DRAWN differ while focus is on the
+// code pane, and recompute wants the drawn one.
+func (w *Workspace) TerminalMode() layout.TermMode {
+	return w.effectiveTerminalMode()
+}
+
+// ProjectRoot is app.ProjectRootProvider, read by the hatch (app\hatch.go)
+// so Root can resolve a working directory without reaching into this
+// workspace's fields. Empty exactly when w.projectRoot is -- no project
+// resolved yet, or none found above the working directory.
+func (w *Workspace) ProjectRoot() string {
+	return w.projectRoot
+}
+
 // Init has nothing to do at Bubble Tea's Init time: Update watches for
 // protocol.ConnectedMsg and resolves the project from there, which also
 // covers the case where the handshake landed before this workspace was
@@ -316,7 +357,17 @@ func (w *Workspace) Init() tea.Cmd {
 	if w.client != nil && w.client.State() == protocol.StateConnected {
 		w.onConnected()
 	}
-	return nil
+	// F14: the terminal pane's event puller, started once and never
+	// stopped for the life of this workspace -- the same long-lived
+	// "pull one, re-arm" shape protocol.Client.Next() uses for the
+	// backend's own events, chosen for the same reason: a goroutine
+	// outside Bubble Tea's own loop (here, a running command's stdout/
+	// stderr readers) cannot call into the Program directly, so it feeds
+	// a channel instead and this Cmd is what drains it. Idle most of the
+	// time -- it simply blocks until a command is run -- which is fine;
+	// it is one goroutine for the workspace's whole lifetime, not one per
+	// command.
+	return w.term.next()
 }
 
 func (w *Workspace) SetTheme(th theme.Theme) {
@@ -501,6 +552,15 @@ func (w *Workspace) Update(msg tea.Msg) (app.Workspace, tea.Cmd) {
 		if w.panel != nil {
 			return w, nil
 		}
+		// F14: and the terminal's input line, which owns the keyboard the
+		// same way the two surfaces above do while it has focus. Without
+		// this the paste fell through to the branch below, which ignores
+		// it unless the BUFFER is focused -- so ctrl+v in the pane did
+		// nothing at all.
+		if w.effectiveFocus() == focusTerminal {
+			w.pasteIntoTerminal(m.Text)
+			return w, nil
+		}
 		// editPaste, not editOther: one physical paste can arrive as
 		// several PasteMsgs (see that kind's own doc), and they have to
 		// collapse back into one undo step.
@@ -509,6 +569,10 @@ func (w *Workspace) Update(msg tea.Msg) (app.Workspace, tea.Cmd) {
 			w.docs[w.active].insertText(m.Text, editPaste)
 			return w, w.autosaveAfter(probe, "paste into the buffer")
 		}
+
+	// ---- F14 ---------------------------------------------------------
+	case terminalEventMsg:
+		return w, w.onTerminalEvent(m.ev)
 
 	// ---- F13b -------------------------------------------------------
 	case heartbeatTickMsg:
@@ -606,7 +670,15 @@ func (w *Workspace) Update(msg tea.Msg) (app.Workspace, tea.Cmd) {
 // one transition that creates the condition keeps this a one-line
 // derivation.
 func (w *Workspace) effectiveFocus() focusTarget {
-	if len(w.docs) == 0 {
+	// F14 narrows the override to focusBuffer specifically. It used to
+	// fire whenever w.docs was empty regardless of what w.focus actually
+	// held, which was correct while buffer and tree were the only two
+	// targets -- an empty buffer pane really has nothing to type into --
+	// but it also meant cycling TO the terminal with no file open bounced
+	// straight back to the tree, because this function silently
+	// overrode the choice on every single read. The terminal does not
+	// need an open document to run a command in; only the buffer does.
+	if len(w.docs) == 0 && w.focus == focusBuffer {
 		return focusTree
 	}
 	return w.focus
@@ -635,6 +707,15 @@ type suspendBlob struct {
 	Open     []suspendDoc `json:"open,omitempty"`
 	Active   int          `json:"active"`
 	Expanded []string     `json:"expanded,omitempty"`
+
+	// TermMode is F14's size mode -- "the mode is remembered per
+	// workspace... and travels in Suspend()", LAYOUT.md's own words.
+	// Deliberately NOT command history, which is keyed by PROJECT and
+	// lives in state.json's own TerminalHistory map instead -- see that
+	// field's doc for why the two are kept apart. omitempty rather than a
+	// version bump: an old blob without this field decodes to "", and
+	// terminalModeFromBlob treats "" the same as TermSmall.
+	TermMode string `json:"term_mode,omitempty"`
 }
 
 type suspendDoc struct {
@@ -673,6 +754,7 @@ func (w *Workspace) Suspend() ([]byte, error) {
 		Version:  suspendVersion,
 		Active:   w.active,
 		Expanded: w.tree.expandedPaths(),
+		TermMode: string(w.term.mode),
 	}
 	for _, d := range w.docs {
 		blob.Open = append(blob.Open, suspendDoc{
@@ -703,6 +785,17 @@ func (w *Workspace) Resume(raw []byte) error {
 		return nil
 	}
 	w.tree.restoreExpanded(blob.Expanded)
+	// Applied immediately, unlike Open: the mode is pure local UI state
+	// that needs no project, no tree and no connection to make sense of,
+	// so it does not have to wait for replayResume. An unrecognised or
+	// absent value falls back to TermSmall through the same normalisation
+	// path layout.TermMode's own callers use everywhere else.
+	switch layout.TermMode(blob.TermMode) {
+	case layout.TermSmall, layout.TermOverlay, layout.TermFull:
+		w.term.mode = layout.TermMode(blob.TermMode)
+	default:
+		w.term.mode = layout.TermSmall
+	}
 	w.resume = &blob
 	return nil
 }

@@ -198,12 +198,20 @@ func run() error {
 	// Update returns app.Workspace, so editor imports app and app cannot
 	// import editor back.
 	//
-	// It still takes no State, and there is still no third writer of
-	// state.json. F13b needs the holder key out of that file, but it
-	// RECEIVES the composed value rather than reading or writing the file
-	// itself: main.go generates and persists it above, which keeps the
-	// two-writer rule config\state.go's saveStateTo arbitrates exactly as
-	// it was.
+	// It still takes no State. F13b needs the holder key out of that
+	// file, but it RECEIVES the composed value rather than reading or
+	// writing the file itself: main.go generates and persists it above,
+	// which keeps the two-writer rule config\state.go's saveStateTo
+	// arbitrates exactly as it was for Holder.
+	//
+	// F14 is the exception, and a deliberate third writer rather than an
+	// accidental one: editor.Workspace calls config.SaveTerminalHistory
+	// directly (terminal.go), because command history is keyed per
+	// PROJECT -- something only this workspace resolves -- and routing
+	// every history write through main.go the way Holder is routed would
+	// mean main.go learning the project binding just to pass it back.
+	// saveStateTo's own keep-if-zero clause was extended for exactly this,
+	// the same way it already was for Holder.
 	newEditor := func() app.Workspace {
 		return editor.New(editor.Options{
 			Theme:  th,
@@ -216,21 +224,54 @@ func run() error {
 			// already use.
 			Autosave:      cfg.AutosaveMode(),
 			AutosaveDelay: cfg.AutosaveDelay(),
+			// F14's own value-not-Config key, same shape as Autosave.
+			Shell: cfg.TerminalShell(),
 			// F15: the stored provider default, so the session the
 			// Editor creates for its own agent invocations resolves the
 			// provider the user actually picked rather than config.toml's
 			// -- which in Demo mode is a different provider entirely. A
 			// VALUE off the same State, read-only; this does not make the
-			// editor a third writer of state.json, and the two fields
-			// Root owns are not involved.
+			// editor a SECOND writer of state.json (F14's own writer is
+			// the first; see above), and the two fields Root owns are
+			// not involved.
 			Provider: state.Provider,
 		})
 	}
 
+	// Repaired BEFORE app.New (which copies env) and before
+	// tea.NewProgram (which saves the console mode it will later try to
+	// restore) -- see consolemode.go for what goes wrong otherwise. The
+	// note rides on env.Notes so the diagnostics screen says it happened,
+	// rather than it being a silent fix nobody can see.
+	if note, err := sanitizeConsoleInput(); err != nil {
+		// Not fatal: the only thing lost is the hatch, and refusing to
+		// start over it would be worse than starting without it.
+		log.Warn("could not repair the console input mode", "err", err)
+		env.Notes = append(env.Notes, "console input mode could not be repaired: "+err.Error())
+	} else if note != "" {
+		log.Info("console: " + note)
+		env.Notes = append(env.Notes, note)
+	}
+
+	// Declared here so the closure below can reach the Program that is
+	// created further down: app.New needs the callback, the Program needs
+	// the root, and only one of those orders is possible. The closure is
+	// never called before the Program exists (it fires from a hatch
+	// failure, which needs a running Program to have happened at all).
+	var program *tea.Program
+
 	root, err := app.New(app.Options{
-		Theme:        th,
-		Client:       client,
-		Log:          log,
+		Theme:  th,
+		Client: client,
+		Log:    log,
+		// F14: the only way back from a tea.ExecProcess whose
+		// ReleaseTerminal failed -- see app.Options.RestoreTerminal.
+		RestoreTerminal: func() error {
+			if program == nil {
+				return nil
+			}
+			return program.RestoreTerminal()
+		},
 		State:        state,
 		Config:       cfg,
 		Env:          env,
@@ -284,7 +325,7 @@ func run() error {
 	if mouseEnabled {
 		programOpts = append(programOpts, tea.WithMouseCellMotion())
 	}
-	program := tea.NewProgram(root, programOpts...)
+	program = tea.NewProgram(root, programOpts...)
 
 	// Restore the terminal on the way out, whatever the reason.
 	//

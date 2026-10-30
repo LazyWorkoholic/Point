@@ -88,6 +88,15 @@ type OverlayProvider interface {
 	RightPaneOverlay() Overlay
 }
 
+// TerminalModeAware is implemented by a workspace with F14's terminal pane
+// (today only the Editor). recompute reads this instead of hardcoding
+// layout.TermSmall, the same narrow-interface pattern ThemeAware and
+// OverlayProvider already use, so Compute's three modes reflect what the
+// workspace actually remembers rather than a placeholder F1 left behind.
+type TerminalModeAware interface {
+	TerminalMode() layout.TermMode
+}
+
 // RightPaneFallback marks an Overlay as OverlayProvider's narrow-width
 // stand-in for the real pane. The root uses it for two things a plain
 // Overlay cannot express on its own:

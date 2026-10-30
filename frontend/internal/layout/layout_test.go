@@ -325,8 +325,15 @@ func TestEditorTerminalModes(t *testing.T) {
 	overlay := Compute(120, 40, editor(TermOverlay))
 	full := Compute(120, 40, editor(TermFull))
 
-	if small.Secondary.H != MinBoxHeight {
-		t.Errorf("small terminal = %d rows, want %d", small.Secondary.H, MinBoxHeight)
+	// F14: TermSmallHeight, not MinBoxHeight -- a 3-row box has the input
+	// prompt and no room for a single line of output. See that constant.
+	if small.Secondary.H != TermSmallHeight {
+		t.Errorf("small terminal = %d rows, want %d", small.Secondary.H, TermSmallHeight)
+	}
+	// The whole reason the constant moved: enough content rows for output
+	// AND the prompt pinned under it.
+	if content := small.Secondary.H - 2; content < 3 {
+		t.Errorf("small terminal has %d content rows, want at least 3 (output + prompt)", content)
 	}
 	if overlay.Secondary.H <= small.Secondary.H {
 		t.Errorf("overlay (%d) should be taller than small (%d)", overlay.Secondary.H, small.Secondary.H)

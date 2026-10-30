@@ -51,7 +51,7 @@ SESSION  EPISODE                                                     MODEL      
 20       B15 lifecycle + crash recovery                              Opus 5                                  done
 20b      B40 durable event log                                       Opus medium                             done
 21       B14 usage + limits                                          Sonnet medium                           done
-22       F14 editor terminal                                         Sonnet high                             not started
+22       F14 editor terminal                                         Sonnet high                             done
 22b      F20 live stale detection                                    Opus medium                             not started
 23       B13 memory system                                           Opus high                               not started
 23b      F9c result card attach + save                               Sonnet high                             not started
@@ -59,6 +59,7 @@ SESSION  EPISODE                                                     MODEL      
 25       F16 polish                                                  Sonnet medium                           not started
 26       F17 web preview                                             Sonnet high                             not started
 27       B17 hardening                                               Sonnet high                             not started
+27b      F14b terminal mouse scrollback + selection                  Sonnet high                             not started
 28       F21 multi-line fill prompt                                  Sonnet high                             not started
 29       F22 explain as conversation                                 Opus medium                             not started
 30       F23 fill on a blank line                                    Opus high                               not started

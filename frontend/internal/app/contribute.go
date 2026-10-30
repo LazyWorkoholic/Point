@@ -147,6 +147,52 @@ type LockHolder interface {
 	ReleaseLocks()
 }
 
+// WorkspaceAddressed is implemented by a MESSAGE that belongs to one
+// specific workspace whether or not that workspace is active when it
+// arrives.
+//
+// # Why this exists
+//
+// Root's fall-through hands an unrecognised message to r.current() and
+// nowhere else. That is right for everything that existed before F14,
+// because every such message was produced by a key or a mouse event in
+// the workspace the user is looking at, so "the active one" and "the one
+// that produced it" were the same workspace.
+//
+// F14 broke that assumption and the failure was total rather than
+// cosmetic: the terminal pane's output arrives on a long-lived pull loop
+// (editor\terminal.go's next), where each delivered event is what re-arms
+// the next read. Switch to Chat while a command is running and the next
+// event goes to Chat, which ignores it -- so the event is lost AND the
+// loop is never re-armed, which kills the pane's I/O for the rest of the
+// session: no more output ever, no exit event, and a pane stuck reading
+// "running" forever with nothing able to clear it.
+//
+// A message that says who it belongs to can be delivered correctly. The
+// return trip then reuses F15's existing machinery unchanged --
+// backgroundCmd plus the workspace's own AllowBackgroundMsg allow-list --
+// so a loop that keeps running while backgrounded still cannot take the
+// status line.
+type WorkspaceAddressed interface {
+	TargetWorkspace() WorkspaceID
+}
+
+// ProcessStopper is implemented by a workspace that may be running a LOCAL
+// child process -- F14's Tier 0 runner, the only case. Unlike LockHolder's
+// backend row, nothing on the backend ever cleans this up: it is a plain
+// OS process this (the frontend's own) process started, and the OS does
+// not kill a child just because the parent stopped listening to it.
+// Without this, quitting Point (or merely unloading the Editor) while a
+// command is still running would orphan it -- `npm run dev` left watching
+// files forever, say -- which a user has no way to notice from inside
+// Point once the pane that was running it is gone.
+//
+// Called from the same two places LockHolder is, for the same reason:
+// unloadWorkspace, and doQuit before tea.Quit.
+type ProcessStopper interface {
+	StopRunningProcess()
+}
+
 // BackgroundReplies is implemented by a workspace whose backend replies
 // must still reach it while it is LOADED BUT NOT ACTIVE.
 //

@@ -257,18 +257,22 @@ func TestCodeFileBoxFillsItsRectExactly(t *testing.T) {
 // B8: the Terminal rect Compute always reserves for the Editor is drawn as
 // a titled box naming F14, not left blank -- an empty bordered box with no
 // explanation reads as a bug.
-func TestTerminalRectIsDrawnAndNamesF14(t *testing.T) {
+// F14 fills the Secondary rect for real now -- this used to assert the
+// F13-era placeholder's own "the terminal arrives in F14" text, which no
+// longer exists once the episode it named is the one running.
+func TestTerminalRectIsDrawnAndShowsThePrompt(t *testing.T) {
 	ws := testWorkspace(t, "x", 120, 30)
 	l := ws.lastLayout
 	if l.Secondary.IsZero() {
 		t.Fatal("Compute gave the Editor no Secondary rect")
 	}
 	out := ws.terminalBox(l.Secondary)
-	if !strings.Contains(stripANSI(out), "Terminal") {
+	plain := stripANSI(out)
+	if !strings.Contains(plain, "Terminal") {
 		t.Error("the box has no title")
 	}
-	if !strings.Contains(stripANSI(out), "F14") {
-		t.Error("the box does not say which episode fills it")
+	if !strings.Contains(plain, "$") {
+		t.Error("the box has no input prompt")
 	}
 }
 

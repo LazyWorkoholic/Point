@@ -275,6 +275,55 @@ func (w *Workspace) Streaming() bool {
 	return false
 }
 
+// WantsBackgroundReplies is app.BackgroundReplies, and Chat not having
+// implemented it was a real, reported fault rather than an omission with
+// no consequence.
+//
+// # What went wrong
+//
+// Root routes protocol.EnvelopeMsg to r.current() and nowhere else, and a
+// workspace without this interface is skipped by deliverBackgroundReply
+// entirely. So while Chat was not the active workspace it received NO
+// envelopes -- including the terminal one for a task it had started. A
+// `@research` task that finished while the user was in the Editor never
+// reached finish(), so its slot kept `statusRunning`, and
+// renderTaskEntry's `elapsed(time.Since(e.startedAt))` went on counting
+// from a start time whose task was long over: reported as a slot climbing
+// to 1:02 for a task the tray correctly showed finishing in 15s, and
+// correcting only after a workspace switch -- which is a REHYDRATE from
+// the database (reload.go), not the event arriving late.
+//
+// # Why it only surfaced now
+//
+// Spending minutes in another workspace while a chat task runs used to be
+// unusual. F14 makes it the normal thing to do -- its own Done-when #5 is
+// "a background task started before the hatch is still running after it",
+// i.e. leave @research running and go use the terminal. The routing was
+// always this way; F14 is what walks into it.
+//
+// This is the SAME class as the terminal pane's dead pull loop, fixed the
+// same episode (app\contribute.go's WorkspaceAddressed): a completion
+// delivered only to whatever is on screen is a completion the owner can
+// miss. Chat needs the already-designed mechanism, not a new one.
+//
+// # Scoped to work actually in flight
+//
+// Asked per envelope, so answering false while idle costs one interface
+// assertion. It answers true only while a reply or a task slot is still
+// open -- exactly the state whose terminal event cannot be missed. The
+// commands it produces are still default-DENIED by
+// Root.backgroundCmd (Chat implements no AllowBackgroundMsg), so nothing
+// here can take the status line of whatever the user is looking at; what
+// crosses over is the state change, which is the whole point.
+func (w *Workspace) WantsBackgroundReplies() bool {
+	for _, e := range w.live {
+		if !e.status.terminal() {
+			return true
+		}
+	}
+	return w.queued != nil
+}
+
 // HasPending implements app.QueueAware.
 func (w *Workspace) HasPending() bool { return w.queued != nil }
 

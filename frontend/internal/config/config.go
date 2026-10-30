@@ -141,6 +141,46 @@ const (
 	AutosaveOnFocusChange = "on_focus_change"
 )
 
+// Terminal is F14's `[terminal]` table.
+//
+//	[terminal]
+//	shell = "powershell" | "cmd"
+//	external = false
+type Terminal struct {
+	// Shell picks what Tier 0 and the ExecProcess hatch both run commands
+	// through. F14's own Build section asks for this explicitly: Windows
+	// has no POSIX shell to assume, so the choice is config, not a
+	// constant.
+	Shell string `toml:"shell"`
+
+	// External is `terminal.external = true`: the hatch opens the user's
+	// own Windows Terminal window (`wt -d <dir>`) instead of suspending
+	// Point via tea.ExecProcess. Off by default -- ExecProcess needs no
+	// per-platform emulator lookup and cannot fail to find one, which `wt`
+	// can if it is not installed.
+	External bool `toml:"external"`
+}
+
+// The two shells F14 knows how to wrap a command in.
+const (
+	ShellPowerShell = "powershell"
+	ShellCmd        = "cmd"
+)
+
+// TerminalShell is `[terminal] shell`, normalised. An absent or
+// unrecognised value is PowerShell, the same "typo leaves the default in
+// place" rule AutosaveMode uses, for the same reason: a misspelt key
+// should not silently change which shell every command in the pane runs
+// through.
+func (c Config) TerminalShell() string {
+	switch c.Terminal.Shell {
+	case ShellPowerShell, ShellCmd:
+		return c.Terminal.Shell
+	default:
+		return ShellPowerShell
+	}
+}
+
 // DefaultAutosaveDelayMs is `[editor] autosave_delay_ms` when absent.
 const DefaultAutosaveDelayMs = 1000
 
@@ -220,6 +260,11 @@ type Config struct {
 	// Settings has no Workspace tab and never writes this file (F10b's
 	// same rule), so it is hand-edited or absent.
 	Workspace map[string]any `toml:"workspace"`
+
+	// Terminal is F14's `[terminal]` table — another frontend-only key
+	// like `[workspace]` and `[editor]`: the shell choice and the
+	// external-window toggle are both read only by the Go side.
+	Terminal Terminal `toml:"terminal"`
 }
 
 // DefaultIdleUnloadMinutes is `[workspace] idle_unload_minutes` when the
@@ -283,6 +328,7 @@ func Defaults() Config {
 		Editor: Editor{
 			Autosave: AutosaveAfterDelay, AutosaveDelayMs: DefaultAutosaveDelayMs,
 		},
+		Terminal: Terminal{Shell: ShellPowerShell},
 	}
 }
 
@@ -342,6 +388,22 @@ func loadFrom(path string) (Config, error) {
 	// already distinguishes them -- an absent key is simply not in it --
 	// and IdleUnload reads it that way.
 	cfg.Workspace = parsed.Workspace
+
+	// Terminal is carried wholesale for a narrower reason than Workspace's:
+	// both its fields have a meaningful zero value (Shell's empty string
+	// means "default", External's false means "default") that an
+	// empty-means-absent check would also get right field-by-field, but a
+	// struct of two already-right-by-default fields has nothing the UI
+	// dance protects against, so there is no reason to write it twice.
+	//
+	// F14 found, while adding this, that `[editor]` next to it has NO
+	// equivalent line -- parsed.Editor is decoded and then silently
+	// discarded, so a hand-edited `autosave` key in config.toml has never
+	// taken effect despite Editor's own doc comment claiming it is read.
+	// Pre-existing, untested (no config_test.go case exercises it), and
+	// out of scope for this episode to fix -- recorded here so it is not
+	// mistaken for this line's own precedent.
+	cfg.Terminal = parsed.Terminal
 	return cfg, nil
 }
 

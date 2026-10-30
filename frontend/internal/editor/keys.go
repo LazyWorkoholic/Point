@@ -36,12 +36,22 @@ import (
 func (w *Workspace) handleKey(k tea.KeyMsg) tea.Cmd {
 	key := k.String()
 
-	// COPY, always, before anything else can claim the key.
+	// COPY, always, before anything else can claim the key -- EXCEPT the
+	// one new case F14 adds: the terminal pane focused with a command
+	// actually running, where the episode's own spec is explicit that
+	// ctrl+c "kills the running process, NOT the app" (and not a copy,
+	// here). Checked first and narrowly -- w.term.running, not merely
+	// "the terminal is focused" -- so ctrl+c with nothing running still
+	// copies, unchanged from every other state.
 	//
-	// Above the modal surfaces on purpose: ctrl+c means copy in this
-	// workspace whatever is on screen, and a prompt or panel that took it
-	// as a cancel would be the scoped-ctrl+c design copy.go rejects.
+	// Above the modal surfaces on purpose: ctrl+c means copy (or, now,
+	// kill) in this workspace whatever is on screen, and a prompt or
+	// panel that took it as a cancel would be the scoped-ctrl+c design
+	// copy.go rejects.
 	if key == "ctrl+c" {
+		if w.effectiveFocus() == focusTerminal && w.term.running {
+			return w.killRunning()
+		}
 		return w.copySelection()
 	}
 
@@ -90,12 +100,45 @@ func (w *Workspace) handleKey(k tea.KeyMsg) tea.Cmd {
 		// any sequence, could not be given a failing test, and was a
 		// divergence from the field for no gain. Noted so it is not
 		// reintroduced as an obvious tidy-up.
+		//
+		// Left a plain buffer<->tree toggle, UNCHANGED by F14: making
+		// this a 3-way cycle (buffer -> tree -> terminal) was tried
+		// first and reverted -- it broke four tests across three files
+		// that pin "ctrl+o from the tree returns to the buffer" as the
+		// contract (focus_test.go, keys_test.go, openfocus_test.go), and
+		// nothing in the episode doc asks for ctrl+o specifically. f9
+		// below is a dedicated key instead, leaving this exactly as
+		// F13a left it.
 		if w.focus == focusTree {
 			w.focus = focusBuffer
 		} else {
 			w.focus = focusTree
 		}
 		return nil
+	case "f9":
+		// F14's own focus key, kept OUT of ctrl+o's cycle for the reason
+		// given above. A toggle, the same shape as ctrl+o's: terminal ->
+		// buffer, anything else -> terminal. focusTerminalPane, not a
+		// bare assignment, so entering the pane clears autoExpanded the
+		// same way clicking it does (mouse.go) -- "returning restores
+		// the remembered mode" applies to a keyboard return just as much
+		// as a click.
+		if w.focus == focusTerminal {
+			w.focus = focusBuffer
+		} else {
+			w.focusTerminalPane()
+		}
+		return nil
+	case "f8":
+		// F14's mode cycle: small -> overlay -> full -> small. Editor-
+		// wide rather than gated on the terminal having focus -- the
+		// episode doc says "one key cycles", not "while focused there" --
+		// and f8 keeps the function-key block contiguous: f5 re-index,
+		// f6 take over the lock, f7 close the tab, f8 cycle the terminal.
+		// Free in the chord registry (ctrl+c, ctrl+e, ctrl+l, ctrl+p,
+		// ctrl+q, ctrl+r, esc, f1 and tab), so it needs no KeyCapturer
+		// claim.
+		return w.cycleTerminalMode()
 	case "ctrl+n":
 		return w.cycleTab(+1)
 	case "ctrl+b":
@@ -174,8 +217,11 @@ func (w *Workspace) handleKey(k tea.KeyMsg) tea.Cmd {
 		return w.say("re-indexing the project")
 	}
 
-	if w.effectiveFocus() == focusTree {
+	switch w.effectiveFocus() {
+	case focusTree:
 		return w.treeKey(key)
+	case focusTerminal:
+		return w.terminalKey(k, key)
 	}
 	return w.bufferKey(k, key)
 }

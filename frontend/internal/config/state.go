@@ -139,6 +139,31 @@ type State struct {
 	// every other field here is chat.Workspace's. See saveStateTo for how
 	// two owners share one file without erasing each other.
 	WorkspaceState map[string]json.RawMessage `json:"workspace_state,omitempty"`
+
+	// TerminalHistory is F14's command history, and it is keyed
+	// DIFFERENTLY from WorkspaceState on purpose.
+	//
+	// The episode doc states two separately-scoped requirements, not one:
+	// the terminal pane's SIZE MODE is "remembered per workspace" (that one
+	// lives in editor's own suspendBlob, inside WorkspaceState, because it
+	// is explicitly specified to "travel in Suspend()"), while command
+	// HISTORY is "persisted per project". Those are different axes. One
+	// editor workspace's `projectRoot` can rebind to a DIFFERENT project
+	// during its own lifetime (editor\protocol.go's onProject, resolved
+	// from the active session) -- F12 does not give one project one fixed
+	// workspace id -- so keying history by workspace id would silently
+	// carry one project's commands into another's pane the moment the
+	// binding changes. Keying it by the key terminalHistoryKey computes
+	// (the resolved project id, or the resolved directory when no project
+	// is found) makes the pane switch to the right bucket the moment
+	// onProject reassigns it, with no project ever seeing another's lines.
+	//
+	// Owned and written by editor.Workspace alone, through
+	// SaveTerminalHistory -- a third writer alongside chat.Workspace's
+	// whole-struct snapshot and app.Root's LastWorkspace/WorkspaceState/
+	// Holder, arbitrated by saveStateTo's keep-if-zero clause the same way
+	// Holder is.
+	TerminalHistory map[string][]string `json:"terminal_history,omitempty"`
 }
 
 // ProviderDefault is the active provider+model Point's own UI will pass on
@@ -230,6 +255,31 @@ func SaveWorkspaceState(lastWorkspace string, blobs map[string]json.RawMessage) 
 	return saveWorkspaceStateTo(StatePath(), lastWorkspace, blobs)
 }
 
+// SaveTerminalHistory writes ONE project's bucket, keeping the rest of the
+// map -- and the rest of the file -- untouched. F14's own writer, parallel
+// to SaveWorkspaceState: re-read, mutate the one thing this call owns,
+// write back, exactly so a save racing chat's or Root's own write can
+// never carry a stale copy of either.
+func SaveTerminalHistory(key string, lines []string) error {
+	return saveTerminalHistoryTo(StatePath(), key, lines)
+}
+
+func saveTerminalHistoryTo(path, key string, lines []string) error {
+	st, err := loadStateFrom(path)
+	if err != nil {
+		// Advisory, same contract as saveWorkspaceStateTo's own: the State
+		// returned is always usable, so the write proceeds rather than
+		// losing this project's history because an unrelated field on disk
+		// went bad.
+		st = DefaultState()
+	}
+	if st.TerminalHistory == nil {
+		st.TerminalHistory = map[string][]string{}
+	}
+	st.TerminalHistory[key] = lines
+	return saveStateTo(path, st)
+}
+
 func saveWorkspaceStateTo(path, lastWorkspace string, blobs map[string]json.RawMessage) error {
 	st, err := loadStateFrom(path)
 	if err != nil {
@@ -288,7 +338,12 @@ func saveWorkspaceStateTo(path, lastWorkspace string, blobs map[string]json.RawM
 func saveStateTo(path string, st State) error {
 	st.Version = StateVersion
 
-	if st.LastWorkspace == "" || st.WorkspaceState == nil || st.Holder == "" {
+	// F14 adds TerminalHistory to this clause for the same reason Holder
+	// was added to it: chat.Workspace's whole-struct snapshot never sets
+	// it (chat never reads or writes terminal history), so without this,
+	// the very next keystroke's draft save would serialise a State whose
+	// TerminalHistory is nil over whatever SaveTerminalHistory last wrote.
+	if st.LastWorkspace == "" || st.WorkspaceState == nil || st.Holder == "" || st.TerminalHistory == nil {
 		if cur, err := loadStateFrom(path); err == nil {
 			if st.LastWorkspace == "" {
 				st.LastWorkspace = cur.LastWorkspace
@@ -298,6 +353,9 @@ func saveStateTo(path string, st State) error {
 			}
 			if st.Holder == "" {
 				st.Holder = cur.Holder
+			}
+			if st.TerminalHistory == nil {
+				st.TerminalHistory = cur.TerminalHistory
 			}
 		}
 	}

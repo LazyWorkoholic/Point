@@ -461,6 +461,23 @@ func registerActions() *actions.Registry[*Root] {
 		},
 	})
 
+	r.Register(actions.Action[*Root]{
+		ID:          "editor.hatch",
+		Name:        "Open Shell",
+		Description: "Suspend Point and drop to a real shell in the project root -- for anything Tier 0 can't run",
+		Category:    "Editor",
+		Leader:      "h",
+		// Unconditional, unlike editor.explain/editor.fill just above:
+		// F14's own Build section asks for this reachable "from any
+		// workspace, including Chat", not greyed out there. hatchDir
+		// (hatch.go) already falls back to the OS working directory with
+		// no project resolved, which is the only thing being in Chat (or
+		// in an Editor that never found a `.point\`) could mean here.
+		Run: func(root *Root) tea.Cmd {
+			return root.openHatch("")
+		},
+	})
+
 	return r
 }
 
@@ -488,6 +505,12 @@ func doQuit(root *Root) {
 	for _, ws := range root.workspaces {
 		if lh, ok := ws.(LockHolder); ok {
 			lh.ReleaseLocks()
+		}
+		// F14: same reasoning as unloadWorkspace's own call -- a quit
+		// skips unloadWorkspace entirely, so without this a Tier 0 child
+		// still running when the user quits survives Point's own exit.
+		if ps, ok := ws.(ProcessStopper); ok {
+			ps.StopRunningProcess()
 		}
 	}
 	// F12's suspended state has exactly the same problem for exactly the

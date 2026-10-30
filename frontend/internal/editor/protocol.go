@@ -411,10 +411,16 @@ func (w *Workspace) onProject(env protocol.Envelope) {
 		// file that opens is read-only.
 		w.projectID, w.projectRoot = "", ""
 		w.tree.note = "no .point\\ above the working directory"
+		w.reloadTerminalHistory()
 		return
 	}
 	w.projectID, w.projectRoot = p.Project.ID, p.Project.RootPath
 	w.refreshTree(false)
+	// F14: history is keyed per PROJECT, and this is the one place the
+	// Editor's project binding can CHANGE during its own lifetime -- see
+	// config\state.go's TerminalHistory doc. reloadTerminalHistory is a
+	// no-op when the key has not actually changed.
+	w.reloadTerminalHistory()
 }
 
 func (w *Workspace) refreshTree(force bool) {

@@ -60,6 +60,14 @@ func (w *Workspace) mousePress(m tea.MouseMsg) tea.Cmd {
 		return w.clickTree(m.X, m.Y)
 	}
 
+	if inRect(w.termRect, m.X, m.Y) {
+		// Focus only -- F14's Build section asks for a key and the hatch
+		// to reach the pane, not click-to-position-the-caret-in-the-
+		// input-line precision, so that is all this does.
+		w.focusTerminalPane()
+		return nil
+	}
+
 	if inRect(w.textArea, m.X, m.Y) && len(w.docs) > 0 {
 		w.focus = focusBuffer
 		d := w.docs[w.active]

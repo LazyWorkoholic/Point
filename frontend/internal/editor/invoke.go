@@ -752,7 +752,7 @@ func (w *Workspace) settleWait() time.Duration {
 // AllowBackgroundMsg is app.BackgroundCmdFilter: THE allow-list for what
 // this workspace's commands may do while it is loaded but not active.
 //
-// Default-deny. Two entries, and the reason each one is here:
+// Default-deny. Three entries, and the reason each one is here:
 //
 //  1. app.OpenWorkspaceOverlayMsg -> DeliverToRoot. Opening an overlay is
 //     Root's own business and Root handles this type itself. In practice
@@ -772,6 +772,18 @@ func (w *Workspace) settleWait() time.Duration {
 //     DeliverToWorkspace means and what Root's ordinary fall-through
 //     (r.current().Update) would have got wrong.
 //
+//  3. terminalEventMsg -> DeliverToWorkspace (F14). The same shape as (2)
+//     but with a harsher failure, because this message is not a one-shot
+//     timer -- it is the link in a LOOP. Each delivered terminal event is
+//     what re-arms the read for the next one (terminal.go's next), so
+//     dropping one while backgrounded does not lose one chunk of output,
+//     it ends the pane's I/O permanently: no further output ever, no exit
+//     event, and `running` stuck true for the rest of the session. It
+//     routes back here rather than to Root because only this workspace
+//     owns the buffer the bytes belong in. Nothing it produces takes the
+//     status line -- onTerminalEvent writes no say() -- so the rule (2)
+//     is scoped by still holds.
+//
 // EVERYTHING ELSE IS DROPPED, deliberately and including:
 //
 //   - app.WorkspaceStatusMsg (every say() in this package). It carries no
@@ -789,6 +801,8 @@ func (w *Workspace) AllowBackgroundMsg(msg tea.Msg) app.BackgroundDelivery {
 	case app.OpenWorkspaceOverlayMsg:
 		return app.DeliverToRoot
 	case proposalSettleMsg:
+		return app.DeliverToWorkspace
+	case terminalEventMsg:
 		return app.DeliverToWorkspace
 	}
 	return app.DropWhileBackgrounded
